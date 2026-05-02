@@ -2,94 +2,75 @@
 
 [![CI](https://github.com/sublime247/mobile-money/actions/workflows/ci.yml/badge.svg)](https://github.com/sublime247/mobile-money/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/sublime247/mobile-money/branch/main/graph/badge.svg)](https://codecov.io/gh/sublime247/mobile-money)
-[![Coverage Status](https://codecov.io/gh/sublime247/mobile-money/coverage.svg?branch=main)](https://codecov.io/gh/sublime247/mobile-money?branch=main)
-[![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat)](https://github.com/sublime247/mobile-money/issues)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A production-ready backend service that bridges African mobile money providers (MTN, Airtel, Orange) with the Stellar blockchain network, enabling seamless cross-border payments and remittances.
+A production-ready backend service bridging African mobile money providers (MTN, Airtel, Orange) with the Stellar blockchain network for seamless cross-border payments and remittances.
 
-## 🌟 What We're Building
+## 🌟 Overview
 
-This platform solves a critical problem in African financial infrastructure: **connecting traditional mobile money systems with blockchain technology**. We enable:
+This platform connects traditional mobile money systems with blockchain technology, enabling:
 
 - **Cross-border remittances** with lower fees than traditional services
 - **Instant settlements** using Stellar's fast blockchain
-- **Financial inclusion** by bridging mobile money (used by 500M+ Africans) with global crypto markets
+- **Financial inclusion** by bridging mobile money (500M+ users in Africa) with global crypto markets
 - **Compliance-first** approach with built-in KYC, AML monitoring, and transaction limits
-- **Developer-friendly** APIs (REST + GraphQL) for easy integration
+- **Developer-friendly** REST + GraphQL APIs
 
-### Real-World Use Cases
+### Use Cases
 
-1. **Remittances**: Send money from Europe/US to Africa instantly via Stellar, recipient withdraws to mobile money
-2. **Cross-border payments**: Pay suppliers in different African countries without expensive wire transfers
-3. **Savings in stable assets**: Convert volatile local currency to USDC/XLM via mobile money
-4. **Merchant payments**: Accept crypto payments, settle in local mobile money
-5. **DeFi access**: Bridge between mobile money and Stellar DeFi protocols
+- **Remittances**: Send money globally via Stellar, recipient withdraws to mobile money
+- **Cross-border payments**: Pay suppliers across African countries without expensive wire transfers
+- **Stable savings**: Convert volatile local currency to USDC/XLM via mobile money
+- **Merchant payments**: Accept crypto, settle in local mobile money
+- **DeFi access**: Bridge between mobile money and Stellar DeFi protocols
 
 ## 🚀 Key Features
 
-### Core Functionality
-- **Mobile Money Integration**: MTN, Airtel, Orange Money support
-- **Stellar Blockchain**: Native XLM and custom asset support (USDC, anchored assets)
-- **Dual API**: RESTful API + GraphQL for flexible integration
-- **Real-time Processing**: Background job queues with BullMQ and Redis
-- **WebSocket Support**: Live transaction updates and notifications
+### Core
+- Mobile Money Integration (MTN, Airtel, Orange)
+- Stellar blockchain support (XLM, USDC, custom assets)
+- Dual API (REST + GraphQL)
+- Real-time processing with BullMQ/Redis
+- WebSocket support for live updates
 
 ### Security & Compliance
-- **KYC/AML**: Multi-tier verification with transaction limits
-- **2FA**: TOTP-based two-factor authentication
-- **RBAC**: Role-based access control with Casbin
-- **Rate Limiting**: Intelligent rate limiting and DDoS protection
-- **Audit Logging**: Comprehensive audit trails for compliance
-- **Session Security**: IP tracking, device fingerprinting, anomaly detection
+- Multi-tier KYC/AML with transaction limits
+- 2FA (TOTP), RBAC (Casbin)
+- Rate limiting, audit logging
+- Session security with device fingerprinting
 
-### Financial Features
-- **Dynamic Fees**: VIP tiers with volume-based discounts
-- **Transaction Limits**: Provider-specific and KYC-based limits
-- **Vault System**: Secure fund storage and management
-- **Accounting Integration**: QuickBooks and Xero sync
-- **Dispute Management**: Full dispute workflow and resolution
-- **Fee Bumping**: Automatic Stellar transaction fee adjustment
+### Financial
+- Dynamic fees with VIP tiers
+- Transaction limits (provider-specific, KYC-based)
+- Vault system for secure fund storage
+- Accounting integration (QuickBooks, Xero)
+- Dispute management workflow
 
-### Developer Experience
-- **TypeScript**: Full type safety and IntelliSense
-- **Docker Support**: Development and production containers
-- **Database Migrations**: Automated schema management
-- **Comprehensive Testing**: Unit, integration, E2E, and load tests
-- **CI/CD**: GitHub Actions with automated testing and deployment
-- **API Documentation**: OpenAPI/Swagger specs
-- **Webhook Support**: Zapier/Make.com integration
-
-### Stellar Protocol Support (SEP)
-- **SEP-10**: Stellar Web Authentication
-- **SEP-12**: KYC API
-- **SEP-24**: Hosted Deposit and Withdrawal
-- **SEP-31**: Cross-Border Payments
-- **SEP-38**: Quotes and Price Streams
+### Stellar Protocol Support
+- SEP-10 (Web Authentication)
+- SEP-12 (KYC API)
+- SEP-24 (Hosted Deposit/Withdrawal)
+- SEP-31 (Cross-Border Payments)
+- SEP-38 (Quotes and Price Streams)
 
 ## 📋 Prerequisites
 
-- **Node.js** 20+ (LTS recommended)
-- **PostgreSQL** 16+
-- **Redis** 7+
-- **Docker** (optional, for containerized development)
+- Node.js 20+ (LTS)
+- PostgreSQL 16+
+- Redis 7+
+- Docker (optional)
 
-## 🛠️ Installation
+## 🛠️ Quick Start
 
-### 1. Clone the Repository
+### 1. Clone & Install
 
 ```bash
 git clone https://github.com/sublime247/mobile-money.git
 cd mobile-money
-```
-
-### 2. Install Dependencies
-
-```bash
 npm install
 ```
 
-### 3. Environment Configuration
+### 2. Configure Environment
 
 ```bash
 cp .env.example .env
@@ -104,14 +85,13 @@ DATABASE_URL=postgresql://user:password@localhost:5432/mobilemoney
 # Redis
 REDIS_URL=redis://localhost:6379
 
-# Stellar Network
+# Stellar
 STELLAR_NETWORK=testnet  # or 'mainnet'
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
-STELLAR_ISSUER_SECRET=S...  # Your Stellar secret key
+STELLAR_ISSUER_SECRET=S...
 
 # Mobile Money Providers
 MTN_API_KEY=your_mtn_api_key
-MTN_API_SECRET=your_mtn_secret
 AIRTEL_API_KEY=your_airtel_key
 ORANGE_API_KEY=your_orange_key
 
@@ -119,275 +99,112 @@ ORANGE_API_KEY=your_orange_key
 JWT_SECRET=your_jwt_secret_min_32_chars
 SESSION_SECRET=your_session_secret
 
-# Optional: Email notifications
+# Optional: Notifications
 SENDGRID_API_KEY=your_sendgrid_key
-FROM_EMAIL=noreply@yourdomain.com
-
-# Optional: SMS notifications
 TWILIO_ACCOUNT_SID=your_twilio_sid
-TWILIO_AUTH_TOKEN=your_twilio_token
-TWILIO_PHONE_NUMBER=+1234567890
 ```
 
-### 4. Database Setup
+### 3. Setup Database
 
 ```bash
-# Run migrations
 npm run migrate:up
-
-# Seed development data (optional)
-NODE_ENV=development npm run seed
+npm run seed  # Optional: development data
 ```
 
-## 🏃 Running the Application
+### 4. Run
 
-### Development Mode
-
+**Development:**
 ```bash
 npm run dev
 ```
 
-Server starts at `http://localhost:3000`
-
-### Production Mode
-
+**Production:**
 ```bash
 npm run build
 npm start
 ```
 
-### Docker Development
-
+**Docker:**
 ```bash
-# Start all services (app, PostgreSQL, Redis)
 npm run docker:dev
-
-# Stop services
-npm run docker:dev:down
 ```
 
-Includes hot reload and debugger on port `9229`.
-
-The development compose stack now also starts a local provider mock server on
-`http://localhost:4010` and points MTN/Airtel traffic at it automatically.
-Use `?scenario=success|failed|pending` or `x-mock-scenario` to control mock
-responses, and `?delayMs=...` or `x-mock-delay-ms` to simulate timeouts.
-
-To run only the mock server outside Docker:
-
-```bash
-npm run provider-mock:dev
-```
-
-### Docker Production
-
-```bash
-docker-compose up -d
-```
+Server starts at `http://localhost:3000`
 
 ## 🧪 Testing
 
-### Why Test Coverage Matters
-
-High test coverage is **critical for financial systems** like this mobile money bridge:
-
-- **🚨 Prevents Financial Loss**: Uncovered code can hide bugs that lead to incorrect transactions, lost funds, or security vulnerabilities
-- **🔒 Security Assurance**: Tests verify that security-critical paths (authentication, authorization, transaction validation) work correctly
-- **📈 Confidence in Changes**: When refactoring payment logic or adding features, tests ensure we don't break existing functionality
-- **🐛 Faster Debugging**: Well-tested code makes it easier to isolate and fix issues when they occur
-- **📊 Compliance Requirements**: Financial systems often require minimum test coverage for regulatory compliance
-- **👥 Team Productivity**: Tests act as living documentation and reduce the fear of making changes
-
-**Our coverage thresholds are intentionally set conservatively** to ensure we maintain quality while allowing for rapid development. We continuously work to increase these thresholds as the codebase matures.
-
-### Run All Tests
-
 ```bash
-npm test
+npm test                    # All tests
+npm run test:coverage       # With coverage
+npm run test:watch          # Watch mode
+npm run test:e2e            # End-to-end tests
+npm run test:load           # Load testing
 ```
 
-### Test Coverage
+**Coverage thresholds:** Statements 20%, Branches 15%, Functions 25%, Lines 20%
 
-```bash
-npm run test:coverage
-```
+> Coverage reports upload to [Codecov](https://codecov.io/gh/sublime247/mobile-money) on every push to main.
 
-**Current minimum coverage requirements:**
-- Statements: 20%
-- Branches: 15%
-- Functions: 25%
-- Lines: 20%
+## 📚 API Documentation
 
-> **Coverage Goals**: We aim to increase these thresholds to 80%+ as the codebase matures. High coverage ensures the reliability of our financial transaction processing and protects against regressions in critical payment flows.
+### Interactive Docs (Development Only)
 
-> Coverage reports are automatically uploaded to [Codecov](https://codecov.io/gh/sublime247/mobile-money) on every push to main branch.
+Start the dev server and visit:
+- **Swagger UI**: `http://localhost:3000/docs`
+- **OpenAPI JSON**: `http://localhost:3000/docs/openapi.json`
 
-### Watch Mode
+The API spec is auto-generated from Zod validation schemas at runtime—no manual YAML to maintain.
 
-```bash
-npm run test:watch
-```
+### How It Works
 
-### End-to-End Tests
+| Component | Purpose |
+|-----------|---------|
+| `src/openapi/schemas/` | Zod schemas with `.openapi()` annotations |
+| `src/openapi/paths/` | Route registrations per domain |
+| `src/openapi/generator.ts` | Assembles spec on server start |
+| `src/routes/docs.ts` | Mounts Swagger UI (dev only) |
 
-```bash
-npm run test:e2e
-```
-
-### Load Testing
-
-```bash
-# Basic load test
-npm run test:load
-
-# Stress test
-npm run test:load:stress
-
-# Transaction-focused test
-npm run test:load:transactions
-```
-
-### Mutation Testing
-
-```bash
-npm run test:mutation
-```
-
-## API Documentation
-
-### Interactive docs (Swagger UI)
-
-The API spec is generated at runtime directly from the Zod validation schemas — there is no manually maintained YAML or JSON file to keep in sync.
-
-**Accessing the docs locally**
-
-1. Start the server in development mode:
-   ```bash
-   npm run dev
-   ```
-2. Open your browser at:
-   ```
-   http://localhost:3000/docs
-   ```
-   Swagger UI loads with the full spec, including request/response shapes, examples, and a "Try it out" button for every endpoint.
-
-3. The raw OpenAPI 3.0 JSON is also available at:
-   ```
-   http://localhost:3000/docs/openapi.json
-   ```
-
-**Docs are not available in production** — both `/docs` and `/docs/openapi.json` return `404` when `NODE_ENV !== 'development'`.
-
-### How the spec stays in sync
-
-The source of truth is **`src/openapi/schemas/`**, not `openapi.yaml`.
-
-| File / folder | Purpose |
-|---|---|
-| `src/openapi/registry.ts` | Calls `extendZodWithOpenApi(z)` once; exports the shared registry |
-| `src/openapi/schemas/*.ts` | One file per domain — Zod schemas annotated with `.openapi({ description, example })` |
-| `src/openapi/paths/*.ts` | Route registrations (`registry.registerPath(...)`) per domain |
-| `src/openapi/generator.ts` | Assembles the spec via `OpenApiGeneratorV3` on every server start |
-| `src/routes/docs.ts` | Mounts Swagger UI and the JSON endpoint, dev-only |
-
-**To update the docs:** edit or add a schema in `src/openapi/schemas/`, then restart the server (`npm run dev` uses `tsx watch` so it restarts automatically). The change appears in `/docs` immediately — no manual sync step.
-
-> `openapi.yaml` in the repo root is a legacy file kept only for the SDK generator script (`npm run sdk:generate`). It is no longer the source of truth and will be removed in a future cleanup.
->
-> **Backlog:** point `sdk:generate` at `http://localhost:3000/docs/openapi.json` instead of `openapi.yaml`. The dev server would need to be running during SDK generation, but it would mean the SDK always reflects the live Zod schemas with no manual sync. Once that's done, `openapi.yaml` can be deleted entirely.
-
----
-
-## 📚 API Reference
-
-### Base URL
-
-```
-http://localhost:3000/api
-```
-
-### Authentication
-
-Most endpoints require authentication via JWT token:
-
-```bash
-Authorization: Bearer <your_jwt_token>
-```
-
-Or API key for admin operations:
-
-```bash
-X-API-Key: <your_api_key>
-```
+**To update docs:** Edit schemas in `src/openapi/schemas/`, restart server. Changes appear immediately.
 
 ### Core Endpoints
 
-#### Health Checks
-
 ```bash
-GET /health              # Service health status
-GET /ready               # Readiness probe (checks DB and Redis)
+# Health
+GET  /health                          # Service health
+GET  /ready                           # Readiness (DB + Redis)
+
+# Transactions
+POST /api/transactions/deposit        # Mobile money → Stellar
+POST /api/transactions/withdraw       # Stellar → Mobile money
+GET  /api/transactions                # List (paginated)
+GET  /api/transactions/:id            # Details
+POST /api/transactions/:id/cancel     # Cancel pending
+POST /api/transactions/:id/dispute    # Create dispute
+
+# Auth
+POST /api/auth/register               # Register
+POST /api/auth/login                  # Login
+POST /api/auth/2fa/enable             # Enable 2FA
+
+# KYC
+POST /api/kyc/submit                  # Submit documents
+GET  /api/kyc/status                  # Check status
+
+# Vaults
+POST /api/vaults                      # Create vault
+GET  /api/vaults                      # List vaults
+POST /api/vaults/:id/transfer         # Deposit/withdraw
 ```
 
-#### Transactions
-
-```bash
-POST   /api/transactions/deposit      # Deposit from mobile money to Stellar
-POST   /api/transactions/withdraw     # Withdraw from Stellar to mobile money
-GET    /api/transactions              # List transactions (paginated)
-GET    /api/transactions/:id          # Get transaction details
-POST   /api/transactions/:id/cancel   # Cancel pending transaction
-POST   /api/transactions/:id/dispute  # Create dispute
-```
-
-#### User Management
-
-```bash
-POST   /api/auth/register             # Register new user
-POST   /api/auth/login                # Login
-POST   /api/auth/logout               # Logout
-POST   /api/auth/2fa/enable           # Enable 2FA
-POST   /api/auth/2fa/verify           # Verify 2FA code
-GET    /api/users/profile             # Get user profile
-PUT    /api/users/profile             # Update profile
-```
-
-#### KYC
-
-```bash
-POST   /api/kyc/submit                # Submit KYC documents
-GET    /api/kyc/status                # Check KYC status
-POST   /api/kyc/upload                # Upload document
-```
-
-#### Vaults
-
-```bash
-POST   /api/vaults                    # Create vault
-GET    /api/vaults                    # List user vaults
-GET    /api/vaults/:id                # Get vault details
-POST   /api/vaults/:id/transfer       # Deposit/withdraw from vault
-```
-
-#### Admin
-
-```bash
-GET    /api/admin/users               # List all users
-GET    /api/admin/transactions        # All transactions
-POST   /api/admin/fees/configurations # Create fee config
-GET    /api/stats                     # System statistics
-```
-
-### GraphQL API
+### GraphQL
 
 ```bash
 POST /graphql
 ```
 
-GraphQL Playground available at `http://localhost:3000/graphql` in development.
+Playground: `http://localhost:3000/graphql` (dev only)
 
-Example query:
-
+Example:
 ```graphql
 query {
   transactions(limit: 10) {
@@ -395,7 +212,6 @@ query {
     amount
     status
     provider
-    createdAt
   }
 }
 
@@ -407,101 +223,64 @@ mutation {
   }) {
     id
     status
-    referenceNumber
   }
 }
 ```
 
-### Webhooks
+### Authentication
 
-Configure webhooks to receive real-time notifications:
-
+Most endpoints require JWT:
 ```bash
-POST   /api/webhooks                  # Create webhook
-GET    /api/webhooks                  # List webhooks
-DELETE /api/webhooks/:id              # Delete webhook
+Authorization: Bearer <token>
 ```
 
-Supported events:
-- `transaction.completed`
-- `transaction.failed`
-- `transaction.pending`
-- `kyc.approved`
-- `kyc.rejected`
+Admin operations use API key:
+```bash
+X-API-Key: <key>
+```
 
-## 🔐 Security Features
+## 🔐 Security
 
 ### Transaction Limits
 
-#### Per-Transaction Limits
-
-| Limit | Amount | Purpose |
-|-------|--------|---------|
+| Type | Limit | Purpose |
+|------|-------|---------|
 | Minimum | 100 XAF | Prevent spam |
 | Maximum | 1,000,000 XAF | Fraud prevention |
 
-#### KYC-Based Daily Limits
+### KYC-Based Daily Limits
 
-| KYC Level | Daily Limit | Requirements |
-|-----------|-------------|--------------|
-| Unverified | 10,000 XAF | Email verification only |
-| Basic | 100,000 XAF | ID document + selfie |
-| Full | 1,000,000 XAF | Proof of address + video verification |
+| Level | Daily Limit | Requirements |
+|-------|-------------|--------------|
+| Unverified | 10,000 XAF | Email only |
+| Basic | 100,000 XAF | ID + selfie |
+| Full | 1,000,000 XAF | Proof of address + video |
 
-#### Provider-Specific Limits
+### Provider Limits
 
-| Provider | Min | Max | Notes |
-|----------|-----|-----|-------|
-| MTN | 100 XAF | 500,000 XAF | Most common |
-| Airtel | 100 XAF | 1,000,000 XAF | Higher limits |
-| Orange | 500 XAF | 750,000 XAF | Higher minimum |
+| Provider | Min | Max |
+|----------|-----|-----|
+| MTN | 100 XAF | 500,000 XAF |
+| Airtel | 100 XAF | 1,000,000 XAF |
+| Orange | 500 XAF | 750,000 XAF |
 
 ### AML Monitoring
 
-Automatic flagging of suspicious transactions:
-
+Auto-flagging of suspicious transactions:
 - Single transaction > 1,000,000 XAF
-- 24-hour total > 5,000,000 XAF
-- Rapid structuring (3+ mixed transactions in 15 minutes)
-
-### Rate Limiting
-
-- Export endpoints: 5 requests/hour
-- API endpoints: Configurable per endpoint
-- GraphQL: Query complexity limits
+- 24h total > 5,000,000 XAF
+- Rapid structuring (3+ mixed in 15 min)
 
 ## 🏗️ Architecture
 
-### Technology Stack
+### Stack
 
-**Backend**
-- Node.js + TypeScript
-- Express.js (REST API)
-- Apollo Server (GraphQL)
-- PostgreSQL (primary database)
-- Redis (caching, sessions, queues)
-
-**Blockchain**
-- Stellar SDK
-- Horizon API integration
-- Custom asset support
-
-**Background Jobs**
-- BullMQ (job queues)
-- Node-cron (scheduled tasks)
-
-**Security**
-- Helmet (HTTP headers)
-- Bcrypt (password hashing)
-- JWT (authentication)
-- Speakeasy (2FA)
-- Casbin (RBAC)
-
-**Monitoring**
-- Datadog APM
-- Sentry (error tracking)
-- Prometheus metrics
-- Custom health checks
+**Backend:** Node.js, TypeScript, Express, Apollo Server  
+**Database:** PostgreSQL, Redis  
+**Blockchain:** Stellar SDK, Horizon API  
+**Jobs:** BullMQ, node-cron  
+**Security:** Helmet, bcrypt, JWT, Speakeasy, Casbin  
+**Monitoring:** Datadog, Sentry, Prometheus
 
 ### Project Structure
 
@@ -509,98 +288,44 @@ Automatic flagging of suspicious transactions:
 mobile-money/
 ├── src/
 │   ├── auth/              # Authentication & authorization
-│   ├── config/            # Configuration files
+│   ├── config/            # Configuration
 │   ├── controllers/       # Request handlers
-│   ├── crypto/            # HSM and encryption
 │   ├── graphql/           # GraphQL schema & resolvers
 │   ├── jobs/              # Background jobs
 │   ├── middleware/        # Express middleware
 │   ├── models/            # Database models
+│   ├── openapi/           # OpenAPI schema generation
 │   ├── queue/             # Job queue management
 │   ├── routes/            # API routes
-│   ├── scripts/           # Utility scripts
 │   ├── services/          # Business logic
 │   │   ├── mobilemoney/   # Mobile money integrations
-│   │   └── stellar/       # Stellar blockchain services
-│   ├── stellar/           # Stellar SEP implementations
-│   ├── types/             # TypeScript type definitions
-│   ├── utils/             # Helper functions
-│   ├── websocket/         # WebSocket server
-│   └── index.ts           # Application entry point
-├── tests/                 # Test files
-│   ├── e2e/              # End-to-end tests
-│   ├── integration/      # Integration tests
-│   ├── load/             # Load tests
-│   └── unit/             # Unit tests
-├── migrations/           # Database migrations
-├── contracts/            # Stellar smart contracts
-├── .github/              # GitHub Actions workflows
-└── docker/               # Docker configurations
+│   │   └── stellar/       # Stellar services
+│   ├── stellar/           # SEP implementations
+│   ├── tests/             # All test files
+│   ├── types/             # TypeScript types
+│   ├── utils/             # Helpers
+│   └── websocket/         # WebSocket server
+├── contracts/             # Stellar smart contracts (Rust)
+├── benchmarks/            # Performance tests
+├── cli/                   # CLI tool
+├── bridge-starter-node/   # Webhook bridge starter
+└── docs-portal/           # API documentation portal
 ```
 
 ## 🔄 Database Migrations
 
-### Create Migration
-
 ```bash
-npm run migrate:create -- migration_name
+npm run migrate:create -- migration_name  # Create
+npm run migrate:up                        # Run
+npm run migrate:down                      # Rollback
+npm run migrate:status                    # Check status
 ```
 
-### Run Migrations
-
-```bash
-npm run migrate:up
-```
-
-### Rollback
-
-```bash
-npm run migrate:down
-```
-
-### Check Status
-
-```bash
-npm run migrate:status
-```
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md).
-
-### Development Workflow
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Run tests (`npm test`)
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
-
-### Code Quality
-
-Pre-commit hooks automatically run:
-- ESLint (linting)
-- Prettier (formatting)
-- TypeScript type checking
-- Tests
-
-Bypass hooks (not recommended):
-```bash
-git commit --no-verify
-```
-
-### Good First Issues
-
-Check out issues labeled [`good first issue`](https://github.com/sublime247/mobile-money/labels/good%20first%20issue) for beginner-friendly tasks.
-
-## 📊 Monitoring & Observability
+## 📊 Monitoring
 
 ### Metrics
 
-Prometheus metrics available at `/metrics`:
-
+Prometheus metrics at `/metrics`:
 - Transaction counts by status
 - API response times
 - Queue depths
@@ -610,46 +335,24 @@ Prometheus metrics available at `/metrics`:
 ### Health Checks
 
 ```bash
-# Liveness probe
-curl http://localhost:3000/health
-
-# Readiness probe (checks dependencies)
-curl http://localhost:3000/ready
+curl http://localhost:3000/health  # Liveness
+curl http://localhost:3000/ready   # Readiness
 ```
 
 ### Logging
 
-Structured JSON logging with levels:
-- `error`: Critical errors
-- `warn`: Warnings and anomalies
-- `info`: General information
-- `debug`: Detailed debugging (dev only)
+Structured JSON logging with levels: `error`, `warn`, `info`, `debug`
 
 ### Error Tracking
 
-Sentry integration for production error monitoring:
-
+Sentry integration:
 ```bash
 SENTRY_DSN=your_sentry_dsn
 ```
 
 ## 🚢 Deployment
 
-### Environment Variables
-
-Required for production:
-
-```bash
-NODE_ENV=production
-DATABASE_URL=postgresql://...
-REDIS_URL=redis://...
-STELLAR_NETWORK=mainnet
-STELLAR_ISSUER_SECRET=S...
-JWT_SECRET=...
-SESSION_SECRET=...
-```
-
-### Docker Deployment
+### Docker
 
 ```bash
 docker build -t mobile-money:latest .
@@ -658,8 +361,6 @@ docker run -p 3000:3000 --env-file .env mobile-money:latest
 
 ### Kubernetes
 
-Example deployment:
-
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -667,25 +368,13 @@ metadata:
   name: mobile-money
 spec:
   replicas: 3
-  selector:
-    matchLabels:
-      app: mobile-money
   template:
-    metadata:
-      labels:
-        app: mobile-money
     spec:
       containers:
       - name: mobile-money
         image: mobile-money:latest
         ports:
         - containerPort: 3000
-        env:
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: mobile-money-secrets
-              key: database-url
         livenessProbe:
           httpGet:
             path: /health
@@ -698,116 +387,75 @@ spec:
 
 ## 📈 Performance
 
-### Benchmarks
-
-- **API Response Time**: < 100ms (p95)
+- **API Response**: < 100ms (p95)
 - **Transaction Processing**: < 5s (end-to-end)
 - **Throughput**: 1000+ req/s
 - **Database Queries**: < 50ms (p95)
 
-### Optimization Tips
-
-1. Enable Redis caching
-2. Use connection pooling
-3. Implement CDN for static assets
-4. Enable compression middleware
-5. Use database indexes
-6. Implement query result caching
-
 ## 🐛 Troubleshooting
 
-For a detailed list of error codes, their meanings, and how to resolve them, see our [Troubleshooting Guide](TROUBLESHOOTING.md).
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed error codes and solutions.
 
 ### Common Issues
 
-**Database connection fails**
+**Database connection fails:**
 ```bash
-# Check PostgreSQL is running
 pg_isready -h localhost -p 5432
-
 # Verify DATABASE_URL format
-postgresql://user:password@host:port/database
 ```
 
-**Redis connection fails**
+**Redis connection fails:**
 ```bash
-# Check Redis is running
-redis-cli ping
-
-# Should return: PONG
+redis-cli ping  # Should return PONG
 ```
 
-**Stellar transactions fail**
+**Stellar transactions fail:**
 ```bash
-# Verify network configuration
 echo $STELLAR_NETWORK  # Should be 'testnet' or 'mainnet'
-
-# Check Horizon connectivity
 curl https://horizon-testnet.stellar.org
 ```
 
-**Tests failing**
-```bash
-# Clear test database
-npm run migrate:down
-npm run migrate:up
+## 🤝 Contributing
 
-# Clear Jest cache
-npm test -- --clearCache
-```
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Workflow
+
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing-feature`)
+3. Make changes and run tests (`npm test`)
+4. Commit (`git commit -m 'Add amazing feature'`)
+5. Push (`git push origin feature/amazing-feature`)
+6. Open Pull Request
+
+Pre-commit hooks run ESLint, Prettier, TypeScript checks, and tests automatically.
+
+### Good First Issues
+
+Check [`good first issue`](https://github.com/sublime247/mobile-money/labels/good%20first%20issue) label.
 
 ## 🚨 Error Handling
 
-The Mobile Money Bridge uses standardized error codes for consistent error handling across the API. All errors follow a consistent format with specific error codes that map to appropriate HTTP status codes.
+Standardized error codes organized by category:
+- **4000-4099**: Validation (HTTP 400)
+- **4010-4019**: Authentication (HTTP 401)
+- **4030-4039**: Authorization (HTTP 403)
+- **4040-4049**: Not Found (HTTP 404)
+- **4090-4099**: Conflict (HTTP 409)
+- **4290-4299**: Rate Limit (HTTP 429)
+- **5000+**: Server Errors (HTTP 500+)
 
-### Error Code Format
-
-Error codes are string constants organized by category:
-- **Validation errors (4000-4099)** - HTTP 400 (e.g., INVALID_INPUT, MISSING_FIELD)
-- **Authentication errors (4010-4019)** - HTTP 401 (e.g., UNAUTHORIZED, INVALID_CREDENTIALS)
-- **Authorization errors (4030-4039)** - HTTP 403 (e.g., FORBIDDEN, INSUFFICIENT_PERMISSIONS)
-- **Resource errors (4040-4049)** - HTTP 404 (e.g., NOT_FOUND, TRANSACTION_NOT_FOUND)
-- **Conflict errors (4090-4099)** - HTTP 409 (e.g., CONFLICT, DUPLICATE_REQUEST)
-- **Rate limit errors (4290-4299)** - HTTP 429 (e.g., RATE_LIMIT, ACCOUNT_LOCKED)
-- **Server errors (5000+)** - HTTP 500+ (e.g., INTERNAL_ERROR, DATABASE_ERROR)
-
-### Usage Example
-
-```typescript
-import { ERROR_CODES } from './constants/errorCodes';
-
-// Throw an error with a specific code
-throw createError(ERROR_CODES.INVALID_INPUT);
-
-// The error handler will automatically map to the correct HTTP status
-// INVALID_INPUT maps to HTTP 400 Bad Request
-```
-
-### Error Code Reference
-
-See [src/constants/errorCodes.ts](../src/constants/errorCodes.ts) for the complete list of error codes and their descriptions.
-
-### HTTP Status Mapping
-
-The `getHttpStatus` function maps error codes to HTTP status codes:
-- 400 Bad Request: Validation/input errors
-- 401 Unauthorized: Authentication errors
-- 403 Forbidden: Authorization/permission errors
-- 404 Not Found: Resource not found errors
-- 409 Conflict: State/conflict errors
-- 429 Too Many Requests: Rate limit/quota exceeded
-- 500 Internal Server Error: Server/database errors
-- 502 Bad Gateway: External provider errors
+See [src/constants/errorCodes.ts](src/constants/errorCodes.ts) for complete reference.
 
 ## 📝 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) file.
 
 ## 🙏 Acknowledgments
 
-- [Stellar Development Foundation](https://stellar.org) for blockchain infrastructure
-- Mobile money providers (MTN, Airtel, Orange) for API access
-- Open source community for amazing tools and libraries
+- [Stellar Development Foundation](https://stellar.org)
+- Mobile money providers (MTN, Airtel, Orange)
+- Open source community
 
 ## 📞 Support
 
@@ -816,35 +464,14 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🗺️ Roadmap
 
-- [ ] Additional mobile money providers (Vodacom, Tigo)
+- [ ] Additional providers (Vodacom, Tigo)
 - [ ] Mobile SDKs (iOS, Android)
 - [ ] Merchant dashboard
 - [ ] Advanced analytics
 - [ ] Multi-currency support
 - [ ] Stablecoin integration (USDC, USDT)
 - [ ] DeFi protocol integrations
-- [ ] Automated market making
 
 ---
 
 **Built with ❤️ for financial inclusion in Africa**
-
-## 📚 Internal API Documentation Portal (Docusaurus + Redoc)
-
-This repository now includes a dedicated documentation portal in `docs-portal/` that transforms `openapi.yaml` into a searchable, partner-friendly API reference.
-
-### Run docs portal locally
-
-```bash
-npm run docs:dev
-```
-
-### Build docs portal
-
-```bash
-npm run docs:build
-```
-
-### Release deployment
-
-On every GitHub Release publication, the workflow `.github/workflows/api-docs-portal.yml` builds `docs-portal` and deploys it to GitHub Pages.

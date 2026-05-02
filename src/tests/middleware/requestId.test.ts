@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { requestId } from "./requestId";
+import { requestId } from "../../middleware/requestId";
 
 describe("requestId middleware", () => {
   let mockReq: Request & { id?: string };

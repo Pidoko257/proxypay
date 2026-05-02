@@ -11,7 +11,7 @@ jest.mock("bullmq", () => ({
   Queue: mockQueueCtor,
 }));
 
-jest.mock("./config", () => ({
+jest.mock("../../queue/config", () => ({
   queueOptions: {},
 }));
 
@@ -28,7 +28,7 @@ describe("providerBalanceAlertQueue", () => {
   });
 
   it("schedules repeatable job every 10 minutes by default", async () => {
-    const { scheduleProviderBalanceAlertJob } = await import("./providerBalanceAlertQueue");
+    const { scheduleProviderBalanceAlertJob } = await import("../../queue/providerBalanceAlertQueue");
 
     await scheduleProviderBalanceAlertJob();
 
@@ -45,7 +45,7 @@ describe("providerBalanceAlertQueue", () => {
 
   it("uses custom interval when PROVIDER_BALANCE_ALERT_INTERVAL_MS is valid", async () => {
     process.env.PROVIDER_BALANCE_ALERT_INTERVAL_MS = "900000";
-    const { scheduleProviderBalanceAlertJob } = await import("./providerBalanceAlertQueue");
+    const { scheduleProviderBalanceAlertJob } = await import("../../queue/providerBalanceAlertQueue");
 
     await scheduleProviderBalanceAlertJob();
 
@@ -60,7 +60,7 @@ describe("providerBalanceAlertQueue", () => {
 
   it("falls back to default interval when configured value is too low", async () => {
     process.env.PROVIDER_BALANCE_ALERT_INTERVAL_MS = "1000";
-    const { scheduleProviderBalanceAlertJob } = await import("./providerBalanceAlertQueue");
+    const { scheduleProviderBalanceAlertJob } = await import("../../queue/providerBalanceAlertQueue");
 
     await scheduleProviderBalanceAlertJob();
 

@@ -25,7 +25,7 @@ describe('evaluateGeoLoginAccess', () => {
 
   it('allows requests from whitelisted IPs', async () => {
     process.env.GEO_WHITELIST_IPS = '203.0.113.7';
-    const { evaluateGeoLoginAccess } = await import('./geo');
+    const { evaluateGeoLoginAccess } = await import('../../auth/geo');
 
     const result = await evaluateGeoLoginAccess(makeRequest('203.0.113.7'));
 
@@ -45,7 +45,7 @@ describe('evaluateGeoLoginAccess', () => {
       { virtual: true }
     );
 
-    const { evaluateGeoLoginAccess } = await import('./geo');
+    const { evaluateGeoLoginAccess } = await import('../../auth/geo');
     const result = await evaluateGeoLoginAccess(makeRequest('198.51.100.42'));
 
     expect(result.allowed).toBe(false);

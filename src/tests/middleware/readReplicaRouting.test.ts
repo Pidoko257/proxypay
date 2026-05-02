@@ -3,7 +3,7 @@ import {
   readReplicaRoutingMiddleware,
   isReadOperation,
   isWriteOperation,
-} from "../readReplicaRouting";
+} from "../../middleware/readReplicaRouting";
 
 describe("readReplicaRoutingMiddleware", () => {
   let req: Partial<Request>;

@@ -1,11 +1,11 @@
-import { SnapshotService } from "../services/snapshotService";
-import { queryRead } from "../config/database";
-import { SnapshotModel } from "../models/snapshot";
-import { EmailService } from "../services/email";
+import { SnapshotService } from "../../services/snapshotService";
+import { queryRead } from "../../config/database";
+import { SnapshotModel } from "../../models/snapshot";
+import { EmailService } from "../../services/email";
 
-jest.mock("../config/database");
-jest.mock("../models/snapshot");
-jest.mock("../services/email");
+jest.mock("../../config/database");
+jest.mock("../../models/snapshot");
+jest.mock("../../services/email");
 
 describe("SnapshotService", () => {
   let service: SnapshotService;

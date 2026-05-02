@@ -1,22 +1,36 @@
-# Ignore lock file
-package-lock.json
+# Dependencies
 node_modules/
-contracts/target/
+package-lock.json
+yarn.lock
+
+# Build outputs
 dist/
+contracts/target/
+*.tsbuildinfo
+
+# Environment and secrets
 .env
+.env.local
+.env.*.local
+certs/
 .orange-session/
-.idea
-*.log
-.DS_Store
+
+# Test coverage
 coverage/
 .nyc_output/
-*.tsbuildinfo
 stryker-tmp/
 
-# Pact
+# Logs
+*.log
 pact.log
 *.pact.log
 
+# OS files
+.DS_Store
+.idea
+.vscode/settings.json
+
+# Kiro
 .kiro/
 
 # Issue creation and update scripts (local use only)
@@ -31,12 +45,12 @@ update-issues-batch*.sh
 run-all-updates.sh
 create-next-100-issues.sh
 
-
-yarn.lock
-certs/
-.env
-
 # Load test output
 tests/load/results/*.json
-package-lock.json
+benchmarks/results/*.json
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
 

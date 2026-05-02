@@ -42,7 +42,7 @@
     "test:load:breakpoint": "k6 run -e SCENARIO=breakpoint tests/load/api.js",
     "test:load:legacy": "k6 run tests/load/k6/load_test_scenarios.js",
     "test:bench": "node tests/load/autocannon/benchmark.js",
-    "sdk:generate": "openapi-generator-cli generate -i openapi.yaml -c sdk-config.yaml -o sdk",
+    "sdk:generate": "echo 'Start dev server first (npm run dev), then run: openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config.yaml -o sdk'",
     "sdk:build": "cd sdk && ./gradlew build",
     "docs:dev": "npm --prefix docs-portal run start",
     "docs:build": "npm --prefix docs-portal run build"

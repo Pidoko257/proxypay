@@ -1,6 +1,6 @@
-import { runProviderBalanceAlertJob } from "./balances";
-import { AirtelService } from "../services/mobilemoney/providers/airtel";
-import { MTNProvider } from "../services/mobilemoney/providers/mtn";
+import { runProviderBalanceAlertJob } from "../../jobs/balances";
+import { AirtelService } from "../../services/mobilemoney/providers/airtel";
+import { MTNProvider } from "../../services/mobilemoney/providers/mtn";
 
 const originalEnv = process.env;
 

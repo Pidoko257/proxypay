@@ -1,11 +1,11 @@
-import { runCleanupJob } from "./cleanupJob";
-import { runReportJob } from "./reportJob";
-import { runStatusCheckJob } from "./statusCheckJob";
-import { runBalanceMonitorJob } from "./balanceMonitorJob";
-import { startJobs } from "./scheduler";
+import { runCleanupJob } from "../../jobs/cleanupJob";
+import { runReportJob } from "../../jobs/reportJob";
+import { runStatusCheckJob } from "../../jobs/statusCheckJob";
+import { runBalanceMonitorJob } from "../../jobs/balanceMonitorJob";
+import { startJobs } from "../../jobs/scheduler";
 
 // Mock the database pool
-jest.mock("../config/database", () => ({
+jest.mock("../../config/database", () => ({
   pool: { query: jest.fn() },
 }));
 
@@ -15,7 +15,7 @@ jest.mock("node-cron", () => ({
   schedule: jest.fn(),
 }));
 
-import { pool } from "../config/database";
+import { pool } from "../../config/database";
 import cron from "node-cron";
 
 const mockQuery = pool.query as jest.Mock;

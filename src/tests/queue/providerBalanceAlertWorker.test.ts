@@ -15,13 +15,13 @@ jest.mock("bullmq", () => ({
   Worker: mockWorkerCtor,
 }));
 
-jest.mock("./config", () => ({
+jest.mock("../../queue/config", () => ({
   queueOptions: {},
 }));
 
 const mockRunProviderBalanceAlertJob = jest.fn().mockResolvedValue(undefined);
 
-jest.mock("../jobs/balances", () => ({
+jest.mock("../../jobs/balances", () => ({
   runProviderBalanceAlertJob: () => mockRunProviderBalanceAlertJob(),
 }));
 
@@ -34,7 +34,7 @@ describe("providerBalanceAlertWorker", () => {
     const {
       startProviderBalanceAlertWorker,
       closeProviderBalanceAlertWorker,
-    } = await import("./providerBalanceAlertWorker");
+    } = await import("../../queue/providerBalanceAlertWorker");
 
     startProviderBalanceAlertWorker();
     startProviderBalanceAlertWorker();

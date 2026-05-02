@@ -1,4 +1,4 @@
-import { queryWithContext, queryBatchWithContext } from "../database";
+import { queryWithContext, queryBatchWithContext } from "../../config/database";
 
 describe("Context-aware query functions", () => {
   // Mock request objects

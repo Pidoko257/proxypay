@@ -1,5 +1,5 @@
-import { hashPassword, comparePassword } from "./password";
-import { registerSchema } from "../routes/auth";
+import { hashPassword, comparePassword } from "../../utils/password";
+import { registerSchema } from "../../routes/auth";
 
 describe("Password utils", () => {
   it("should hash a password and compare correctly", async () => {

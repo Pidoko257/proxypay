@@ -15,6 +15,7 @@ import {
   withdrawHandler,
 } from "../controllers/transactionController";
 import { validateTransaction } from "../middleware/validateTransaction";
+import { normalizeProvider } from "../middleware/normalizeProvider";
 import { TimeoutPresets, haltOnTimedout } from "../middleware/timeout";
 import { authenticateToken } from "../middleware/auth";
 import { checkAccountStatusStrict } from "../middleware/checkAccountStatus";
@@ -159,6 +160,7 @@ transactionRoutes.post(
   checkAccountStatusStrict,
   TimeoutPresets.long,
   haltOnTimedout,
+  normalizeProvider,
   validateTransaction,
   geolocateMiddleware,
   depositHandler,
@@ -170,6 +172,7 @@ transactionRoutes.post(
   checkAccountStatusStrict,
   TimeoutPresets.long,
   haltOnTimedout,
+  normalizeProvider,
   validateTransaction,
   geolocateMiddleware,
   withdrawHandler,

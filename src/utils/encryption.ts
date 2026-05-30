@@ -250,8 +250,18 @@ export function encryptFieldForUser(value: string | null | undefined, userId: st
 /** Decrypt a PII field with a per-user derived key. */
 export function decryptFieldForUser(raw: string | null | undefined, userId: string): string | null | undefined {
   if (raw == null || raw === "") return raw;
-  const key = deriveUserKey(userId);
-  return decryptAES(deserializePayload(raw), key);
+  const payload = deserializePayload(raw);
+  const keys = getDecryptionKeys(userId);
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      return decryptAES(payload, keys[i]);
+    } catch (err) {
+      if (i === keys.length - 1) {
+        throw err;
+      }
+    }
+  }
+  return raw;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,12 +294,21 @@ export function decrypt(encryptedData: string | null | undefined): string | null
   const parts = encryptedData.split(":");
   if (parts.length !== 3) return encryptedData;
   const [ivHex, authTagHex, ciphertextHex] = parts;
-  const key = deriveKey(env.DB_ENCRYPTION_KEY);
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(ivHex, "hex"), { authTagLength: AUTH_TAG_LENGTH });
-  decipher.setAuthTag(Buffer.from(authTagHex, "hex"));
-  try {
-    return Buffer.concat([decipher.update(Buffer.from(ciphertextHex, "hex")), decipher.final()]).toString("utf8");
-  } catch {
-    throw new Error("PII decryption failed: authentication tag mismatch.");
+  const iv = Buffer.from(ivHex, "hex");
+  const authTag = Buffer.from(authTagHex, "hex");
+  const ciphertext = Buffer.from(ciphertextHex, "hex");
+
+  const keys = getDecryptionKeys();
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const decipher = crypto.createDecipheriv(ALGORITHM, keys[i], iv, { authTagLength: AUTH_TAG_LENGTH });
+      decipher.setAuthTag(authTag);
+      return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+    } catch (err) {
+      if (i === keys.length - 1) {
+        throw new Error("PII decryption failed: authentication tag mismatch.");
+      }
+    }
   }
+  return encryptedData;
 }

@@ -33,6 +33,7 @@
     "reconcile:ledger": "tsx src/scripts/reconcile-ledger.ts",
     "backup:create": "tsx src/scripts/backup.ts",
     "backup:verify": "tsx src/scripts/verify-backups.ts",
+    "reindex:bloated-indexes": "tsx src/scripts/reindex-bloated-indexes.ts",
     "postinstall": "npm run prepare",
     "contracts:build": "cd contracts/escrow && cargo build --target wasm32-unknown-unknown --release",
     "contracts:test": "cd contracts/escrow && cargo test",

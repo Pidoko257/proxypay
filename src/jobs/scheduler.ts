@@ -17,6 +17,11 @@ import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
 import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
 import { runDailyProviderReconciliation } from "./providerReconciliationJob";
 import { runReconciliationJob } from "./reconciliationJob";
+import {
+  INDEX_REINDEX_CRON,
+  INDEX_REINDEX_JOB_ENABLED,
+} from "../config/env";
+import { runIndexReindexJob } from "./indexReindexJob";
 
 
 interface JobConfig {
@@ -91,6 +96,25 @@ const JOBS: JobConfig[] = [
     // 1st of every month at midnight
     schedule: "0 0 1 * *",
     handler: runMonthlyInvoiceJob,
+  },
+  ...(INDEX_REINDEX_JOB_ENABLED
+    ? [
+        {
+          name: "index-reindex",
+          // Daily at 3:00 AM by default - reindexes bloated indexes during low traffic
+          schedule: INDEX_REINDEX_CRON,
+          handler: runIndexReindexJob,
+        },
+      ]
+    : []),
+  {
+    name: "subscriptions",
+    // Default: run every minute to pick up due subscriptions
+    schedule: process.env.SUBSCRIPTION_CRON || "*/1 * * * *",
+    handler: async () => {
+      const { runSubscriptionJob } = await import("./subscriptionJob");
+      return runSubscriptionJob();
+    },
   },
   {
     name: "reconciliation",

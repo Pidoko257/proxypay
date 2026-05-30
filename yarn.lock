@@ -1364,37 +1364,10 @@
     module-details-from-path "^1.0.3"
     node-gyp-build "^4.5.0"
 
-"@emnapi/runtime@^1.7.0":
-  version "1.10.0"
-  resolved "https://registry.yarnpkg.com/@emnapi/runtime/-/runtime-1.10.0.tgz#4b260c0d3534204e98c6110b8db1a987d26ec87c"
-  integrity sha512-ewvYlk86xUoGI0zQRNq/mC+16R1QeDlKQy21Ki3oSYXNgLb45GV1P6A0M+/s6nyCuNDqe5VpaY84BzXGwVbwFA==
-  dependencies:
-    tslib "^2.4.0"
-
-"@esbuild/aix-ppc64@0.27.4":
+"@esbuild/win32-x64@0.27.4":
   version "0.27.4"
-  resolved "https://registry.yarnpkg.com/@esbuild/aix-ppc64/-/aix-ppc64-0.27.4.tgz#4c585002f7ad694d38fe0e8cbf5cfd939ccff327"
-  integrity sha512-cQPwL2mp2nSmHHJlCyoXgHGhbEPMrEEU5xhkcy3Hs/O7nGZqEpZ2sUtLaL9MORLtDfRvVl2/3PAuEkYZH0Ty8Q==
-
-"@esbuild/android-arm64@0.27.4":
-  version "0.27.4"
-  resolved "https://registry.yarnpkg.com/@esbuild/android-arm64/-/android-arm64-0.27.4.tgz#7625d0952c3b402d3ede203a16c9f2b78f8a4827"
-  integrity sha512-gdLscB7v75wRfu7QSm/zg6Rx29VLdy9eTr2t44sfTW7CxwAtQghZ4ZnqHk3/ogz7xao0QAgrkradbBzcqFPasw==
-
-"@esbuild/android-arm@0.27.4":
-  version "0.27.4"
-  resolved "https://registry.yarnpkg.com/@esbuild/android-arm/-/android-arm-0.27.4.tgz#9a0cf1d12997ec46dddfb32ce67e9bca842381ac"
-  integrity sha512-X9bUgvxiC8CHAGKYufLIHGXPJWnr0OCdR0anD2e21vdvgCI8lIfqFbnoeOz7lBjdrAGUhqLZLcQo6MLhTO2DKQ==
-
-"@esbuild/android-x64@0.27.4":
-  version "0.27.4"
-  resolved "https://registry.yarnpkg.com/@esbuild/android-x64/-/android-x64-0.27.4.tgz#06e1fdc6283fccd6bc6aadd6754afce6cf96f42e"
-  integrity sha512-PzPFnBNVF292sfpfhiyiXCGSn9HZg5BcAz+ivBuSsl6Rk4ga1oEXAamhOXRFyMcjwr2DVtm40G65N3GLeH1Lvw==
-
-"@esbuild/darwin-arm64@0.27.4":
-  version "0.27.4"
-  resolved "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.27.4.tgz"
-  integrity sha512-b7xaGIwdJlht8ZFCvMkpDN6uiSmnxxK56N2GDTMYPr2/gzvfdQN8rTfBsvVKmIVY/X7EM+/hJKEIbbHs9oA4tQ==
+  resolved "https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.27.4.tgz"
+  integrity sha512-+knoa0BDoeXgkNvvV1vvbZX4+hizelrkwmGJBdT17t8FNPwG2lKemmuMZlmaNQ3ws3DKKCxpb4zRZEIp3UxFCg==
 
 "@esbuild/darwin-x64@0.27.4":
   version "0.27.4"
@@ -1831,24 +1804,10 @@
   resolved "https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz"
   integrity sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==
 
-"@img/sharp-darwin-arm64@0.34.5":
+"@img/sharp-win32-x64@0.34.5":
   version "0.34.5"
-  resolved "https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.34.5.tgz"
-  integrity sha512-imtQ3WMJXbMY4fxb/Ndp6HBTNVtWCUI0WdobyheGf5+ad6xX8VIDO8u2xE4qc/fr08CKG/7dDseFtn6M6g/r3w==
-  optionalDependencies:
-    "@img/sharp-libvips-darwin-arm64" "1.2.4"
-
-"@img/sharp-darwin-x64@0.34.5":
-  version "0.34.5"
-  resolved "https://registry.yarnpkg.com/@img/sharp-darwin-x64/-/sharp-darwin-x64-0.34.5.tgz#19bc1dd6eba6d5a96283498b9c9f401180ee9c7b"
-  integrity sha512-YNEFAF/4KQ/PeW0N+r+aVVsoIY0/qxxikF2SWdp+NRkmMB7y9LBZAVqQ4yhGCm/H3H270OSykqmQMKLBhBJDEw==
-  optionalDependencies:
-    "@img/sharp-libvips-darwin-x64" "1.2.4"
-
-"@img/sharp-libvips-darwin-arm64@1.2.4":
-  version "1.2.4"
-  resolved "https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.2.4.tgz"
-  integrity sha512-zqjjo7RatFfFoP0MkQ51jfuFZBnVE2pRiaydKJ1G/rHZvnsrHAOcQALIi9sA5co5xenQdTugCvtb1cuf78Vf4g==
+  resolved "https://registry.npmjs.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.34.5.tgz"
+  integrity sha512-+29YMsqY2/9eFEiW93eqWnuLcWcufowXewwSNIT6UwZdUUCrM3oFjMWH/Z6/TMmb4hlFenmfAVbpWeup2jryCw==
 
 "@img/sharp-libvips-darwin-x64@1.2.4":
   version "1.2.4"
@@ -2381,10 +2340,10 @@
   resolved "https://registry.npmjs.org/@js-sdsl/ordered-map/-/ordered-map-4.4.2.tgz"
   integrity sha512-iUKgm52T8HOE/makSxjqoWhe95ZJA1/G1sYsGev2JDKUSS14KAgg1LHb+Ba+IPow0xflbnSkOsZcO08C7w1gYw==
 
-"@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.3":
+"@msgpackr-extract/msgpackr-extract-win32-x64@3.0.3":
   version "3.0.3"
-  resolved "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-darwin-arm64/-/msgpackr-extract-darwin-arm64-3.0.3.tgz"
-  integrity sha512-QZHtlVgbAdy2zAqNA9Gu1UpIuI8Xvsd1v8ic6B2pZmeFnFcMWiPLfWXh7TVw4eGEZ/C9TH281KwhVoeQUKbyjw==
+  resolved "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-win32-x64/-/msgpackr-extract-win32-x64-3.0.3.tgz"
+  integrity sha512-x0fWaQtYp4E6sktbsdAqnehxDgEc/VwM7uLsRCYWaiGu0ykYdZPiS8zCWdnjHwyiumousxfBm4SO31eXqwEZhQ==
 
 "@msgpackr-extract/msgpackr-extract-darwin-x64@3.0.3":
   version "3.0.3"
@@ -2782,20 +2741,10 @@
   dependencies:
     "@opentelemetry/core" "^2.0.0"
 
-"@oxc-parser/binding-android-arm-eabi@0.118.0":
+"@oxc-parser/binding-win32-x64-msvc@0.118.0":
   version "0.118.0"
-  resolved "https://registry.yarnpkg.com/@oxc-parser/binding-android-arm-eabi/-/binding-android-arm-eabi-0.118.0.tgz#5c5f6230d6a5bbd7389523fb5fcaf7f0860ced56"
-  integrity sha512-u/fO8WrQ5xiXXe2bCUmiihDaZQi0rvMxBtvPv7/lyQDBcfR81/usWv4ZMaKHkWOUXDoOBw1ptHi+A8+/zWGLGA==
-
-"@oxc-parser/binding-android-arm64@0.118.0":
-  version "0.118.0"
-  resolved "https://registry.yarnpkg.com/@oxc-parser/binding-android-arm64/-/binding-android-arm64-0.118.0.tgz#65fd57ea05b90a0b0086b01b58af54ffc2d8ffce"
-  integrity sha512-hHUdc9RNh/cDBIyUExTRrGZXlrpcc4W+co+JwH4aR2rBB9Y6Zjsx9tSVdIn9HBF1ZBpOV7XgeZKnqRHNvbEPNw==
-
-"@oxc-parser/binding-darwin-arm64@0.118.0":
-  version "0.118.0"
-  resolved "https://registry.npmjs.org/@oxc-parser/binding-darwin-arm64/-/binding-darwin-arm64-0.118.0.tgz"
-  integrity sha512-LHlbZxiUBHdaSmgOTIdkd5WzTddwUGJXjTX5AdvUIC0640z6xP7AQQE46X6FokOKu/PZKM0RegB2MWr2+0kakA==
+  resolved "https://registry.npmjs.org/@oxc-parser/binding-win32-x64-msvc/-/binding-win32-x64-msvc-0.118.0.tgz"
+  integrity sha512-sOL5mOLBQT7aHdltfVhRwnDAo4fR4jnxJQU4rBQaGVmsbjK0V/358teokfIwEXNEuY2o7o9PqYnq1TkNzmcirw==
 
 "@oxc-parser/binding-darwin-x64@0.118.0":
   version "0.118.0"
@@ -2889,10 +2838,10 @@
   resolved "https://registry.npmjs.org/@oxc-project/types/-/types-0.118.0.tgz"
   integrity sha512-yx4sGEZvH9dcS9AduoKKPWFqxJWrKtElOebwpTV9qYx387KiCoUt+iZBPmxpnnHIFc948kY5O8CJTPOmj+2y6w==
 
-"@pact-foundation/pact-core-darwin-arm64@19.1.0":
+"@pact-foundation/pact-core-windows-x64@19.1.0":
   version "19.1.0"
-  resolved "https://registry.npmjs.org/@pact-foundation/pact-core-darwin-arm64/-/pact-core-darwin-arm64-19.1.0.tgz"
-  integrity sha512-bizRo7SawD6B3844QCR2Hap8Eh5qrrBSTZcRN6yLabD5KhIaIXWSXM/WaynT+f91Q9Up3GNF793/Vl3dxPf+3g==
+  resolved "https://registry.npmjs.org/@pact-foundation/pact-core-windows-x64/-/pact-core-windows-x64-19.1.0.tgz"
+  integrity sha512-PIwNMO38QDCfd/h3Ys8i+1M1Yx7l+jf+oL3oxIPE1jby4CgY/MY2hoOH3VwFSYQhaOPHj1n7TpcW9EpbIkGdSA==
 
 "@pact-foundation/pact-core-darwin-x64@19.1.0":
   version "19.1.0"
@@ -6905,16 +6854,6 @@ fs.realpath@^1.0.0:
   version "1.0.0"
   resolved "https://registry.npmjs.org/fs.realpath/-/fs.realpath-1.0.0.tgz"
   integrity sha512-OO0pH2lK6a0hZnAdau5ItzHPI6pUlvI7jMVnxUQRtw4owF2wk8lOSabtGDCTP4Ggrg2MbGnWO9X8K1t4+fGMDw==
-
-fsevents@2.3.2:
-  version "2.3.2"
-  resolved "https://registry.npmjs.org/fsevents/-/fsevents-2.3.2.tgz"
-  integrity sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==
-
-fsevents@^2.3.2, fsevents@~2.3.3:
-  version "2.3.3"
-  resolved "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz"
-  integrity sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==
 
 fstream@^1.0.12:
   version "1.0.12"

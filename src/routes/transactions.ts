@@ -18,6 +18,7 @@ import { validateTransaction } from "../middleware/validateTransaction";
 import { normalizeProvider } from "../middleware/normalizeProvider";
 import { TimeoutPresets, haltOnTimedout } from "../middleware/timeout";
 import { authenticateToken } from "../middleware/auth";
+import { cancelTransactionRateLimiter } from "../middleware/rateLimit";
 import { checkAccountStatusStrict } from "../middleware/checkAccountStatus";
 import { geolocateMiddleware } from "../middleware/geolocate";
 import { geoFencingMiddleware } from "../middleware/geoFencing";
@@ -190,6 +191,8 @@ transactionRoutes.get(
 
 transactionRoutes.post(
   "/:id/cancel",
+  authenticateToken,
+  cancelTransactionRateLimiter,
   TimeoutPresets.quick,
   haltOnTimedout,
   cancelTransactionHandler,

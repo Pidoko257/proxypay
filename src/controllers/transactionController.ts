@@ -666,8 +666,16 @@ export const getTransactionHandler = async (req: Request, res: Response) => {
 export const cancelTransactionHandler = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const userId = req.jwtUser?.userId;
 
-    const transaction = await transactionModel.findById(id);
+    if (!userId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Valid token required",
+      });
+    }
+
+    const transaction = await transactionModel.findById(id, userId);
     if (!transaction) {
       return res.status(404).json({ error: "Transaction not found" });
     }

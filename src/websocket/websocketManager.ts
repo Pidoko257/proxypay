@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { IncomingMessage, Server } from "http";
 import { createClient, RedisClientType } from "redis";
-import jwt from "jsonwebtoken";
+import { verifyToken } from "../auth/jwt";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -15,6 +15,7 @@ export interface WebSocketMessage {
 export interface TransactionUpdatePayload {
   id: string;
   status: string;
+  userId?: string | null;
   [key: string]: unknown;
 }
 
@@ -22,6 +23,7 @@ interface AuthenticatedWebSocket extends WebSocket {
   isAlive: boolean;
   userId?: string;
   subscriptions: Set<string>;
+  missedPings: number; // tracks consecutive missed pongs
 }
 
 // ---------------------------------------------------------------------------
@@ -38,22 +40,29 @@ interface AuthenticatedWebSocket extends WebSocket {
  *  - Redis pub/sub for horizontal scaling across multiple process instances
  */
 export class WebSocketManager {
+  private static activeInstance: WebSocketManager | null = null;
+
   private wss: WebSocketServer;
   private clients: Map<string, AuthenticatedWebSocket> = new Map();
+  // Map of userId -> Set of client IDs for per-user broadcasts
+  private userRooms: Map<string, Set<string>> = new Map();
   // Map of transactionId -> Set of client IDs subscribed to that transaction
   private subscriptions: Map<string, Set<string>> = new Map();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private redisSub: RedisClientType | null = null;
   private redisPub: RedisClientType | null = null;
+  public redisReady: Promise<void>;
 
   private readonly REDIS_CHANNEL = "transaction.updates";
-  private readonly HEARTBEAT_INTERVAL_MS = 30_000;
+  private readonly HEARTBEAT_INTERVAL_MS = 10_000; // faster heartbeat for quicker stale detection
+  private readonly MAX_MISSED_PINGS = 2; // number of missed pings before termination
 
   constructor(httpServer: Server) {
     this.wss = new WebSocketServer({ server: httpServer });
+    WebSocketManager.activeInstance = this;
     this.init();
     this.startHeartbeat();
-    this.setupRedis().catch((err) =>
+    this.redisReady = this.setupRedis().catch((err) =>
       console.warn("Redis pub/sub unavailable, running without it:", err),
     );
   }
@@ -67,6 +76,7 @@ export class WebSocketManager {
       const client = ws as AuthenticatedWebSocket;
       client.isAlive = true;
       client.subscriptions = new Set();
+      client.missedPings = 0; // initialize missed ping counter
 
       // Authenticate the client
       const token = this.extractToken(req);
@@ -76,11 +86,20 @@ export class WebSocketManager {
       }
 
       try {
-        const payload = jwt.verify(
-          token,
-          process.env.JWT_SECRET || "fallback-secret",
-        ) as { userId?: string; sub?: string };
-        client.userId = payload.userId ?? payload.sub ?? "anonymous";
+        const decoded = verifyToken(token) as unknown as Record<string, unknown>;
+        const candidateUserId =
+          typeof decoded.userId === "string"
+            ? decoded.userId
+            : typeof decoded.sub === "string"
+              ? decoded.sub
+              : null;
+
+        if (!candidateUserId) {
+          client.close(1008, "Invalid authentication payload");
+          return;
+        }
+
+        client.userId = candidateUserId;
       } catch {
         client.close(1008, "Invalid or expired token");
         return;
@@ -88,6 +107,7 @@ export class WebSocketManager {
 
       const clientId = `${client.userId}::${Date.now()}`;
       this.clients.set(clientId, client);
+      this.joinUserRoom(client.userId, clientId);
 
       console.log(`WebSocket client connected: ${clientId}`);
 
@@ -182,6 +202,25 @@ export class WebSocketManager {
     }
   }
 
+  private joinUserRoom(userId: string, clientId: string): void {
+    if (!this.userRooms.has(userId)) {
+      this.userRooms.set(userId, new Set());
+    }
+    this.userRooms.get(userId)!.add(clientId);
+  }
+
+  private leaveUserRoom(userId: string | undefined, clientId: string): void {
+    if (!userId) return;
+
+    const room = this.userRooms.get(userId);
+    if (!room) return;
+
+    room.delete(clientId);
+    if (room.size === 0) {
+      this.userRooms.delete(userId);
+    }
+  }
+
   private unsubscribe(
     clientId: string,
     client: AuthenticatedWebSocket,
@@ -212,11 +251,20 @@ export class WebSocketManager {
       try {
         await this.redisPub.publish(
           this.REDIS_CHANNEL,
-          JSON.stringify({ transactionId: payload.id, message }),
+          JSON.stringify({
+            transactionId: payload.id,
+            userId: payload.userId ?? null,
+            message,
+          }),
         );
       } catch (err) {
         console.warn("Redis publish failed, broadcasting locally only:", err);
       }
+    }
+
+    if (payload.userId) {
+      this.broadcastToUserLocally(payload.userId, message);
+      return;
     }
 
     this.broadcastLocally(payload.id, message);
@@ -231,6 +279,22 @@ export class WebSocketManager {
     if (!subscribedClientIds) return;
 
     for (const clientId of subscribedClientIds) {
+      const client = this.clients.get(clientId);
+      if (client && client.readyState === WebSocket.OPEN) {
+        this.sendToClient(client, message);
+      }
+    }
+  }
+
+  /** Send a message to all locally-connected clients for a specific user. */
+  private broadcastToUserLocally(
+    userId: string,
+    message: WebSocketMessage,
+  ): void {
+    const roomClientIds = this.userRooms.get(userId);
+    if (!roomClientIds) return;
+
+    for (const clientId of roomClientIds) {
       const client = this.clients.get(clientId);
       if (client && client.readyState === WebSocket.OPEN) {
         this.sendToClient(client, message);
@@ -267,6 +331,7 @@ export class WebSocketManager {
     for (const transactionId of client.subscriptions) {
       this.subscriptions.get(transactionId)?.delete(clientId);
     }
+    this.leaveUserRoom(client.userId, clientId);
     this.clients.delete(clientId);
     console.log(`WebSocket client disconnected: ${clientId}`);
   }
@@ -279,10 +344,15 @@ export class WebSocketManager {
     this.heartbeatInterval = setInterval(() => {
       for (const [clientId, client] of this.clients) {
         if (!client.isAlive) {
-          console.log(`Terminating stale WebSocket client: ${clientId}`);
-          client.terminate();
-          this.handleDisconnect(clientId, client);
-          continue;
+          client.missedPings += 1;
+          if (client.missedPings >= this.MAX_MISSED_PINGS) {
+            console.log(`Terminating stale WebSocket client after ${client.missedPings} missed pings: ${clientId}`);
+            client.terminate();
+            this.handleDisconnect(clientId, client);
+            continue;
+          }
+        } else {
+          client.missedPings = 0; // reset on successful pong
         }
         client.isAlive = false;
         client.ping();
@@ -310,10 +380,17 @@ export class WebSocketManager {
 
     await this.redisSub.subscribe(this.REDIS_CHANNEL, (rawMessage: string) => {
       try {
-        const { transactionId, message } = JSON.parse(rawMessage) as {
+        const { transactionId, userId, message } = JSON.parse(rawMessage) as {
           transactionId: string;
+          userId?: string | null;
           message: WebSocketMessage;
         };
+
+        if (typeof userId === "string" && userId.length > 0) {
+          this.broadcastToUserLocally(userId, message);
+          return;
+        }
+
         // Only broadcast locally – the publishing instance already did so
         this.broadcastLocally(transactionId, message);
       } catch (err) {
@@ -336,10 +413,18 @@ export class WebSocketManager {
     await this.redisSub?.disconnect();
     await this.redisPub?.disconnect();
     this.wss.close();
+
+    if (WebSocketManager.activeInstance === this) {
+      WebSocketManager.activeInstance = null;
+    }
   }
 
   /** Returns the number of currently connected clients. */
   get connectionCount(): number {
     return this.clients.size;
+  }
+
+  static getInstance(): WebSocketManager | null {
+    return WebSocketManager.activeInstance;
   }
 }

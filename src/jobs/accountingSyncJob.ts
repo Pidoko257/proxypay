@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { AccountingService } from "../services/accounting";
-import { logger } from "../services/logger";
+
+const logger = console;
 
 export class AccountingSyncJob {
   private accountingService: AccountingService;

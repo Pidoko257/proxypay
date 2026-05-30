@@ -1,0 +1,6 @@
+{
+  "parserOptions": {
+    "project": "./bridge-starter-node/tsconfig.json"
+    // or just "./tsconfig.json" if eslint runs from inside that directory
+  }
+}

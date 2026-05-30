@@ -1,12 +1,17 @@
 import { Request, Response } from "express";
-import { transactionQueue, getQueueStats } from "./transactionQueue";
+import { getQueueStats, pauseQueue, resumeQueue } from "./transactionQueue";
+import { providerBalanceAlertQueue } from "./providerBalanceAlertQueue";
 import { QueueHealthResponse, QueueActionResponse } from "../types/api";
 
 export async function getQueueHealth(req: Request, res: Response) {
   try {
-    const stats = await getQueueStats();
+    const [stats, providerBalanceFailed] = await Promise.all([
+      getQueueStats(),
+      providerBalanceAlertQueue.getFailedCount(),
+    ]);
 
-    const isHealthy = !stats.isPaused && stats.failed < 100;
+    const isHealthy =
+      !stats.isPaused && stats.failed < 100 && providerBalanceFailed < 20;
 
     const body: QueueHealthResponse = {
       status: isHealthy ? "healthy" : "degraded",
@@ -29,7 +34,7 @@ export async function getQueueHealth(req: Request, res: Response) {
 
 export async function pauseQueueEndpoint(req: Request, res: Response) {
   try {
-    await transactionQueue.pause();
+    await pauseQueue();
     const body: QueueActionResponse = {
       success: true,
       message: "Queue paused",
@@ -43,7 +48,7 @@ export async function pauseQueueEndpoint(req: Request, res: Response) {
 
 export async function resumeQueueEndpoint(req: Request, res: Response) {
   try {
-    await transactionQueue.resume();
+    await resumeQueue();
     const body: QueueActionResponse = {
       success: true,
       message: "Queue resumed",
@@ -54,3 +59,4 @@ export async function resumeQueueEndpoint(req: Request, res: Response) {
     res.status(500).json({ error: "Failed to resume queue" });
   }
 }
+

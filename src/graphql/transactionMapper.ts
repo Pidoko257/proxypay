@@ -5,6 +5,7 @@
 export interface MappedTransaction {
   id: string;
   referenceNumber: string;
+  providerReference?: string | null;
   type: string;
   amount: string;
   phoneNumber: string;
@@ -16,11 +17,15 @@ export interface MappedTransaction {
   createdAt: string;
 }
 
-export function mapTransactionRow(row: Record<string, unknown>): MappedTransaction {
+export function mapTransactionRow(
+  row: Record<string, unknown>,
+): MappedTransaction {
   const r = row as {
     id?: unknown;
     reference_number?: string;
     referenceNumber?: string;
+    provider_reference?: string | null;
+    providerReference?: string | null;
     type?: string;
     amount?: string | number;
     phone_number?: string;
@@ -39,6 +44,7 @@ export function mapTransactionRow(row: Record<string, unknown>): MappedTransacti
   return {
     id: String(r.id ?? ""),
     referenceNumber: String(r.reference_number ?? r.referenceNumber ?? ""),
+    providerReference: r.provider_reference ?? r.providerReference ?? null,
     type: String(r.type ?? ""),
     amount: String(r.amount ?? ""),
     phoneNumber: String(r.phone_number ?? r.phoneNumber ?? ""),

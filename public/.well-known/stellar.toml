@@ -1,0 +1,14 @@
+# This file is symlinked or copied to /.well-known/stellar.toml for SEP-1 compliance
+# See: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md
+
+NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
+
+TRANSFER_SERVER="https://api.mobilemoney.com/sep6"
+
+WEB_AUTH_ENDPOINT="https://api.mobilemoney.com/auth"
+TRANSFER_SERVER_SEP0024="https://api.mobilemoney.com/sep24"
+
+[[CURRENCIES]]
+code="XLM"
+status="live"
+is_asset_anchored=false

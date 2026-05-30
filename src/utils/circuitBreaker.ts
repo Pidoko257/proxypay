@@ -3,6 +3,7 @@ import {
   providerCircuitBreakerState,
   providerCircuitBreakerTransitionsTotal,
 } from "./metrics";
+import { checkMobileMoneyHealth } from "../services/mobilemoney/providers/healthCheck";
 
 export interface CircuitBreakerActionResult<T> {
   success: boolean;
@@ -50,7 +51,7 @@ function getBreakerOptions(name: string): CircuitBreakerOptions {
       process.env.PROVIDER_CIRCUIT_BREAKER_RESET_TIMEOUT_MS ?? 30_000,
     ),
     rollingCountTimeout: Number(
-      process.env.PROVIDER_CIRCUIT_BREAKER_ROLLING_WINDOW_MS ?? 10_000,
+      process.env.PROVIDER_CIRCUIT_BREAKER_ROLLING_WINDOW_MS ?? 300_000, // 5 minutes
     ),
     rollingCountBuckets: Number(
       process.env.PROVIDER_CIRCUIT_BREAKER_ROLLING_BUCKETS ?? 10,
@@ -128,12 +129,15 @@ function getOrCreateCircuitBreaker<T>(
   });
 
   breaker.on("open", () => {
+    console.error(`Circuit breaker opened for ${provider}:${operation} due to high error rate`);
     emitStateTransitionMetric(provider, operation, "open");
   });
   breaker.on("halfOpen", () => {
+    console.log(`Circuit breaker half-open for ${provider}:${operation}, testing recovery`);
     emitStateTransitionMetric(provider, operation, "half_open");
   });
   breaker.on("close", () => {
+    console.log(`Circuit breaker closed for ${provider}:${operation}, service recovered`);
     emitStateTransitionMetric(provider, operation, "closed");
   });
 
@@ -166,6 +170,30 @@ export function resetCircuitBreakers(): void {
     breaker.shutdown();
   }
   circuitBreakers.clear();
+}
+
+export async function checkAndResetCircuitBreaker(provider: string, operation: string): Promise<boolean> {
+  const key = getCircuitKey(provider, operation);
+  const breaker = circuitBreakers.get(key);
+  if (!breaker) {
+    return false;
+  }
+
+  // Only reset if open
+  if (breaker.opened) {
+    try {
+      const healthResult = await checkMobileMoneyHealth();
+      const providerHealth = healthResult.providers[provider as keyof typeof healthResult.providers];
+      if (providerHealth && providerHealth.status === "up") {
+        breaker.close();
+        console.log(`Circuit breaker for ${provider}:${operation} reset due to health check`);
+        return true;
+      }
+    } catch (error) {
+      console.error(`Failed to check health for ${provider}: ${error}`);
+    }
+  }
+  return false;
 }
 
 export function getCircuitBreakerCount(): number {

@@ -7,15 +7,21 @@ jest.mock("../../src/utils/metrics", () => ({
   },
 }));
 
+jest.mock("../../src/services/mobilemoney/providers/healthCheck", () => ({
+  checkMobileMoneyHealth: jest.fn(),
+}));
+
 import {
   executeWithCircuitBreaker,
   getCircuitBreakerCount,
   resetCircuitBreakers,
+  checkAndResetCircuitBreaker,
 } from "../../src/utils/circuitBreaker";
 import {
   providerCircuitBreakerState,
   providerCircuitBreakerTransitionsTotal,
 } from "../../src/utils/metrics";
+import { checkMobileMoneyHealth } from "../../src/services/mobilemoney/providers/healthCheck";
 
 describe("executeWithCircuitBreaker", () => {
   beforeEach(() => {
@@ -109,5 +115,73 @@ describe("executeWithCircuitBreaker", () => {
     resetCircuitBreakers();
 
     expect(getCircuitBreakerCount()).toBe(0);
+  });
+
+  describe("checkAndResetCircuitBreaker", () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it("resets open breaker when provider is healthy", async () => {
+      // First open the breaker
+      await expect(
+        executeWithCircuitBreaker({
+          provider: "mtn",
+          operation: "requestPayment",
+          execute: async () => ({
+            success: false,
+            error: new Error("provider-down"),
+          }),
+        }),
+      ).rejects.toThrow("provider-down");
+
+      // Mock health check as up
+      (checkMobileMoneyHealth as jest.Mock).mockResolvedValue({
+        providers: {
+          mtn: { status: "up", responseTime: 100 },
+        },
+      });
+
+      const reset = await checkAndResetCircuitBreaker("mtn", "requestPayment");
+      expect(reset).toBe(true);
+      expect(checkMobileMoneyHealth).toHaveBeenCalled();
+    });
+
+    it("does not reset if breaker is not open", async () => {
+      (checkMobileMoneyHealth as jest.Mock).mockResolvedValue({
+        providers: {
+          mtn: { status: "up", responseTime: 100 },
+        },
+      });
+
+      const reset = await checkAndResetCircuitBreaker("mtn", "requestPayment");
+      expect(reset).toBe(false);
+      expect(checkMobileMoneyHealth).not.toHaveBeenCalled();
+    });
+
+    it("does not reset if provider is down", async () => {
+      // First open the breaker
+      await expect(
+        executeWithCircuitBreaker({
+          provider: "mtn",
+          operation: "requestPayment",
+          execute: async () => ({
+            success: false,
+            error: new Error("provider-down"),
+          }),
+        }),
+      ).rejects.toThrow("provider-down");
+
+      // Mock health check as down
+      (checkMobileMoneyHealth as jest.Mock).mockResolvedValue({
+        providers: {
+          mtn: { status: "down", responseTime: null },
+        },
+      });
+
+      const reset = await checkAndResetCircuitBreaker("mtn", "requestPayment");
+      expect(reset).toBe(false);
+      expect(checkMobileMoneyHealth).toHaveBeenCalled();
+    });
   });
 });

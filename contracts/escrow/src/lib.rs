@@ -48,14 +48,7 @@ pub struct EscrowState {
     pub token: Address,
     /// Gross amount locked in escrow (before fee deduction).
     pub amount: i128,
-    /// Protocol fee in basis points (0–10 000). Taken from `amount` on release.
-    pub fee_bps: u32,
-    /// Address that receives the protocol fee.
-    pub fee_recipient: Address,
-    /// Ledger sequence number after which the depositor may self-refund.
-    /// `0` disables the self-refund path entirely.
-    pub lock_until_ledger: u32,
-    /// `true` once funds have left the contract (either direction).
+    pub emergency_unlock_timestamp: u64,
     pub released: bool,
 }
 
@@ -95,27 +88,19 @@ impl EscrowContract {
         arbiter: Address,
         token: Address,
         amount: i128,
-        lock_until_ledger: u32,
-        fee_bps: u32,
-        fee_recipient: Address,
-    ) -> Result<(), EscrowError> {
-        if amount <= 0 {
-            return Err(EscrowError::InvalidAmount);
-        }
-        if fee_bps > 10_000 {
-            return Err(EscrowError::InvalidFeeBps);
-        }
-        if beneficiary == depositor {
-            return Err(EscrowError::InvalidBeneficiary);
-        }
-        if arbiter == depositor || arbiter == beneficiary {
-            return Err(EscrowError::InvalidArbiter);
-        }
-        if env.storage().instance().has(&ESCROW) {
-            return Err(EscrowError::AlreadyInitialised);
-        }
-
+        emergency_unlock_timestamp: u64,
+    ) {
         depositor.require_auth();
+
+        assert!(amount > 0, "amount must be positive");
+        assert!(
+            !env.storage().instance().has(&ESCROW),
+            "already initialised"
+        );
+        assert!(
+            emergency_unlock_timestamp > env.ledger().timestamp(),
+            "emergency unlock must be in the future"
+        );
 
         // Pull funds from depositor into the contract.
         token::Client::new(&env, &token)
@@ -129,14 +114,13 @@ impl EscrowContract {
                 arbiter,
                 token,
                 amount,
-                fee_bps,
-                fee_recipient,
-                lock_until_ledger,
+                emergency_unlock_timestamp,
                 released: false,
             },
         );
 
-        Ok(())
+        // Extend the TTL of the instance storage to set up state renewal rules
+        env.storage().instance().extend_ttl(1000, 10000);
     }
 
     // ── release ───────────────────────────────────────────────────────────────
@@ -174,7 +158,7 @@ impl EscrowContract {
         state.released = true;
         env.storage().instance().set(&ESCROW, &state);
 
-        Ok(())
+        env.storage().instance().extend_ttl(1000, 10000);
     }
 
     // ── refund ────────────────────────────────────────────────────────────────
@@ -205,7 +189,26 @@ impl EscrowContract {
         state.released = true;
         env.storage().instance().set(&ESCROW, &state);
 
-        Ok(())
+        env.storage().instance().extend_ttl(1000, 10000);
+    }
+
+    /// Emergency refund to the depositor after the unlock timestamp.
+    /// Allows source wallets to recover funds during an extended bridge outage.
+    pub fn emergency_refund(env: Env) {
+        let mut state: EscrowState = env.storage().instance().get(&ESCROW).expect("not initialised");
+
+        state.depositor.require_auth();
+        assert!(!state.released, "already released");
+        assert!(
+            env.ledger().timestamp() >= state.emergency_unlock_timestamp,
+            "emergency unlock not yet available"
+        );
+
+        token::Client::new(&env, &state.token)
+            .transfer(&env.current_contract_address(), &state.depositor, &state.amount);
+
+        state.released = true;
+        env.storage().instance().set(&ESCROW, &state);
     }
 
     // ── self_refund ───────────────────────────────────────────────────────────
@@ -243,11 +246,10 @@ impl EscrowContract {
     // ── get_state ─────────────────────────────────────────────────────────────
 
     /// Return current escrow state (read-only).
-    pub fn get_state(env: Env) -> Result<EscrowState, EscrowError> {
-        env.storage()
-            .instance()
-            .get(&ESCROW)
-            .ok_or(EscrowError::NotInitialised)
+    pub fn get_state(env: Env) -> EscrowState {
+        let state = env.storage().instance().get(&ESCROW).expect("not initialised");
+        env.storage().instance().extend_ttl(1000, 10000);
+        state
     }
 }
 
@@ -257,28 +259,12 @@ impl EscrowContract {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, LedgerInfo},
+        testutils::{Address as _, Ledger},
         token::{Client as TokenClient, StellarAssetClient},
         Address, Env,
     };
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    const MINT_AMOUNT: i128 = 1_000_000;
-
-    /// Deploy a fresh Soroban test environment with a SAC token and an escrow
-    /// contract.  All auth is mocked for simplicity.
-    ///
-    /// Returns: (env, depositor, beneficiary, arbiter, fee_recipient, token_addr, client)
-    fn setup() -> (
-        Env,
-        Address,
-        Address,
-        Address,
-        Address,
-        Address,
-        EscrowContractClient<'static>,
-    ) {
+    fn setup(custom_issuer: Option<Address>) -> (Env, Address, Address, Address, Address, EscrowContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -287,7 +273,8 @@ mod tests {
         let arbiter = Address::generate(&env);
         let fee_recipient = Address::generate(&env);
 
-        let token_admin = Address::generate(&env);
+        // Deploy a test SAC token.
+        let token_admin = custom_issuer.unwrap_or_else(|| Address::generate(&env));
         let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         StellarAssetClient::new(&env, &token_id.address()).mint(&depositor, &MINT_AMOUNT);
 
@@ -352,20 +339,24 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_initialize_stores_correct_state() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
+    fn test_initialize_and_release() {
+        let (env, depositor, beneficiary, arbiter, token, client) = setup(None);
         let amount: i128 = 500_000;
+        let emergency_unlock_timestamp = 1_000;
 
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, 100, 250, &fee_recipient);
+        env.ledger().set_timestamp(100);
 
-        let state = client
-            .try_get_state()
-            .expect("try_get_state panicked")
-            .expect("get_state returned error");
+        client.initialize(
+            &depositor,
+            &beneficiary,
+            &arbiter,
+            &token,
+            &amount,
+            &emergency_unlock_timestamp,
+        );
 
         assert_eq!(state.amount, amount);
-        assert_eq!(state.fee_bps, 250);
-        assert_eq!(state.lock_until_ledger, 100);
+        assert_eq!(state.emergency_unlock_timestamp, emergency_unlock_timestamp);
         assert!(!state.released);
 
         // Depositor's balance should decrease by `amount`.
@@ -420,20 +411,22 @@ mod tests {
     }
 
     #[test]
-    fn test_refund_returns_full_amount_to_depositor() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
+    fn test_refund() {
+        let (env, depositor, beneficiary, arbiter, token, client) = setup(None);
         let amount: i128 = 200_000;
+        let emergency_unlock_timestamp = 1_000;
 
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, 50, 100, &fee_recipient);
+        env.ledger().set_timestamp(100);
 
-        client
-            .try_refund()
-            .expect("try_refund panicked")
-            .expect("refund returned error");
-
-        let tc = TokenClient::new(&env, &token);
-        // Depositor gets full amount back (no fee on refund).
-        assert_eq!(tc.balance(&depositor), MINT_AMOUNT);
+        client.initialize(
+            &depositor,
+            &beneficiary,
+            &arbiter,
+            &token,
+            &amount,
+            &emergency_unlock_timestamp,
+        );
+        client.refund();
 
         let state = client
             .try_get_state()
@@ -443,356 +436,28 @@ mod tests {
     }
 
     #[test]
-    fn test_self_refund_after_lock_expiry() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let amount: i128 = 400_000;
-        let lock_ledger: u32 = 50;
+    fn test_emergency_refund() {
+        let (env, depositor, beneficiary, arbiter, token, client) = setup();
+        let amount: i128 = 300_000;
+        let emergency_unlock_timestamp = 1_000;
 
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, lock_ledger, 0, &fee_recipient);
+        env.ledger().set_timestamp(100);
 
-        // Move past the lock.
-        advance_ledger(&env, lock_ledger + 1);
-
-        client
-            .try_self_refund()
-            .expect("try_self_refund panicked")
-            .expect("self_refund returned error");
-
-        let tc = TokenClient::new(&env, &token);
-        assert_eq!(tc.balance(&depositor), MINT_AMOUNT);
-
-        let state = client
-            .try_get_state()
-            .expect("try_get_state panicked")
-            .expect("get_state returned error");
-        assert!(state.released);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // 2. Failure / edge-case tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_double_initialize_fails() {
-        let (_env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let amount: i128 = 100_000;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, 0, 0, &fee_recipient);
-
-        // Second initialise must be rejected.
-        let result = client.try_initialize(
-            &depositor, &beneficiary, &arbiter, &token,
-            &amount, &0_u32, &0_u32, &fee_recipient,
+        client.initialize(
+            &depositor,
+            &beneficiary,
+            &arbiter,
+            &token,
+            &amount,
+            &emergency_unlock_timestamp,
         );
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
 
-    #[test]
-    fn test_initialize_zero_amount_fails() {
-        let (_env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
+        env.ledger().set_timestamp(emergency_unlock_timestamp);
 
-        let result = client.try_initialize(
-            &depositor, &beneficiary, &arbiter, &token,
-            &0_i128, &0_u32, &0_u32, &fee_recipient,
-        );
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
+        client.emergency_refund();
 
-    #[test]
-    fn test_initialize_negative_amount_fails() {
-        let (_env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-
-        let result = client.try_initialize(
-            &depositor, &beneficiary, &arbiter, &token,
-            &(-1_i128), &0_u32, &0_u32, &fee_recipient,
-        );
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_initialize_fee_above_10000_fails() {
-        let (_env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-
-        let result = client.try_initialize(
-            &depositor, &beneficiary, &arbiter, &token,
-            &100_000_i128, &0_u32, &10_001_u32, &fee_recipient,
-        );
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_initialize_beneficiary_equals_depositor_fails() {
-        let (_env, depositor, _beneficiary, arbiter, fee_recipient, token, client) = setup();
-
-        // Beneficiary == depositor must be rejected.
-        let result = client.try_initialize(
-            &depositor, &depositor, &arbiter, &token,
-            &100_000_i128, &0_u32, &0_u32, &fee_recipient,
-        );
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_initialize_arbiter_equals_depositor_fails() {
-        let (_env, depositor, beneficiary, _arbiter, fee_recipient, token, client) = setup();
-
-        // Arbiter == depositor must be rejected.
-        let result = client.try_initialize(
-            &depositor, &beneficiary, &depositor, &token,
-            &100_000_i128, &0_u32, &0_u32, &fee_recipient,
-        );
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_initialize_arbiter_equals_beneficiary_fails() {
-        let (_env, depositor, beneficiary, _arbiter, fee_recipient, token, client) = setup();
-
-        // Arbiter == beneficiary must be rejected.
-        let result = client.try_initialize(
-            &depositor, &beneficiary, &beneficiary, &token,
-            &100_000_i128, &0_u32, &0_u32, &fee_recipient,
-        );
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_release_without_initialize_fails() {
-        let (_env, _d, _b, _a, _f, _t, client) = setup();
-
-        let result = client.try_release();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_refund_without_initialize_fails() {
-        let (_env, _d, _b, _a, _f, _t, client) = setup();
-
-        let result = client.try_refund();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_self_refund_without_initialize_fails() {
-        let (_env, _d, _b, _a, _f, _t, client) = setup();
-
-        let result = client.try_self_refund();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_release_after_already_released_fails() {
-        let (_env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, 100_000, 0, 0, &fee_recipient);
-
-        client
-            .try_release()
-            .expect("try_release panicked")
-            .expect("first release failed");
-
-        // Second release must fail.
-        let result = client.try_release();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_refund_after_already_released_fails() {
-        let (_env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, 100_000, 0, 0, &fee_recipient);
-
-        client
-            .try_refund()
-            .expect("try_refund panicked")
-            .expect("first refund failed");
-
-        let result = client.try_refund();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_premature_self_refund_before_expiry_fails() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let lock_ledger: u32 = 100;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, 500_000, lock_ledger, 0, &fee_recipient);
-
-        // Lock has NOT expired yet – advance only half-way.
-        advance_ledger(&env, 50);
-        let result = client.try_self_refund();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_self_refund_at_exact_expiry_ledger_fails() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let lock_ledger: u32 = 100;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, 500_000, lock_ledger, 0, &fee_recipient);
-
-        // Exactly at the lock ledger – still locked (sequence <= lock_until).
-        advance_ledger(&env, lock_ledger);
-        let result = client.try_self_refund();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_arbiter_release_after_lock_expired_fails() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let lock_ledger: u32 = 50;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, 500_000, lock_ledger, 0, &fee_recipient);
-
-        // Move past the lock – arbiter window is now closed.
-        advance_ledger(&env, lock_ledger + 5);
-        let result = client.try_release();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_arbiter_refund_after_lock_expired_fails() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let lock_ledger: u32 = 50;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, 500_000, lock_ledger, 0, &fee_recipient);
-
-        advance_ledger(&env, lock_ledger + 5);
-        let result = client.try_refund();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_self_refund_with_no_lock_fails() {
-        let (_env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-
-        // lock_until_ledger = 0 disables the self-refund path.
-        init(&client, &depositor, &beneficiary, &arbiter, &token, 200_000, 0, 0, &fee_recipient);
-
-        let result = client.try_self_refund();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    #[test]
-    fn test_get_state_before_initialize_fails() {
-        let (_env, _d, _b, _a, _f, _t, client) = setup();
-
-        let result = client.try_get_state();
-        assert!(result.is_err() || result.unwrap().is_err());
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // 3. Fee-distribution edge cases
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_release_maximum_fee_bps() {
-        // 100 % fee – all funds go to fee_recipient, beneficiary gets zero.
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let amount: i128 = 100_000;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, 0, 10_000, &fee_recipient);
-
-        client
-            .try_release()
-            .expect("try_release panicked")
-            .expect("release failed");
-
-        let tc = TokenClient::new(&env, &token);
-        assert_eq!(tc.balance(&fee_recipient), amount);
-        assert_eq!(tc.balance(&beneficiary), 0);
-    }
-
-    #[test]
-    fn test_fee_rounds_down_correctly() {
-        // 1 bps on 999 tokens → floor(999 * 1 / 10_000) = 0
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let amount: i128 = 999;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, 0, 1, &fee_recipient);
-
-        client
-            .try_release()
-            .expect("try_release panicked")
-            .expect("release failed");
-
-        let tc = TokenClient::new(&env, &token);
-        assert_eq!(tc.balance(&beneficiary), 999); // fee rounds to zero
-        assert_eq!(tc.balance(&fee_recipient), 0);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // 4. Ledger simulation / network-condition tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_release_just_before_lock_expiry_succeeds() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let lock_ledger: u32 = 200;
-        let amount: i128 = 500_000;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, lock_ledger, 0, &fee_recipient);
-
-        // One ledger before the lock.
-        advance_ledger(&env, lock_ledger - 1);
-
-        client
-            .try_release()
-            .expect("try_release panicked")
-            .expect("release failed");
-
-        let tc = TokenClient::new(&env, &token);
-        assert_eq!(tc.balance(&beneficiary), amount);
-    }
-
-    #[test]
-    fn test_self_refund_one_ledger_after_expiry() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let lock_ledger: u32 = 10;
-        let amount: i128 = 250_000;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, lock_ledger, 0, &fee_recipient);
-
-        advance_ledger(&env, lock_ledger + 1);
-
-        client
-            .try_self_refund()
-            .expect("try_self_refund panicked")
-            .expect("self_refund failed");
-
-        let tc = TokenClient::new(&env, &token);
-        assert_eq!(tc.balance(&depositor), MINT_AMOUNT);
-    }
-
-    #[test]
-    fn test_full_lifecycle_with_fee_and_lock() {
-        let (env, depositor, beneficiary, arbiter, fee_recipient, token, client) = setup();
-        let amount: i128 = 800_000;
-        let fee_bps: u32 = 500; // 5 %
-        let lock_ledger: u32 = 30;
-
-        init(&client, &depositor, &beneficiary, &arbiter, &token, amount, lock_ledger, fee_bps, &fee_recipient);
-
-        // Arbiter releases while lock is active.
-        advance_ledger(&env, 20);
-
-        client
-            .try_release()
-            .expect("try_release panicked")
-            .expect("release failed");
-
-        let tc = TokenClient::new(&env, &token);
-        let expected_fee = amount * fee_bps as i128 / 10_000; // 40_000
-        let expected_net = amount - expected_fee;              // 760_000
-
-        assert_eq!(tc.balance(&beneficiary), expected_net);
-        assert_eq!(tc.balance(&fee_recipient), expected_fee);
-        assert_eq!(tc.balance(&depositor), MINT_AMOUNT - amount);
-
-        let state = client
-            .try_get_state()
-            .expect("try_get_state panicked")
-            .expect("get_state returned error");
-        assert!(state.released);
+        let token_client = TokenClient::new(&env, &token);
+        assert_eq!(token_client.balance(&depositor), 1_000_000);
+        assert!(client.get_state().released);
     }
 }

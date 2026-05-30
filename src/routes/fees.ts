@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { feeService, CreateFeeConfigRequest, UpdateFeeConfigRequest } from "../services/feeService";
 import { requirePermission } from "../middleware/rbac";
-import { authenticateJWT } from "../middleware/auth";
+import { authenticateToken } from "../middleware/auth";
 import { calculateFeeForUser } from "../utils/fees";
 
 const router = Router();
@@ -239,7 +239,7 @@ router.post("/calculate", async (req: Request, res: Response) => {
  */
 router.get(
   "/configurations",
-  authenticateJWT,
+  authenticateToken,
   requirePermission("admin:system"),
   logFeeAction("LIST_CONFIGURATIONS"),
   async (req: Request, res: Response) => {
@@ -287,7 +287,7 @@ router.get("/configurations/active", async (req: Request, res: Response) => {
  */
 router.get(
   "/configurations/:id",
-  authenticateJWT,
+  authenticateToken,
   requirePermission("admin:system"),
   logFeeAction("GET_CONFIGURATION"),
   async (req: Request, res: Response) => {
@@ -322,7 +322,7 @@ router.get(
  */
 router.post(
   "/configurations",
-  authenticateJWT,
+  authenticateToken,
   requirePermission("admin:system"),
   logFeeAction("CREATE_CONFIGURATION"),
   async (req: Request, res: Response) => {
@@ -369,7 +369,7 @@ router.post(
  */
 router.put(
   "/configurations/:id",
-  authenticateJWT,
+  authenticateToken,
   requirePermission("admin:system"),
   logFeeAction("UPDATE_CONFIGURATION"),
   async (req: Request, res: Response) => {
@@ -419,7 +419,7 @@ router.put(
  */
 router.delete(
   "/configurations/:id",
-  authenticateJWT,
+  authenticateToken,
   requirePermission("admin:system"),
   logFeeAction("DELETE_CONFIGURATION"),
   async (req: Request, res: Response) => {
@@ -467,7 +467,7 @@ router.delete(
  */
 router.post(
   "/configurations/:id/activate",
-  authenticateJWT,
+  authenticateToken,
   requirePermission("admin:system"),
   logFeeAction("ACTIVATE_CONFIGURATION"),
   async (req: Request, res: Response) => {
@@ -508,7 +508,7 @@ router.post(
  */
 router.get(
   "/configurations/:id/audit",
-  authenticateJWT,
+  authenticateToken,
   requirePermission("admin:system"),
   logFeeAction("GET_AUDIT_HISTORY"),
   async (req: Request, res: Response) => {

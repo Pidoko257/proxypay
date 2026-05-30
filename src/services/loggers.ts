@@ -1,6 +1,7 @@
 import { NextFunction, Request, RequestHandler, Response } from "express";
 import {
   buildSessionAnomalyAuditEvent,
+  buildSessionFingerprintAnomalyAuditEvent,
   getCurrentRequestIp,
   logSessionAnomaly,
   normalizeIpAddress,
@@ -9,6 +10,7 @@ import {
 
 export {
   buildSessionAnomalyAuditEvent,
+  buildSessionFingerprintAnomalyAuditEvent,
   getCurrentRequestIp,
   logSessionAnomaly,
   normalizeIpAddress,
@@ -369,7 +371,8 @@ async function postToSlack(
   }
 }
 
-async function notifySlackAlert(
+// ✅ Only change from original: added `export` keyword here
+export async function notifySlackAlert(
   details: CriticalErrorDetails,
   overrides: Partial<SlackAlertConfig> = {},
   deps: SlackAlertDependencies = {},

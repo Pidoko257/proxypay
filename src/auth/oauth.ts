@@ -234,7 +234,8 @@ function createRedisBackedStore(
           return null;
         }
         await redisClient.del(key);
-        const record = JSON.parse(raw) as AuthorizationCodeRecord;
+        const rawStr = typeof raw === 'string' ? raw : raw.toString();
+        const record = JSON.parse(rawStr) as AuthorizationCodeRecord;
         return record.expiresAt > Date.now() ? record : null;
       }
       return fallbackStore.consumeAuthorizationCode(code);
@@ -266,7 +267,8 @@ function createRedisBackedStore(
         if (!raw) {
           return null;
         }
-        const record = JSON.parse(raw) as RefreshTokenRecord;
+        const rawStr = typeof raw === 'string' ? raw : raw.toString();
+        const record = JSON.parse(rawStr) as RefreshTokenRecord;
         return record.expiresAt > Date.now() ? record : null;
       }
       return fallbackStore.getRefreshToken(refreshToken);

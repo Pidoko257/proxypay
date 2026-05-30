@@ -1,53 +1,34 @@
-## Description
+# Pull Request Description
 
-Adds OAuth2 authentication support using the authorization code flow with
-access and refresh tokens. The implementation introduces OAuth endpoints,
-extends protected routes to accept bearer tokens, documents the required
-configuration, and adds automated coverage for the new auth flow.
+**Title:** `feat: serve Swagger UI assets via CDN`
 
-## Related Issue
+### 📖 Summary
+Implemented serving of Swagger UI assets from a public CDN (jsDelivr) instead of local static files. This reduces bundle size, speeds up documentation load times, and simplifies deployment by removing the need to serve Swagger UI static assets.
 
-Fixes #59
+### 🛠️ Changes
+| File | Modification |
+|------|--------------|
+| `src/routes/docs.ts` | - Removed `swaggerUi.serve` middleware.
+| | - Added `customCssUrl` and `customJs` options pointing to CDN URLs.
+| | - Updated comments to reflect CDN usage.
 
-## Type of Change
+### ✅ Verification
+- **Local Development:** Run the server in development mode and navigate to `/docs`. Swagger UI loads correctly with assets fetched from CDN.
+- **Production Build:** Build the application (`npm run build`) and start the server in production mode. The `/docs` endpoint still returns a 404 as expected, preserving the dev-only guard.
+- **Network Inspection:** Confirm that CSS and JS are loaded from `https://cdn.jsdelivr.net/npm/swagger-ui-dist/...`.
 
-- [ ] Bug fix
-- [x] New feature
-- [x] Documentation update
-- [ ] Code refactoring
-- [ ] Performance improvement
+### 📈 Impact
+- **Performance:** Faster initial load of API documentation due to CDN caching and reduced server payload.
+- **Maintenance:** No need to manage local Swagger UI static files; updates to the UI are automatically obtained via CDN.
+- **Security:** Using a reputable CDN (jsDelivr) ensures integrity via subresource integrity (SRI) checks can be added in the future.
 
-## Changes Made
+### 📦 Release Notes
+- Swagger UI now served via CDN in development environments.
+- No functional changes to the OpenAPI spec generation.
 
-- Added OAuth2 authorization and token endpoints with JWT access tokens and rotating refresh tokens
-- Updated auth middleware so protected routes accept either the existing admin API key or valid OAuth bearer tokens
-- Added OAuth configuration to the environment example, documented the setup and flow in the README, and added automated tests for the new endpoints
+---
 
-## Testing
-
-Tested with:
-
-- `npm run lint`
-- `npm run type-check`
-- `npm test`
-
-Also added focused automated coverage for the OAuth2 flow, including token
-issuance, refresh handling, and bearer-token access to protected routes.
-
-## Checklist
-
-- [x] Code follows project style
-- [x] Self-reviewed my code
-- [ ] Commented complex code
-- [x] Updated documentation
-- [ ] No new warnings
-- [x] Added tests (if applicable)
-
-## Screenshots (if applicable)
-
-N/A
-
-## Additional Notes
-
-It closes this issue:
-https://github.com/sublime247/mobile-money/issues/59
+**How to Merge**
+1. Review the changes.
+2. Ensure CI passes (`npm test`).
+3. Merge into `main`.

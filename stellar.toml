@@ -1,0 +1,34 @@
+# This is a SEP-1 stellar.toml file for anchor discovery
+# See: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md
+
+[DOCUMENTATION]
+ORG_NAME = "Your Anchor Name"
+ORG_URL = "https://your-anchor-domain.com"
+ORG_DESCRIPTION = "Anchor for Stellar assets."
+ORG_LOGO = "https://your-anchor-domain.com/logo.png"
+ORG_PHYSICAL_ADDRESS = "123 Anchor St, City, Country"
+ORG_OFFICIAL_EMAIL = "support@your-anchor-domain.com"
+
+[[CURRENCIES]]
+code = "USD"
+issuer = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+distribution = "GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"
+name = "US Dollar Token"
+desc = "USD token issued by Anchor."
+conditions = "KYC required."
+image = "https://your-anchor-domain.com/usd.png"
+
+[[CURRENCIES]]
+code = "EUR"
+issuer = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+distribution = "GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"
+name = "Euro Token"
+desc = "EUR token issued by Anchor."
+conditions = "KYC required."
+image = "https://your-anchor-domain.com/eur.png"
+
+[ACCOUNTS]
+distribution = "GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"
+issuing = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+# Add additional metadata as needed

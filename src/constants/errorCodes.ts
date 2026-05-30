@@ -41,12 +41,18 @@ export const ERROR_CODES = {
     DUPLICATE_REQUEST: "DUPLICATE_REQUEST",
     TRANSACTION_EXISTS: "TRANSACTION_EXISTS",
   
-    // Business logic errors (4200-4299) - Various
-    LIMIT_EXCEEDED: "LIMIT_EXCEEDED",
-    INSUFFICIENT_BALANCE: "INSUFFICIENT_BALANCE",
-    TRANSACTION_FAILED: "TRANSACTION_FAILED",
-    PROVIDER_ERROR: "PROVIDER_ERROR",
-    RATE_LIMIT: "RATE_LIMIT",
+    // Security / abuse-prevention errors (4290-4299) - HTTP 429
+    ACCOUNT_LOCKED: "ACCOUNT_LOCKED",
+
+     // Business logic errors (4200-4299) - Various
+     LIMIT_EXCEEDED: "LIMIT_EXCEEDED",
+     INSUFFICIENT_BALANCE: "INSUFFICIENT_BALANCE",
+     INSUFFICIENT_FUNDS: "INSUFFICIENT_FUNDS",
+     TRANSACTION_FAILED: "TRANSACTION_FAILED",
+     PROVIDER_ERROR: "PROVIDER_ERROR",
+     RATE_LIMIT: "RATE_LIMIT",
+     /** Destination Stellar account has not established a trustline for the payment asset. */
+     TRUSTLINE_MISSING: "TRUSTLINE_MISSING",
   
     // Server errors (5000+) - HTTP 500+
     INTERNAL_ERROR: "INTERNAL_ERROR",
@@ -79,57 +85,69 @@ export const ERROR_CODES = {
    * getHttpStatus(ERROR_CODES.LIMIT_EXCEEDED); // Returns 429
    * getHttpStatus('UNKNOWN'); // Returns 500
    */
-  export const getHttpStatus = (code: string): number => {
-    if (
-      code.startsWith("400") ||
-      code === ERROR_CODES.INVALID_INPUT ||
-      code === ERROR_CODES.MISSING_FIELD ||
-      code === ERROR_CODES.INVALID_PHONE_FORMAT ||
-      code === ERROR_CODES.INVALID_AMOUNT
-    ) {
-      return 400;
-    }
-    if (
-      code === ERROR_CODES.UNAUTHORIZED ||
-      code === ERROR_CODES.INVALID_CREDENTIALS ||
-      code === ERROR_CODES.TOKEN_EXPIRED ||
-      code === ERROR_CODES.INVALID_TOKEN
-    ) {
-      return 401;
-    }
-    if (
-      code === ERROR_CODES.FORBIDDEN ||
-      code === ERROR_CODES.INSUFFICIENT_PERMISSIONS
-    ) {
-      return 403;
-    }
-    if (
-      code === ERROR_CODES.NOT_FOUND ||
-      code === ERROR_CODES.RESOURCE_NOT_FOUND ||
-      code === ERROR_CODES.TRANSACTION_NOT_FOUND
-    ) {
-      return 404;
-    }
-    if (
-      code === ERROR_CODES.CONFLICT ||
-      code === ERROR_CODES.DUPLICATE_REQUEST ||
-      code === ERROR_CODES.TRANSACTION_EXISTS
-    ) {
-      return 409;
-    }
-    if (code === ERROR_CODES.LIMIT_EXCEEDED || code === ERROR_CODES.RATE_LIMIT) {
-      return 429;
-    }
-    if (code === ERROR_CODES.PROVIDER_ERROR) {
-      return 502;
-    }
-    if (
-      code.startsWith("500") ||
-      code === ERROR_CODES.INTERNAL_ERROR ||
-      code === ERROR_CODES.SERVICE_UNAVAILABLE ||
-      code === ERROR_CODES.DATABASE_ERROR
-    ) {
-      return 500;
-    }
-    return 500;
-  };
+   export const getHttpStatus = (code: string): number => {
+     if (
+       code.startsWith("400") ||
+       code === ERROR_CODES.INVALID_INPUT ||
+       code === ERROR_CODES.MISSING_FIELD ||
+       code === ERROR_CODES.INVALID_PHONE_FORMAT ||
+       code === ERROR_CODES.INVALID_AMOUNT
+     ) {
+       return 400;
+     }
+     if (
+       code === ERROR_CODES.UNAUTHORIZED ||
+       code === ERROR_CODES.INVALID_CREDENTIALS ||
+       code === ERROR_CODES.TOKEN_EXPIRED ||
+       code === ERROR_CODES.INVALID_TOKEN
+     ) {
+       return 401;
+     }
+     if (
+       code === ERROR_CODES.FORBIDDEN ||
+       code === ERROR_CODES.INSUFFICIENT_PERMISSIONS
+     ) {
+       return 403;
+     }
+     if (
+       code === ERROR_CODES.NOT_FOUND ||
+       code === ERROR_CODES.RESOURCE_NOT_FOUND ||
+       code === ERROR_CODES.TRANSACTION_NOT_FOUND
+     ) {
+       return 404;
+     }
+     if (
+       code === ERROR_CODES.CONFLICT ||
+       code === ERROR_CODES.DUPLICATE_REQUEST ||
+       code === ERROR_CODES.TRANSACTION_EXISTS
+     ) {
+       return 409;
+     }
+     if (
+       code === ERROR_CODES.LIMIT_EXCEEDED ||
+       code === ERROR_CODES.RATE_LIMIT ||
+       code === ERROR_CODES.ACCOUNT_LOCKED
+     ) {
+       return 429;
+     }
+     if (
+       code === ERROR_CODES.INSUFFICIENT_BALANCE ||
+       code === ERROR_CODES.INSUFFICIENT_FUNDS ||
+       code === ERROR_CODES.TRANSACTION_FAILED ||
+       code === ERROR_CODES.TRUSTLINE_MISSING
+     ) {
+       return 400;
+     }
+     if (code === ERROR_CODES.PROVIDER_ERROR) {
+       return 502;
+     }
+     if (
+       code.startsWith("500") ||
+       code === ERROR_CODES.INTERNAL_ERROR ||
+       code === ERROR_CODES.SERVICE_UNAVAILABLE ||
+       code === ERROR_CODES.DATABASE_ERROR
+     ) {
+       return 500;
+     }
+     return 500;
+   };

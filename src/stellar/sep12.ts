@@ -1,16 +1,16 @@
 import { Router, Request, Response } from "express";
 import { Pool } from "pg";
-import rateLimit from "express-rate-limit";
+import { sep12RateLimiter } from "../middleware/rateLimit";
+import { upload } from "../middleware/upload";
 import { z } from "zod";
 import KYCService, { KYCLevel, KYCStatus, DocumentType } from "../services/kyc";
+import { UserModel } from "../models/users";
 
 /**
  * SEP-12: KYC API
- * 
- * This implements the Stellar Ecosystem Proposal 12 (SEP-12) standard for
+ * * This implements the Stellar Ecosystem Proposal 12 (SEP-12) standard for
  * customer information collection and KYC verification.
- * 
- * Specification: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
+ * * Specification: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
  */
 
 // ============================================================================
@@ -132,7 +132,7 @@ const PutCustomerSchema = z.object({
   occupation: z.string().optional(),
   employer_name: z.string().optional(),
   employer_address: z.string().optional(),
-});
+}).catchall(z.any()); // Catch all unmapped dynamic fields
 
 // ============================================================================
 // SEP-12 Service
@@ -141,10 +141,12 @@ const PutCustomerSchema = z.object({
 export class Sep12Service {
   private kycService: KYCService;
   private db: Pool;
+  private userModel: UserModel;
 
   constructor(db: Pool) {
     this.db = db;
     this.kycService = new KYCService(db);
+    this.userModel = new UserModel();
   }
 
   /**
@@ -391,11 +393,24 @@ export class Sep12Service {
     try {
       const validatedData = PutCustomerSchema.parse(data);
       
+      const {
+        account, memo, memo_type, type,
+        first_name, last_name, email_address, mobile_number, birth_date,
+        birth_place, birth_country, address, address_country_code,
+        state_or_province, city, postal_code, id_type, id_country_code,
+        id_issue_date, id_expiration_date, id_number, photo_id_front,
+        photo_id_back, photo_proof_residence, organization_name,
+        organization_registration_number, organization_registration_date,
+        organization_registered_address, tax_id, tax_id_name, occupation,
+        employer_name, employer_address,
+        ...customFields
+      } = validatedData;
+
       // Find or create user by Stellar account
       let userId: string;
       let applicantId: string | null = null;
       
-      if (validatedData.account) {
+      if (account) {
         const userQuery = `
           SELECT u.id, ka.applicant_id
           FROM users u
@@ -405,7 +420,7 @@ export class Sep12Service {
           LIMIT 1
         `;
         
-        const userResult = await this.db.query(userQuery, [validatedData.account]);
+        const userResult = await this.db.query(userQuery, [account]);
         
         if (userResult.rows.length > 0) {
           userId = userResult.rows[0].id;
@@ -419,9 +434,9 @@ export class Sep12Service {
           `;
           
           const newUserResult = await this.db.query(createUserQuery, [
-            validatedData.account,
+            account,
             KYCLevel.NONE,
-            validatedData.mobile_number || "pending",
+            mobile_number || "pending",
           ]);
           
           userId = newUserResult.rows[0].id;
@@ -432,18 +447,19 @@ export class Sep12Service {
 
       // Create or update KYC applicant
       const applicantData = {
-        first_name: validatedData.first_name || "",
-        last_name: validatedData.last_name || "",
-        email: validatedData.email_address,
-        dob: validatedData.birth_date,
-        phone_number: validatedData.mobile_number,
-        address: validatedData.address ? {
-          street: validatedData.address,
-          town: validatedData.city || "",
-          postcode: validatedData.postal_code || "",
-          country: validatedData.address_country_code || "USA",
-          state: validatedData.state_or_province,
+        first_name: first_name || "",
+        last_name: last_name || "",
+        email: email_address,
+        dob: birth_date,
+        phone_number: mobile_number,
+        address: address ? {
+          street: address,
+          town: city || "",
+          postcode: postal_code || "",
+          country: address_country_code || "USA",
+          state: state_or_province,
         } : undefined,
+        custom_fields: Object.keys(customFields).length > 0 ? customFields : undefined,
       };
 
       let applicant;
@@ -467,29 +483,52 @@ export class Sep12Service {
         await this.db.query(linkQuery, [userId, applicantId]);
       }
 
+      // Save sensitive fields in users table in encrypted form
+      await this.userModel.updateSensitiveData(userId, {
+        firstName: first_name,
+        lastName: last_name,
+        address: address,
+        dateOfBirth: birth_date,
+        idNumber: id_number,
+      });
+
       // Handle document uploads if provided
-      if (validatedData.photo_id_front) {
-        const docType = this.mapIdTypeToDocumentType(validatedData.id_type);
+      if (photo_id_front) {
+        const docType = this.mapIdTypeToDocumentType(id_type);
         
         await this.kycService.uploadDocument({
           applicant_id: applicantId,
           type: docType,
           side: "front",
           filename: `id_front_${Date.now()}.jpg`,
-          data: validatedData.photo_id_front,
+          data: photo_id_front,
         });
       }
 
-      if (validatedData.photo_id_back) {
-        const docType = this.mapIdTypeToDocumentType(validatedData.id_type);
+      if (photo_id_back) {
+        const docType = this.mapIdTypeToDocumentType(id_type);
         
         await this.kycService.uploadDocument({
           applicant_id: applicantId,
           type: docType,
           side: "back",
           filename: `id_back_${Date.now()}.jpg`,
-          data: validatedData.photo_id_back,
+          data: photo_id_back,
         });
+      }
+
+      // Process dynamic custom fields/documents attached
+      for (const [key, value] of Object.entries(customFields)) {
+        if (typeof value === 'string' && value.length > 500) {
+          const docType = this.mapIdTypeToDocumentType(id_type);
+          await this.kycService.uploadDocument({
+            applicant_id: applicantId,
+            type: docType, // Or map to a generic "other" document type
+            side: "front",
+            filename: `${key}_${Date.now()}.png`,
+            data: value,
+          });
+        }
       }
 
       // Return customer status
@@ -556,22 +595,11 @@ export const createSep12Router = (db: Pool): Router => {
   const sep12Service = new Sep12Service(db);
 
   // Rate limiter for SEP-12 endpoints
-  const sep12Limiter = process.env.NODE_ENV === "test"
-    ? (req: any, res: any, next: any) => next()
-    : rateLimit({
-        windowMs: 60 * 1000,
-        max: 20,
-        standardHeaders: true,
-        legacyHeaders: false,
-        message: {
-          error: "Too many requests, please try again later",
-        },
-      });
+  const sep12Limiter = sep12RateLimiter;
 
   /**
    * GET /customer
-   * 
-   * Retrieve customer information and KYC status
+   * * Retrieve customer information and KYC status
    */
   router.get("/customer", sep12Limiter, async (req: Request, res: Response) => {
     try {
@@ -601,12 +629,20 @@ export const createSep12Router = (db: Pool): Router => {
 
   /**
    * PUT /customer
-   * 
-   * Create or update customer information
+   * * Create or update customer information
    */
-  router.put("/customer", sep12Limiter, async (req: Request, res: Response) => {
+  router.put("/customer", sep12Limiter, upload.any(), async (req: Request, res: Response) => {
     try {
-      const customer = await sep12Service.putCustomer(req.body);
+      const customerData = { ...req.body };
+      
+      // Support multipart upload: parse custom documents and map as base64 fields so KYC validation parses them
+      if (req.files && Array.isArray(req.files)) {
+        req.files.forEach((file: any) => {
+          customerData[file.fieldname] = file.buffer.toString("base64");
+        });
+      }
+
+      const customer = await sep12Service.putCustomer(customerData);
       res.json(customer);
     } catch (error: any) {
       console.error("[SEP-12] Error putting customer:", error);
@@ -618,8 +654,7 @@ export const createSep12Router = (db: Pool): Router => {
 
   /**
    * DELETE /customer/:account
-   * 
-   * Delete customer information (GDPR compliance)
+   * * Delete customer information (GDPR compliance)
    */
   router.delete("/customer/:account", sep12Limiter, async (req: Request, res: Response) => {
     try {

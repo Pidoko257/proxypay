@@ -1,0 +1,15 @@
+apiVersion: v2
+name: mobile-money
+description: Helm chart to deploy the Mobile Money backend, Redis, Bull worker, and autoscaling.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - mobile-money
+  - stellar
+  - redis
+  - bullmq
+  - helm
+maintainers:
+  - name: mobile-money
+    email: support@example.com

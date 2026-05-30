@@ -1,0 +1,80 @@
+---
+# Worker Deployment — runs BullMQ consumers separately from the API server.
+# KEDA scales THIS deployment up/down based on queue depth.
+# The API deployment (deployment.yaml) is unaffected.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mobile-money-worker
+  labels:
+    app: mobile-money-worker
+spec:
+  # Start with 1 replica; KEDA takes over from here
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mobile-money-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: mobile-money-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics/queue_depth"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: mobile-money-worker
+          image: shantelpeters/mobile-money:latest
+          # Run in worker-only mode — no HTTP server
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: WORKER_ONLY
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secrets
+                  key: redis-url
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                # Allow in-flight jobs to finish before pod is removed
+                command: ["/bin/sh", "-c", "sleep 10"]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mobile-money-worker-pdb
+spec:
+  # Allow KEDA to scale down to 0 but protect against involuntary disruptions
+  minAvailable: 0
+  selector:
+    matchLabels:
+      app: mobile-money-worker

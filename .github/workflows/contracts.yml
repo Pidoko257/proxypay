@@ -34,7 +34,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-          components: clippy, rustfmt
+          # rustfmt  — needed for `cargo fmt --check`
+          # clippy   — needed for `cargo clippy`
+          components: rustfmt, clippy
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -43,24 +45,29 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contracts/target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('contracts/**/Cargo.toml', 'contracts/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-lint-
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/Cargo.toml', 'contracts/escrow/Cargo.toml', 'contracts/htlc/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Check formatting
+      # -----------------------------------------------------------------------
+      # Formatting gate — reject any code that diverges from rustfmt.toml rules.
+      # -----------------------------------------------------------------------
+      - name: Check formatting (cargo fmt)
+        working-directory: contracts
         run: cargo fmt --all -- --check
 
-      - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+      # -----------------------------------------------------------------------
+      # Lint gate — treat every clippy warning as an error (mirrors clippy.toml
+      # and the workspace [lints] table in Cargo.toml).
+      # -----------------------------------------------------------------------
+      - name: Lint (cargo clippy)
+        working-directory: contracts
+        run: >
+          cargo clippy
+          --all-targets
+          --all-features
+          -- -D warnings
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # 2. Build
-  # ──────────────────────────────────────────────────────────────────────────
-  build:
-    name: Build WASM
-    runs-on: ubuntu-latest
-    needs: lint
-    defaults:
-      run:
+      - name: Build contracts (wasm)
         working-directory: contracts
 
     steps:

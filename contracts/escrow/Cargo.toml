@@ -3,6 +3,10 @@ name = "escrow"
 version = "0.2.0"
 edition = "2021"
 
+# Inherit workspace-level lint configuration.
+[lints]
+workspace = true
+
 [lib]
 crate-type = ["cdylib"]
 

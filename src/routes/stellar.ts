@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import rateLimit from "express-rate-limit";
+import { sep24RateLimiter as stellarRateLimiter } from "../middleware/rateLimit";
 import NodeCache from "node-cache";
 import { StrKey, Horizon } from "stellar-sdk";
 
@@ -9,10 +9,7 @@ const router = Router();
 const cache = new NodeCache({ stdTTL: 300 });
 
 // Rate limiter (per IP)
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 20,
-});
+const limiter = stellarRateLimiter;
 
 // Horizon server
 const server = new Horizon.Server(
@@ -35,8 +32,8 @@ router.get(
 
     //Check cache
     const cached = cache.get(address);
-    if (cached) {
-      return res.json({ ...cached, cached: true });
+    if (cached && typeof cached === "object") {
+      return res.json({ ...(cached as Record<string, unknown>), cached: true });
     }
 
     try {

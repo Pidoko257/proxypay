@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authenticateToken } from "../middleware/auth";
+import { attachUserObject } from "../middleware/attachUserObject";
 import {
   createVault,
   getUserVaults,
@@ -13,8 +14,9 @@ import {
 
 const router = Router();
 
-// Apply authentication to all vault routes
+// Apply authentication and user object attachment to all vault routes
 router.use(authenticateToken);
+router.use(attachUserObject);
 
 // Vault management routes
 router.post("/", createVault);

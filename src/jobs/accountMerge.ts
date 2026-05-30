@@ -1,5 +1,6 @@
 import * as StellarSdk from "stellar-sdk";
 import { getNetworkPassphrase, getStellarServer } from "../config/stellar";
+import { addAccountMergeJob, addBatchAccountMergeJobs } from "../queue/accountMergeQueue";
 
 const ACCOUNT_MERGE_PREFIX = "[account-merge]";
 const STROOPS_PER_XLM = 10_000_000n;
@@ -171,6 +172,10 @@ function isNotFoundError(error: unknown): boolean {
   return maybeResponse.response?.status === 404;
 }
 
+/**
+ * Queue account merge jobs for all configured auxiliary accounts.
+ * This function runs as a scheduled job and queues individual merge jobs to BullMQ.
+ */
 export async function runAccountMergeJob(): Promise<void> {
   const sourceSecrets = parseAuxiliaryAccountSecrets();
   if (sourceSecrets.length === 0) {
@@ -191,101 +196,39 @@ export async function runAccountMergeJob(): Promise<void> {
     10,
   );
   const dryRun = process.env.ACCOUNT_MERGE_DRY_RUN === "true";
-  const server = getStellarServer();
-
-  let mergedCount = 0;
-  let skippedCount = 0;
-  let reclaimedStroops = 0n;
-
-  for (const secret of sourceSecrets) {
-    let sourceKeypair: StellarSdk.Keypair;
-
-    try {
-      sourceKeypair = StellarSdk.Keypair.fromSecret(secret);
-    } catch {
-      skippedCount += 1;
-      console.error(`${ACCOUNT_MERGE_PREFIX} Skipping invalid source secret`);
-      continue;
-    }
-
-    const sourcePublicKey = sourceKeypair.publicKey();
-
-    if (sourcePublicKey === destination) {
-      skippedCount += 1;
-      console.warn(
-        `${ACCOUNT_MERGE_PREFIX} Skipping ${sourcePublicKey}: source matches destination`,
-      );
-      continue;
-    }
-
-    try {
-      const account = await server.loadAccount(sourcePublicKey);
-      const evaluation = evaluateAccountMergeCandidate(
-        {
-          nativeBalance: getNativeBalance(account),
-          subentryCount: account.subentry_count,
-          hasNonNativeBalances: hasNonNativeBalances(account),
-          lastActivityAt: await fetchLastActivityAt(server, sourcePublicKey),
-        },
-        inactivityDays,
-      );
-
-      if (!evaluation.eligible) {
-        skippedCount += 1;
-        console.log(
-          `${ACCOUNT_MERGE_PREFIX} Skipping ${sourcePublicKey}: ${evaluation.reason}`,
-        );
-        continue;
-      }
-
-      if (dryRun) {
-        console.log(
-          `${ACCOUNT_MERGE_PREFIX} Dry run: would merge ${sourcePublicKey} into ${destination} reclaiming ~${evaluation.reclaimableBalance} XLM`,
-        );
-        continue;
-      }
-
-      const transaction = new StellarSdk.TransactionBuilder(account, {
-        fee: StellarSdk.BASE_FEE,
-        networkPassphrase: getNetworkPassphrase(),
-      })
-        .addOperation(
-          StellarSdk.Operation.accountMerge({
-            destination,
-          }),
-        )
-        .setTimeout(60)
-        .build();
-
-      transaction.sign(sourceKeypair);
-
-      const response = await server.submitTransaction(transaction);
-
-      mergedCount += 1;
-      reclaimedStroops += xlmToStroops(evaluation.reclaimableBalance);
-
-      console.log(
-        `${ACCOUNT_MERGE_PREFIX} Merged ${sourcePublicKey} into ${destination}; reclaimed ${evaluation.reclaimableBalance} XLM; tx=${response.hash}`,
-      );
-    } catch (error) {
-      skippedCount += 1;
-
-      if (isNotFoundError(error)) {
-        console.warn(
-          `${ACCOUNT_MERGE_PREFIX} Skipping ${sourcePublicKey}: account not found on Horizon`,
-        );
-        continue;
-      }
-
-      console.error(
-        `${ACCOUNT_MERGE_PREFIX} Skipping ${sourcePublicKey}: merge attempt failed`,
-        error,
-      );
-      continue;
-    }
-  }
 
   console.log(
-    `${ACCOUNT_MERGE_PREFIX} Completed. merged=${mergedCount} skipped=${skippedCount} reclaimed=${stroopsToXlm(reclaimedStroops)} XLM`,
+    `${ACCOUNT_MERGE_PREFIX} Queuing ${sourceSecrets.length} account merge jobs (dryRun=${dryRun})`,
   );
+
+  // Queue all merge jobs to BullMQ
+  const jobs = sourceSecrets.map((secret) => ({
+    sourceSecret: secret,
+    destinationPublicKey: destination,
+    inactivityDays,
+    dryRun,
+  }));
+
+  const queuedJobs = await addBatchAccountMergeJobs(jobs);
+
+  console.log(
+    `${ACCOUNT_MERGE_PREFIX} Queued ${queuedJobs.length} account merge jobs for processing`,
+  );
+}
+
+/**
+ * Get summary of reclaimed base reserves from completed merge jobs.
+ * This can be called after jobs complete to log total reclaimed XLM.
+ */
+export async function getAccountMergeSummary(): Promise<{
+  totalQueued: number;
+  destination: string | null;
+}> {
+  const sourceSecrets = parseAuxiliaryAccountSecrets();
+  const destination = resolveMergeDestinationPublicKey();
+
+  return {
+    totalQueued: sourceSecrets.length,
+    destination,
+  };
 }

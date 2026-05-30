@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mobile-money.fullname" . }}-config
+  labels:
+    {{ include "mobile-money.labels" . | indent 4 }}
+data:
+  NODE_ENV: "{{ .Values.config.nodeEnv }}"
+  PORT: "{{ .Values.config.port }}"
+  STELLAR_NETWORK: "{{ .Values.config.stellarNetwork }}"
+  COMPRESSION_ENABLED: "{{ .Values.config.compressionEnabled }}"
+  RATE_LIMIT_WINDOW_MS: "{{ .Values.config.rateLimitWindowMs }}"
+  RATE_LIMIT_MAX_REQUESTS: "{{ .Values.config.rateLimitMaxRequests }}"
+  REQUEST_SIZE_LIMIT: "{{ .Values.config.requestSizeLimit }}"

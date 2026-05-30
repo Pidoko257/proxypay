@@ -1,4 +1,10 @@
 import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
+import { isReadOnlyQuery } from "../utils/readOnlyDetector";
+import { dbReplicaLagSeconds, dbReplicaReadEnabled } from "../utils/metrics";
+import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
+
+const productionSsl =
+  process.env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined;
 
 // Configuration for slow query logging
 const SLOW_QUERY_THRESHOLD_MS = parseInt(
@@ -125,14 +131,16 @@ class SlowQueryPool extends Pool {
 }
 
 /**
- * Primary connection pool – handles all write operations
+ * Primary connection pool – now routes through PgBouncer for transaction-level pooling
+ * This significantly reduces the number of direct connections to Postgres
  * (INSERT, UPDATE, DELETE) and read operations when no replica is available.
  */
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 20,
+  connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
+  max: 1000,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 500,
+  ssl: productionSsl,
 });
 
 // Wrap query for slow-query logging while preserving Pool typings.
@@ -179,30 +187,108 @@ const replicaUrls: string[] = process.env.READ_REPLICA_URL
   ? process.env.READ_REPLICA_URL.split(",").map((url) => url.trim())
   : [];
 
+const REPLICA_SYNC_LAG_THRESHOLD_SECONDS = (() => {
+  const threshold = parseFloat(process.env.REPLICA_SYNC_LAG_THRESHOLD_SECONDS || "5");
+  return Number.isFinite(threshold) ? threshold : 5;
+})();
+const REPLICA_LAG_MONITOR_INTERVAL_MS = (() => {
+  const interval = parseInt(process.env.REPLICA_LAG_MONITOR_INTERVAL_MS || "10000", 10);
+  return Number.isFinite(interval) && interval > 0 ? interval : 10000;
+})();
+
+type ReplicaStatus = {
+  url: string;
+  enabled: boolean;
+  healthy: boolean;
+  lagSeconds: number | null;
+};
+
+const replicaStatuses: ReplicaStatus[] = replicaUrls.map((url) => ({
+  url,
+  enabled: true,
+  healthy: true,
+  lagSeconds: null,
+}));
+
 // Build an individual Pool for each replica URL
 const replicaPools: Pool[] = replicaUrls.map(
   (url) =>
     new Pool({
       connectionString: url,
-      max: 10,
+      max: 50,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
+      connectionTimeoutMillis: 500,
+      ssl: productionSsl,
     }),
 );
 
 // Track which replica to use next for round-robin load balancing
 let replicaIndex = 0;
 
+function getActiveReplicaIndices(): number[] {
+  return replicaStatuses
+    .map((status, idx) => ({ status, idx }))
+    .filter(({ status }) => status.enabled && status.healthy)
+    .map(({ idx }) => idx);
+}
+
 /**
  * Return the next replica pool in round-robin order.
  * Returns null if no replica pools are configured.
  */
 function getNextReplicaPool(): Pool | null {
-  if (replicaPools.length === 0) return null;
-  const selected = replicaPools[replicaIndex % replicaPools.length];
+  const activeIndices = getActiveReplicaIndices();
+  if (activeIndices.length === 0) return null;
+  const selectedIndex = activeIndices[replicaIndex % activeIndices.length];
   replicaIndex += 1;
-  return selected;
+  return replicaPools[selectedIndex];
 }
+
+async function refreshReplicaStatus(idx: number): Promise<void> {
+  const url = replicaUrls[idx];
+  let healthy = false;
+  let lagSeconds: number | null = null;
+  let client: PoolClient | null = null;
+
+  try {
+    client = await replicaPools[idx].connect();
+    const query = `
+      SELECT CASE
+        WHEN pg_is_in_recovery() THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
+        ELSE 0
+      END AS lag_seconds
+    `;
+    const result = await client.query<{ lag_seconds: number | null }>(query);
+    lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
+    healthy = true;
+  } catch (error) {
+    healthy = false;
+    lagSeconds = null;
+    console.warn(`Replica health check failed for ${url}:`, error);
+  } finally {
+    client?.release();
+  }
+
+  const enabled = healthy && lagSeconds !== null && lagSeconds <= REPLICA_SYNC_LAG_THRESHOLD_SECONDS;
+  replicaStatuses[idx] = { url, enabled, healthy, lagSeconds };
+
+  dbReplicaLagSeconds.labels(url).set(lagSeconds ?? 0);
+  dbReplicaReadEnabled.labels(url).set(enabled ? 1 : 0);
+}
+
+async function refreshAllReplicaStatuses(): Promise<void> {
+  await Promise.all(replicaUrls.map((_, idx) => refreshReplicaStatus(idx)));
+}
+
+function startReplicaLagMonitor(): void {
+  if (replicaUrls.length === 0) return;
+  void refreshAllReplicaStatuses();
+  setInterval(() => {
+    void refreshAllReplicaStatuses();
+  }, REPLICA_LAG_MONITOR_INTERVAL_MS);
+}
+
+startReplicaLagMonitor();
 
 /**
  * Execute a read-only SQL query against a replica pool if available.
@@ -232,12 +318,13 @@ export async function queryRead<T extends import("pg").QueryResultRow = any>(
     }
   }
 
-  // Fall back: use primary pool
+  // Fall back: use primary pool (which goes through PgBouncer)
   return pool.query<T>(text, params);
 }
 
 /**
  * Execute a write SQL query (INSERT / UPDATE / DELETE) against the primary pool.
+ * All writes now route through PgBouncer via the primary pool connection.
  *
  * @param text   - The parameterised SQL query string
  * @param params - Optional query parameters
@@ -254,20 +341,180 @@ export async function queryWrite<T extends import("pg").QueryResultRow = any>(
  * Returns an array of status objects – useful for monitoring endpoints.
  */
 export async function checkReplicaHealth(): Promise<
-  { url: string; healthy: boolean }[]
+  { url: string; healthy: boolean; enabled: boolean; lagSeconds: number | null }[]
 > {
   return Promise.all(
     replicaUrls.map(async (url, idx) => {
       let client: PoolClient | null = null;
+      let healthy = false;
+      let lagSeconds: number | null = null;
+
       try {
         client = await replicaPools[idx].connect();
-        await client.query("SELECT 1");
-        return { url, healthy: true };
+        const query = `
+          SELECT CASE
+            WHEN pg_is_in_recovery() THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
+            ELSE 0
+          END AS lag_seconds
+        `;
+        const result = await client.query<{ lag_seconds: number | null }>(query);
+        lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
+        healthy = true;
       } catch {
-        return { url, healthy: false };
+        healthy = false;
       } finally {
         client?.release();
       }
+
+      const enabled = healthy && lagSeconds !== null && lagSeconds <= REPLICA_SYNC_LAG_THRESHOLD_SECONDS;
+      return { url, healthy, enabled, lagSeconds };
     }),
   );
+}
+
+/**
+ * Smart query router: automatically detects read-only (SELECT) queries and
+ * routes them to replica pools, while routing writes (INSERT/UPDATE/DELETE) to primary.
+ * This enables transparent replica usage without changing existing code patterns.
+ *
+ * @param text   - The parameterised SQL query string
+ * @param params - Optional query parameters
+ */
+export async function querySmart<T extends import("pg").QueryResultRow = any>(
+  text: string,
+  params?: unknown[],
+): Promise<import("pg").QueryResult<T>> {
+  // Auto-detect if this is a read-only query
+  if (isReadOnlyQuery(text)) {
+    return queryRead<T>(text, params);
+  } else {
+    return queryWrite<T>(text, params);
+  }
+}
+
+/**
+ * Get PgBouncer pool statistics
+ * Queries PgBouncer admin database to get connection pool metrics
+ */
+export async function getPgBouncerStats(): Promise<{
+  activeConnections: number;
+  idleConnections: number;
+  totalConnections: number;
+  clientConnections: number;
+}> {
+  try {
+    // Query PgBouncer stats database (special admin database)
+    const pgbouncerPool = new Pool({
+      connectionString: process.env.PGBOUNCER_ADMIN_URL || "postgresql://user:password@localhost:6432/pgbouncer",
+    });
+
+    const result = await pgbouncerPool.query(
+      "SELECT sum(cl_active) as active, sum(cl_idle) as idle, sum(sv_active) as sv_active, sum(sv_idle) as sv_idle FROM pgbouncer.client_lookup;",
+    );
+
+    await pgbouncerPool.end();
+
+    const row = result.rows[0] || {};
+    return {
+      activeConnections: parseInt(row.sv_active || 0),
+      idleConnections: parseInt(row.sv_idle || 0),
+      totalConnections: (parseInt(row.sv_active || 0) + parseInt(row.sv_idle || 0)),
+      clientConnections: (parseInt(row.cl_active || 0) + parseInt(row.cl_idle || 0)),
+    };
+  } catch (err) {
+    console.warn("Failed to get PgBouncer stats:", err);
+    return {
+      activeConnections: 0,
+      idleConnections: 0,
+      totalConnections: 0,
+      clientConnections: 0,
+    };
+  }
+}
+
+/**
+ * Context-aware query function that respects HTTP method-based routing decisions.
+ * 
+ * This function is designed to work with the readReplicaRoutingMiddleware.
+ * It routes queries based on:
+ * 1. HTTP method context (if provided) - GET requests go to replica
+ * 2. SQL query type (fallback) - SELECT queries go to replica
+ * 
+ * Usage in route handlers:
+ *   const result = await queryWithContext(req, "SELECT * FROM users", []);
+ * 
+ * @param req - Express Request object (with dbRouting context from middleware)
+ * @param text - SQL query string
+ * @param params - Query parameters
+ * @returns Query result
+ */
+export async function queryWithContext<
+  T extends import("pg").QueryResultRow = any,
+>(
+  req: any,
+  text: string,
+  params?: unknown[],
+): Promise<import("pg").QueryResult<T>> {
+  // Check for HTTP method-based routing context
+  if (req?.dbRouting?.useReplicaPool) {
+    return queryRead<T>(text, params);
+  }
+
+  // Fall back to SQL query-based routing
+  return querySmart<T>(text, params);
+}
+
+/**
+ * Batch query execution with request context.
+ * Executes multiple queries with proper pool routing based on HTTP method.
+ * 
+ * All read operations (GET) use replica, all writes use primary.
+ * 
+ * @param req - Express Request object
+ * @param queries - Array of { text, params } query configurations
+ * @returns Array of query results
+ */
+export async function queryBatchWithContext<
+  T extends import("pg").QueryResultRow = any,
+>(
+  req: any,
+  queries: Array<{ text: string; params?: unknown[] }>,
+): Promise<import("pg").QueryResult<T>[]> {
+  const results: import("pg").QueryResult<T>[] = [];
+
+  for (const query of queries) {
+    const result = await queryWithContext<T>(req, query.text, query.params);
+    results.push(result);
+  }
+
+  return results;
+}
+
+/**
+ * Get database pool statistics combining primary and replica metrics.
+ * Useful for monitoring and health check endpoints.
+ */
+export async function getPoolStats(): Promise<{
+  primary: {
+    mode: "normal" | "failover";
+    url: string;
+    description: string;
+  };
+  replicas: Array<{
+    url: string;
+    healthy: boolean;
+  }>;
+}> {
+  const replicaStats = await checkReplicaHealth();
+
+  return {
+    primary: {
+      mode: isDRMode() ? "failover" : "normal",
+      url: DR_DATABASE_URL || process.env.DATABASE_URL || "",
+      description: isDRMode()
+        ? "Running in DR failover mode - writes redirected to promoted replica"
+        : "Primary database - all critical writes",
+    },
+    replicas: replicaStats,
+  };
 }

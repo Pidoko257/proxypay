@@ -91,3 +91,49 @@ export const getFeeBumpConfig = () => ({
   // Maximum number of operations per transaction
   maxOperationsPerTransaction: parseInt(process.env.STELLAR_MAX_OPS || "100", 10),
 });
+
+// Channel Accounts Pool Configuration
+export interface ChannelAccountConfig {
+  publicKey: string;
+  secretKey: string;
+}
+
+export const getChannelAccountsConfig = (): {
+  accounts: ChannelAccountConfig[];
+  poolConfig: {
+    lockTimeoutMs: number;
+    maxConsecutiveErrors: number;
+    disableRecoveryMs: number;
+    maxQueueSize: number;
+    queueTimeoutMs: number;
+  };
+} => {
+  // Parse channel accounts from environment
+  // Format: JSON array of {publicKey, secretKey} objects
+  let accounts: ChannelAccountConfig[] = [];
+
+  const accountsJson = process.env.STELLAR_CHANNEL_ACCOUNTS;
+  if (accountsJson) {
+    try {
+      accounts = JSON.parse(accountsJson) as ChannelAccountConfig[];
+    } catch (err) {
+      console.warn("Failed to parse STELLAR_CHANNEL_ACCOUNTS:", err);
+    }
+  }
+
+  return {
+    accounts,
+    poolConfig: {
+      // Maximum time (ms) an account can be locked before auto-release
+      lockTimeoutMs: parseInt(process.env.CHANNEL_POOL_LOCK_TIMEOUT_MS || "30000", 10),
+      // Maximum consecutive errors before disabling an account
+      maxConsecutiveErrors: parseInt(process.env.CHANNEL_POOL_MAX_ERRORS || "5", 10),
+      // Time (ms) to wait before re-enabling a disabled account
+      disableRecoveryMs: parseInt(process.env.CHANNEL_POOL_RECOVERY_MS || "60000", 10),
+      // Maximum queue size for waiting requests
+      maxQueueSize: parseInt(process.env.CHANNEL_POOL_MAX_QUEUE || "100", 10),
+      // Time (ms) to wait in queue before timing out
+      queueTimeoutMs: parseInt(process.env.CHANNEL_POOL_QUEUE_TIMEOUT_MS || "10000", 10),
+    },
+  };
+};

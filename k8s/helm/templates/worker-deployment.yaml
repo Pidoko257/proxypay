@@ -1,0 +1,167 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mobile-money.fullname" . }}-worker
+  labels:
+    {{ include "mobile-money.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "mobile-money.name" . }}-worker
+  template:
+    metadata:
+      labels:
+        app: {{ include "mobile-money.name" . }}-worker
+      {{- if .Values.podAnnotations }}
+      annotations:
+{{ toYaml .Values.podAnnotations | indent 8 }}
+      {{- end }}
+    spec:
+      {{- if .Values.worker.nodeSelector }}
+      nodeSelector:
+{{ toYaml .Values.worker.nodeSelector | indent 8 }}
+      {{- end }}
+      {{- if .Values.worker.tolerations }}
+      tolerations:
+{{ toYaml .Values.worker.tolerations | indent 8 }}
+      {{- end }}
+      {{- if .Values.worker.affinity }}
+      affinity:
+{{ toYaml .Values.worker.affinity | indent 8 }}
+      {{- end }}
+      containers:
+        - name: mobile-money-worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          command:
+{{ toYaml .Values.workerCommand | indent 12 }}
+          env:
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-config
+                  key: NODE_ENV
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-config
+                  key: PORT
+            - name: STELLAR_NETWORK
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-config
+                  key: STELLAR_NETWORK
+            - name: COMPRESSION_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-config
+                  key: COMPRESSION_ENABLED
+            - name: RATE_LIMIT_WINDOW_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-config
+                  key: RATE_LIMIT_WINDOW_MS
+            - name: RATE_LIMIT_MAX_REQUESTS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-config
+                  key: RATE_LIMIT_MAX_REQUESTS
+            - name: REQUEST_SIZE_LIMIT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-config
+                  key: REQUEST_SIZE_LIMIT
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: DATABASE_URL
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: REDIS_URL
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: SESSION_SECRET
+            - name: STELLAR_ISSUER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: STELLAR_ISSUER_SECRET
+            - name: MTN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: MTN_API_KEY
+            - name: MTN_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: MTN_API_SECRET
+            - name: MTN_SUBSCRIPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: MTN_SUBSCRIPTION_KEY
+            - name: AIRTEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: AIRTEL_API_KEY
+            - name: AIRTEL_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: AIRTEL_API_SECRET
+            - name: ORANGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: ORANGE_API_KEY
+            - name: ORANGE_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: ORANGE_API_SECRET
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: ADMIN_API_KEY
+            - name: OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: OAUTH_CLIENT_ID
+            - name: OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: OAUTH_CLIENT_SECRET
+            - name: OAUTH_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: OAUTH_REDIRECT_URI
+            - name: OAUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mobile-money.fullname" . }}-secrets
+                  key: OAUTH_JWT_SECRET
+          resources:
+{{ toYaml .Values.worker.resources | indent 12 }}
+          startupProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "const Redis = require('ioredis'); const client = new Redis(process.env.REDIS_URL || 'redis://localhost:6379'); client.ping().then(() => process.exit(0)).catch(() => process.exit(1));"
+            initialDelaySeconds: 5
+            periodSeconds: 2
+            failureThreshold: 30
+{{- end }}

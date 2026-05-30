@@ -1,4 +1,7 @@
+import { maskPhoneNumber, maskStellarAddress, maskEmail } from "./masking";
+
 type ReceiptAmount = number | string | null | undefined;
+
 type ReceiptDateInput = Date | string | number | null | undefined;
 
 export interface ReceiptTransaction {
@@ -108,6 +111,18 @@ function buildReceiptViewModel(
   const feeValue = parseAmount(transaction.fee) ?? 0;
   const totalValue = parseAmount(transaction.total) ?? amountValue + feeValue;
 
+  const senderRaw = transaction.sender ?? transaction.phoneNumber ?? "N/A";
+  const receiverRaw = transaction.receiver ?? transaction.stellarAddress ?? "N/A";
+
+  const maskValue = (val: string) => {
+    if (!val || val === "N/A") return val;
+    if (val.includes("@")) return maskEmail(val);
+    if (val.startsWith("+") || /^\d{7,}$/.test(val.replace(/\s/g, "")))
+      return maskPhoneNumber(val);
+    if (val.length > 30) return maskStellarAddress(val);
+    return val;
+  };
+
   return {
     receiptNumber,
     receiptDate: formatDate(generatedAt),
@@ -116,8 +131,8 @@ function buildReceiptViewModel(
     total: formatAmount(totalValue, currency),
     provider: transaction.provider,
     status: toTitleCase(transaction.status),
-    sender: transaction.sender ?? transaction.phoneNumber ?? "N/A",
-    receiver: transaction.receiver ?? transaction.stellarAddress ?? "N/A",
+    sender: maskValue(senderRaw),
+    receiver: maskValue(receiverRaw),
     transactionId: transaction.id,
     referenceNumber: transaction.referenceNumber,
     transactionHash: transaction.transactionHash,

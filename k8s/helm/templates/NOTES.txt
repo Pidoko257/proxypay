@@ -1,0 +1,16 @@
+Thank you for installing the Mobile Money Helm chart.
+
+To deploy:
+  helm install mobile-money ./k8s/helm --namespace mobile-money --create-namespace
+
+To verify the installation:
+  kubectl get deployments,services,pods,hpa -n mobile-money
+
+Access the backend service inside the cluster via:
+  kubectl get svc {{ include "mobile-money.fullname" . }} -n mobile-money
+
+If Redis is enabled, it is available as:
+  {{ include "mobile-money.fullname" . }}-redis
+
+To uninstall:
+  helm uninstall mobile-money -n mobile-money

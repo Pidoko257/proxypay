@@ -43,10 +43,14 @@ export const createVault = async (req: Request, res: Response) => {
       });
     }
 
-    const vault = await vaultModel.create({
+    const vaultInput: CreateVaultInput = {
       userId,
-      ...validatedData,
-    });
+      name: validatedData.name as string,
+      description: validatedData.description,
+      targetAmount: validatedData.targetAmount,
+    };
+
+    const vault = await vaultModel.create(vaultInput);
 
     res.status(201).json({
       success: true,
@@ -56,7 +60,7 @@ export const createVault = async (req: Request, res: Response) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
         error: "Validation error",
-        details: error.errors.map(e => e.message).join(", "),
+        details: error.issues.map((e: z.ZodIssue) => e.message).join(", "),
       });
     }
 
@@ -163,7 +167,7 @@ export const updateVault = async (req: Request, res: Response) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
         error: "Validation error",
-        details: error.errors.map(e => e.message).join(", "),
+        details: error.issues.map((e: z.ZodIssue) => e.message).join(", "),
       });
     }
 
@@ -266,7 +270,7 @@ export const transferFunds = async (req: Request, res: Response) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
         error: "Validation error",
-        details: error.errors.map(e => e.message).join(", "),
+        details: error.issues.map((e: z.ZodIssue) => e.message).join(", "),
       });
     }
 

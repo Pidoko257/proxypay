@@ -2,6 +2,8 @@ import { NextFunction, Request, Response } from "express";
 import { z } from "zod";
 import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
+import { maskPhoneNumber } from "../utils/masking";
+import { validatePhoneProviderMatch } from "../utils/phoneUtils";
 import {
   Transaction,
   TransactionModel,
@@ -10,9 +12,14 @@ import {
 import { lockManager, LockKeys } from "../utils/lock";
 import { TransactionLimitService } from "../services/transactionLimit/transactionLimitService";
 import { KYCService } from "../services/kyc/kycService";
-import { MobileMoneyProvider, validateProviderLimits } from "../config/providers";
+import {
+  MobileMoneyProvider,
+  validateProviderLimits,
+} from "../config/providers";
 import type { TransactionJobData } from "../queue/transactionQueue";
 import { amlService } from "../services/aml";
+import { generateFlaggedTransactionComplianceReport } from "../services/complianceReportService";
+import { twoFactorWithdrawalService } from "../services/twoFactorWithdrawalService";
 import {
   CancelTransactionResponse,
   LimitExceededErrorResponse,
@@ -20,7 +27,10 @@ import {
   TransactionDetailResponse,
   TransactionResponse,
 } from "../types/api";
-
+import { checkDestinationTrustline, TrustlineError } from "../stellar/trustlines";
+import { getConfiguredPaymentAsset } from "../services/stellar/assetService";
+import { ERROR_CODES } from "../constants/errorCodes";
+import { travelRuleService } from "../compliance/travelRule";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
@@ -66,12 +76,19 @@ export const transactionSchema = z.object({
     .string()
     .regex(/^\+?\d{10,15}$/, { message: "Invalid phone number format" }),
   provider: z.enum(["mtn", "airtel", "orange"], {
-    message: "Provider must be one of: mtn, airtel, orange",
+    message: "Provider must be mtn, airtel, or orange",
   }),
   stellarAddress: z
     .string()
     .regex(/^G[A-Z2-7]{55}$/, { message: "Invalid Stellar address format" }),
   userId: z.string().nonempty({ message: "userId is required" }),
+  notes: z
+    .string()
+    .max(256, { message: "Note cannot exceed 256 characters" })
+    .optional(),
+  // Optional 2FA fields for withdrawals
+  twoFactorToken: z.string().optional(),
+  backupCode: z.string().optional(),
 });
 
 export const validateTransaction = (
@@ -99,6 +116,8 @@ export const getTransactionHistoryHandler = async (
       endDate,
       offset = "0",
       limit = "20",
+      before,
+      after,
       // Advanced Filters
       minAmount,
       maxAmount,
@@ -145,33 +164,71 @@ export const getTransactionHistoryHandler = async (
       minAmount: minAmount ? parseFloat(minAmount as string) : undefined,
       maxAmount: maxAmount ? parseFloat(maxAmount as string) : undefined,
       provider: provider as string | undefined,
-      tags: tags ? (tags as string).split(",").map((t) => t.trim().toLowerCase()) : undefined,
+      tags: tags
+        ? (tags as string).split(",").map((t) => t.trim().toLowerCase())
+        : undefined,
     };
 
     // Database Queries
-    const [transactions, total] = await Promise.all([
-      transactionModel.list(
-        limitNum,
+    // If using cursor-based pagination, fetch limit+1 items to determine `hasMore`.
+    let transactions = [] as any[];
+    let total: number | undefined;
+
+    if (before || after) {
+      const rows = await transactionModel.list(
+        limitNum + 1,
         offsetNum,
         startDate as string | undefined,
         endDate as string | undefined,
         filters,
-      ),
-      transactionModel.count(
+        { before: before as string | undefined, after: after as string | undefined },
+      );
+
+      // If 'before' was used we fetched ascending results; reverse to keep newest-first
+      if (before) {
+        rows.reverse();
+      }
+
+      const hasMore = rows.length > limitNum;
+      transactions = rows.slice(0, limitNum);
+
+      return res.json({
+        data: transactions,
+        pagination: {
+          limit: limitNum,
+          before: transactions.length ? Buffer.from(`${transactions[0].createdAt.toISOString()}|${transactions[0].id}`).toString('base64') : null,
+          after: transactions.length ? Buffer.from(`${transactions[transactions.length - 1].createdAt.toISOString()}|${transactions[transactions.length - 1].id}`).toString('base64') : null,
+          hasMore,
+        },
+      });
+    }
+
+    const rows = await transactionModel.list(
+      limitNum + 1,
+      offsetNum,
+      startDate as string | undefined,
+      endDate as string | undefined,
+      filters,
+    );
+    const hasMore = rows.length > limitNum;
+    transactions = rows.slice(0, limitNum);
+
+    if (offsetNum === 0) {
+      total = await transactionModel.count(
         startDate as string | undefined,
         endDate as string | undefined,
         filters,
-      ),
-    ]);
+      );
+    }
 
     // Response
     return res.json({
       data: transactions,
       pagination: {
-        total,
+        total: total ?? null,
         limit: limitNum,
         offset: offsetNum,
-        hasMore: offsetNum + limitNum < total,
+        hasMore,
       },
     });
   } catch (error) {
@@ -224,7 +281,9 @@ function buildTransactionResponse(
   };
 }
 
-async function monitorTransactionForAML(transaction: Transaction): Promise<void> {
+async function monitorTransactionForAML(
+  transaction: Transaction,
+): Promise<void> {
   if (!transaction.userId) return;
 
   const amount = Number(transaction.amount);
@@ -268,10 +327,74 @@ async function monitorTransactionForAML(transaction: Transaction): Promise<void>
         ),
       ),
     ]);
+
+    try {
+      const { pdfUrl } = await generateFlaggedTransactionComplianceReport(
+        transaction,
+        result.alert,
+      );
+
+      await transactionModel.patchMetadata(transaction.id, {
+        complianceReport: {
+          pdfUrl,
+          generatedAt: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error(
+        `Failed to generate flagged transaction compliance PDF for transaction ${transaction.id}:`,
+        error,
+      );
+    }
   } catch (error) {
     console.error(
       `AML monitoring failed for transaction ${transaction.id}:`,
       error,
+    );
+  }
+}
+
+/**
+ * Captures Travel Rule identity data for deposits >= $1,000.
+ * Derives sender/receiver from the transaction record.
+ * PII is encrypted at rest inside travelRuleService.capture().
+ */
+async function applyTravelRule(transaction: Transaction): Promise<void> {
+  if (transaction.type !== "deposit") return;
+
+  const amount = Number(transaction.amount);
+  if (!travelRuleService.applies(amount)) return;
+
+  try {
+    // Sender = the mobile money account holder initiating the deposit
+    // Receiver = the Stellar address receiving the funds
+    // Full KYC identity should be supplied by the caller via req.body.travelRule;
+    // here we fall back to the phone number / stellar address as account identifiers.
+    await travelRuleService.capture({
+      transactionId: transaction.id,
+      amount,
+      currency: transaction.currency ?? "USD",
+      sender: {
+        name: transaction.metadata?.senderName as string ?? "Unknown",
+        account: transaction.phoneNumber,
+        address: transaction.metadata?.senderAddress as string | undefined,
+        dob: transaction.metadata?.senderDob as string | undefined,
+        idNumber: transaction.metadata?.senderIdNumber as string | undefined,
+      },
+      receiver: {
+        name: transaction.metadata?.receiverName as string ?? "Unknown",
+        account: transaction.stellarAddress,
+        address: transaction.metadata?.receiverAddress as string | undefined,
+      },
+      originatingVasp: transaction.provider,
+    });
+
+    await transactionModel.addTags(transaction.id, ["travel-rule-captured"]);
+  } catch (error) {
+    // Non-fatal — log and continue; compliance team can back-fill
+    console.error(
+      `[travel-rule] capture failed for transaction ${transaction.id}:`,
+      error instanceof Error ? error.message : error,
     );
   }
 }
@@ -297,6 +420,11 @@ async function processTransactionRequest(
   type: TransactionRequestType,
 ): Promise<Response> {
   try {
+    // Normalize provider to lowercase
+    if (typeof req.body.provider === "string") {
+      req.body.provider = req.body.provider.toLowerCase();
+    }
+
     const { amount, phoneNumber, provider, stellarAddress, userId, notes } =
       req.body;
 
@@ -305,6 +433,15 @@ async function processTransactionRequest(
       return res
         .status(400)
         .json({ error: "Amount must be a positive number" });
+    }
+
+    // Recipient Mobile Network Validation
+    const networkMatch = validatePhoneProviderMatch(phoneNumber, provider);
+    if (!networkMatch.valid) {
+      return res.status(400).json({
+        error: networkMatch.error,
+        code: "INVALID_NETWORK_FOR_PROVIDER",
+      });
     }
 
     const idempotencyKey = getIdempotencyKey(req);
@@ -324,7 +461,10 @@ async function processTransactionRequest(
 
     if (!limitCheck.allowed) {
       const body: LimitExceededErrorResponse = {
-        error: "Transaction limit exceeded",
+        code: "TRANSACTION_LIMIT_EXCEEDED",
+        message: limitCheck.message || "Transaction limit exceeded",
+        message_en: "Transaction limit exceeded",
+        timestamp: new Date().toISOString(),
         details: {
           kycLevel: limitCheck.kycLevel,
           dailyLimit: limitCheck.dailyLimit,
@@ -336,6 +476,68 @@ async function processTransactionRequest(
       };
 
       return res.status(400).json(body);
+    }
+
+    // Check mandatory 2FA for withdrawals
+    if (type === "withdraw") {
+      const requires2FA = await twoFactorWithdrawalService.requires2FAForWithdrawal(userId);
+      if (requires2FA) {
+        const twoFactorToken = req.body.twoFactorToken || req.headers['x-2fa-token'] as string;
+        const backupCode = req.body.backupCode;
+
+        if (!twoFactorToken && !backupCode) {
+          return res.status(400).json({
+            error: "2FA verification required for withdrawal",
+            code: "TWO_FACTOR_REQUIRED",
+            message: "This account requires 2FA verification for all withdrawals. Please provide a TOTP token or backup code."
+          });
+        }
+
+        const verificationResult = await twoFactorWithdrawalService.verifyWithdrawal2FA({
+          userId,
+          token: twoFactorToken,
+          backupCode
+        });
+
+        if (!verificationResult.success) {
+          return res.status(401).json({
+            error: "2FA verification failed",
+            code: "TWO_FACTOR_INVALID",
+            message: verificationResult.error || "Invalid 2FA token or backup code"
+          });
+        }
+      }
+    }
+
+    // Check available balance for withdrawals before creating transaction
+    if (type === "withdraw") {
+      const stats = await transactionModel.getBalanceStatistics(userId);
+      const availableBalance = parseFloat(stats.available_balance || "0");
+      if (requestAmount > availableBalance) {
+        return res.status(400).json({
+          error: "Insufficient available balance",
+          code: "INSUFFICIENT_BALANCE",
+          message: "You do not have enough available settled funds to withdraw this amount."
+        });
+      }
+    }
+
+    // Verify destination Stellar account has a trustline for the payment asset
+    // before creating the transaction record, to avoid on-chain failures.
+    if (type === "withdraw") {
+      try {
+        const paymentAsset = getConfiguredPaymentAsset();
+        await checkDestinationTrustline(stellarAddress, paymentAsset);
+      } catch (err) {
+        if (err instanceof TrustlineError) {
+          return res.status(400).json({
+            error: err.message,
+            code: ERROR_CODES.TRUSTLINE_MISSING,
+          });
+        }
+        // Unexpected Horizon error — surface as 502 so callers can retry
+        return res.status(502).json({ error: "Failed to verify destination trustline" });
+      }
     }
 
     const createOrReuse = async (): Promise<CreateTransactionResponse> => {
@@ -373,8 +575,10 @@ async function processTransactionRequest(
               idempotencyExpiresAt: idempotencyKey
                 ? buildIdempotencyExpiry()
                 : null,
+              locationMetadata: (req as any).geoLocation ?? null,
             });
             void monitorTransactionForAML(transaction);
+            void applyTravelRule(transaction);
 
             const job = await addTransactionJob(
               {
@@ -384,6 +588,7 @@ async function processTransactionRequest(
                 phoneNumber,
                 provider,
                 stellarAddress,
+                requestId: (req as any).id,
               },
               {
                 jobId: transaction.id,
@@ -497,8 +702,16 @@ export const getTransactionHandler = async (req: Request, res: Response) => {
 export const cancelTransactionHandler = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const userId = req.jwtUser?.userId;
 
-    const transaction = await transactionModel.findById(id);
+    if (!userId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Valid token required",
+      });
+    }
+
+    const transaction = await transactionModel.findById(id, userId);
     if (!transaction) {
       return res.status(404).json({ error: "Transaction not found" });
     }
@@ -573,6 +786,53 @@ export const updateNotesHandler = async (req: Request, res: Response) => {
   }
 };
 
+export const refundTransactionHandler = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const transaction = await transactionModel.findById(id);
+    if (!transaction) {
+      return res.status(404).json({ error: "Transaction not found" });
+    }
+
+    if (transaction.type !== "withdraw") {
+      return res.status(400).json({
+        error: "Only withdrawal transactions can be refunded",
+      });
+    }
+
+    if (transaction.status !== TransactionStatus.Failed) {
+      return res.status(400).json({
+        error: `Cannot refund transaction with status '${transaction.status}'. Only failed transactions are eligible.`,
+      });
+    }
+
+    const amount = parseFloat(transaction.amount);
+    const { calculateFee } = await import("../utils/fees");
+    const { fee } = await calculateFee(amount);
+    const refundAmount = parseFloat((amount - fee).toFixed(2));
+
+    if (refundAmount <= 0) {
+      return res.status(400).json({
+        error: "Refund amount after fees is zero or negative",
+      });
+    }
+
+    await transactionModel.updateStatus(id, TransactionStatus.Completed);
+
+    return res.json({
+      message: "Refund processed successfully",
+      transactionId: id,
+      originalAmount: amount,
+      feeDeducted: fee,
+      refundAmount,
+    });
+  } catch (err) {
+    console.error("Refund error:", err);
+    return res.status(500).json({ error: "Failed to process refund" });
+  }
+};
+
 export const updateAdminNotesHandler = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -637,14 +897,8 @@ export const searchTransactionsHandler = async (
 
     const masked = transactions.map((tx: any) => ({
       ...tx,
-      phoneNumber:
-        typeof tx.phoneNumber === "string"
-          ? `****${tx.phoneNumber.slice(-4)}`
-          : tx.phoneNumber,
-      phone_number:
-        typeof tx.phone_number === "string"
-          ? `****${tx.phone_number.slice(-4)}`
-          : tx.phone_number,
+      phoneNumber: maskPhoneNumber(tx.phoneNumber),
+      phone_number: maskPhoneNumber(tx.phone_number),
     }));
 
     const body: PhoneSearchResponse = {
@@ -680,18 +934,30 @@ export const listTransactionsHandler = async (req: Request, res: Response) => {
       filters.offset,
     );
 
+    // If a reference search is requested, we should probably use the list method instead
+    // or just filter the results. But wait, findByStatuses is limited.
+    // Let's use the list() method instead which is more flexible.
+    const results = await transactionModel.list(
+      filters.limit,
+      filters.offset,
+      undefined,
+      undefined,
+      {
+        tags: [], // Could be extended
+        referenceNumber: filters.reference,
+      }
+    );
+    const total = filters.reference 
+      ? await transactionModel.count(undefined, undefined, { referenceNumber: filters.reference })
+      : totalCount;
+
     return res.json({
-      data: transactions,
+      data: results,
       pagination: {
-        total: totalCount,
+        total,
         limit: filters.limit,
         offset: filters.offset,
-        hasMore: filters.offset + filters.limit < totalCount,
-        totalPages: Math.ceil(totalCount / filters.limit),
-        currentPage: Math.floor(filters.offset / filters.limit) + 1,
-      },
-      filters: {
-        statuses: filters.statuses.length > 0 ? filters.statuses : Object.values(TransactionStatus),
+        hasMore: filters.offset + filters.limit < total,
       },
     });
   } catch (err) {
@@ -725,7 +991,11 @@ export const listAmlAlertsHandler = async (req: Request, res: Response) => {
     }
 
     const alerts = amlService.getAlerts({
-      status: statusFilter as "pending_review" | "reviewed" | "dismissed" | undefined,
+      status: statusFilter as
+        | "pending_review"
+        | "reviewed"
+        | "dismissed"
+        | undefined,
       userId: typeof userId === "string" ? userId : undefined,
       startDate: parsedStart,
       endDate: parsedEnd,
@@ -734,7 +1004,8 @@ export const listAmlAlertsHandler = async (req: Request, res: Response) => {
     return res.json({
       data: alerts,
       total: alerts.length,
-      pendingReview: alerts.filter((a: any) => a.status === "pending_review").length,
+      pendingReview: alerts.filter((a: any) => a.status === "pending_review")
+        .length,
     });
   } catch (error) {
     console.error("Failed to list AML alerts:", error);

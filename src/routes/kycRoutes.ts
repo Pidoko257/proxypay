@@ -1,10 +1,13 @@
-import { Router } from "express";
+import { NextFunction, Router } from "express";
 import { Pool } from "pg";
 import { KYCController } from "../controllers/kycController";
 import { authenticateToken } from "../middleware/auth";
 import { upload, uploadErrorMessages } from "../middleware/upload";
 import { uploadToS3 } from "../services/s3Upload";
 import { Request, Response } from "express";
+
+const COMPLIANCE_OFFICER_ROLE = "compliance_officer";
+const REDACTED_FILE_URL = "[REDACTED]";
 
 function validateUploadFile(file: Express.Multer.File): {
   valid: boolean;
@@ -42,6 +45,33 @@ function validateUploadFile(file: Express.Multer.File): {
   return { valid: true };
 }
 
+function canViewRawKycUploads(req: Request): boolean {
+  return req.jwtUser?.role === COMPLIANCE_OFFICER_ROLE;
+}
+
+function maskFileUrl<T extends { file_url?: string | null }>(
+  document: T,
+  canViewRaw: boolean,
+): T {
+  if (canViewRaw || !document.file_url) {
+    return document;
+  }
+
+  return {
+    ...document,
+    file_url: REDACTED_FILE_URL,
+  };
+}
+
+function annotateDocumentVisibility(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  res.locals.canViewRawKycUploads = canViewRawKycUploads(req);
+  next();
+}
+
 export const createKYCRoutes = (db: Pool): Router => {
   const router = Router();
   const kycController = new KYCController(db);
@@ -63,6 +93,7 @@ export const createKYCRoutes = (db: Pool): Router => {
   // File upload to S3
   router.post(
     "/documents/upload",
+    annotateDocumentVisibility,
     upload.single("document"),
     async (req: Request, res: Response) => {
       try {
@@ -157,11 +188,15 @@ export const createKYCRoutes = (db: Pool): Router => {
           req.file.mimetype,
         ]);
 
+        const canViewRaw = Boolean(res.locals.canViewRawKycUploads);
+
         res.status(201).json({
           success: true,
           data: {
             document_id: documentResult.rows[0].id,
-            file_url: documentResult.rows[0].file_url,
+            file_url: canViewRaw
+              ? documentResult.rows[0].file_url
+              : REDACTED_FILE_URL,
             applicant_id,
             uploaded_at: documentResult.rows[0].created_at,
           },
@@ -192,14 +227,17 @@ export const createKYCRoutes = (db: Pool): Router => {
   );
 
   // Get user's uploaded documents
-  router.get("/documents", async (req: Request, res: Response) => {
-    try {
-      const userId = req.jwtUser?.userId;
-      if (!userId) {
-        return res.status(401).json({ error: "User not authenticated" });
-      }
+  router.get(
+    "/documents",
+    annotateDocumentVisibility,
+    async (req: Request, res: Response) => {
+      try {
+        const userId = req.jwtUser?.userId;
+        if (!userId) {
+          return res.status(401).json({ error: "User not authenticated" });
+        }
 
-      const query = `
+        const query = `
         SELECT 
           id,
           applicant_id,
@@ -215,20 +253,25 @@ export const createKYCRoutes = (db: Pool): Router => {
         ORDER BY created_at DESC
       `;
 
-      const result = await db.query(query, [userId]);
+        const result = await db.query(query, [userId]);
+        const canViewRaw = Boolean(res.locals.canViewRawKycUploads);
+        const documents = result.rows.map((row) =>
+          maskFileUrl(row, canViewRaw),
+        );
 
-      res.json({
-        success: true,
-        data: result.rows,
-      });
-    } catch (error) {
-      console.error("Get documents error:", error);
-      res.status(500).json({
-        error: "Failed to retrieve documents",
-        message: error instanceof Error ? error.message : "Unknown error",
-      });
-    }
-  });
+        res.json({
+          success: true,
+          data: documents,
+        });
+      } catch (error) {
+        console.error("Get documents error:", error);
+        res.status(500).json({
+          error: "Failed to retrieve documents",
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
 
   // Workflow management
   router.post("/workflow-runs", kycController.createWorkflowRun);

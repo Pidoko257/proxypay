@@ -1,16 +1,17 @@
 import type { Request } from "express";
 import { GraphQLError } from "graphql";
-import { PubSub } from "graphql-subscriptions";
 import { TransactionModel } from "../models/transaction";
 import { DisputeService } from "../services/dispute";
 import { lockManager, LockKeys } from "../utils/lock";
 import { addTransactionJob, getJobProgress } from "../queue";
 import { getBulkImportJob } from "../routes/bulk";
 import type { TypedPubSub } from "./subscriptions";
+import { getRedisPubSub } from "./redisPubSub";
 
 const transactionModel = new TransactionModel();
 const disputeService = new DisputeService();
-const pubsub = new PubSub() as unknown as TypedPubSub;
+// Use Redis-backed pubsub so events fan out across all server instances
+const pubsub = getRedisPubSub();
 
 export interface GraphQLAuth {
   authenticated: boolean;

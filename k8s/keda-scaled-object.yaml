@@ -1,0 +1,60 @@
+---
+# KEDA ScaledObject — scales the worker Deployment based on BullMQ queue depth.
+#
+# How it works:
+#   1. KEDA's HTTP scaler polls GET /health/queue/depth every 30 s.
+#   2. It reads `total_depth` from the JSON response.
+#   3. When total_depth > threshold (20 jobs), KEDA adds worker replicas.
+#   4. When the queue drains, replicas scale back to minReplicaCount.
+#
+# Prerequisites:
+#   - KEDA v2.x installed in the cluster  (kubectl apply -f https://github.com/kedacore/keda/releases/latest/download/keda.yaml)
+#   - keda-add-ons-http installed          (for the http trigger)
+#     OR use the prometheus trigger if Prometheus is already scraping /metrics/queue_depth
+#
+# To install KEDA HTTP add-on:
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm install http-add-on kedacore/keda-add-ons-http -n keda
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mobile-money-worker-scaledobject
+  namespace: default
+  labels:
+    app: mobile-money-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mobile-money-worker
+
+  # Never scale below 1 replica so there is always a worker ready
+  minReplicaCount: 1
+  # Cap at 20 replicas to avoid runaway scaling on burst traffic
+  maxReplicaCount: 20
+
+  # Wait 60 s before scaling down to avoid thrashing
+  cooldownPeriod: 60
+  # Poll the scaler every 30 s
+  pollingInterval: 30
+
+  triggers:
+    # ── Primary trigger: HTTP scaler reads queue depth from the app itself ──
+    - type: metrics-api
+      metadata:
+        # Internal service URL — KEDA runs inside the cluster
+        url: "http://mobile-money-service.default.svc.cluster.local:3000/health/queue/depth"
+        # JSON path to the depth value in the response
+        valueLocation: "total_depth"
+        # Scale up when total_depth exceeds 20 pending jobs per replica
+        targetValue: "20"
+
+    # ── Secondary trigger: Prometheus (if Prometheus is available) ──
+    # Uncomment this block to use Prometheus instead of / in addition to the HTTP trigger.
+    # - type: prometheus
+    #   metadata:
+    #     serverAddress: "http://prometheus-service.monitoring.svc.cluster.local:9090"
+    #     metricName: queue_depth_total
+    #     query: "queue_depth_total"
+    #     threshold: "20"

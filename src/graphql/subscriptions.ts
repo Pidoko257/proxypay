@@ -1,25 +1,41 @@
-import { PubSub, type PubSubEngine } from "graphql-subscriptions";
+import { getRedisPubSub } from "./redisPubSub";
+import type { PubSub } from "graphql-subscriptions";
 
+// ---------------------------------------------------------------------------
+// Singleton pubsub — Redis-backed in production, in-memory in tests
+// ---------------------------------------------------------------------------
 
-export const pubsub = new PubSub();
+export const pubsub = getRedisPubSub();
 
+// ---------------------------------------------------------------------------
+// Channel names
+// ---------------------------------------------------------------------------
 
 export enum SubscriptionChannels {
-  // Transaction events
-  TRANSACTION_CREATED = "transaction.created",
-  TRANSACTION_UPDATED = "transaction.updated",
-  TRANSACTION_COMPLETED = "transaction.completed",
-  TRANSACTION_FAILED = "transaction.failed",
-  
-  // Dispute events
-  DISPUTE_CREATED = "dispute.created",
-  DISPUTE_UPDATED = "dispute.updated",
-  DISPUTE_NOTE_ADDED = "dispute.note_added",
-  
-  // Bulk import events
+  TRANSACTION_CREATED    = "transaction.created",
+  TRANSACTION_UPDATED    = "transaction.updated",
+  TRANSACTION_COMPLETED  = "transaction.completed",
+  TRANSACTION_FAILED     = "transaction.failed",
+
+  DISPUTE_CREATED        = "dispute.created",
+  DISPUTE_UPDATED        = "dispute.updated",
+  DISPUTE_NOTE_ADDED     = "dispute.note_added",
+
   BULK_IMPORT_JOB_UPDATED = "bulk_import_job.updated",
 }
 
+/**
+ * Per-transaction channel — clients subscribe to this for targeted updates.
+ * Using a dedicated channel per ID avoids broadcasting every update to every
+ * subscriber and lets Redis fan-out only to interested connections.
+ */
+export function transactionChannel(id: string): string {
+  return `TRANSACTION_UPDATED:${id}`;
+}
+
+// ---------------------------------------------------------------------------
+// Payload types
+// ---------------------------------------------------------------------------
 
 export interface TransactionCreatedPayload {
   id: string;

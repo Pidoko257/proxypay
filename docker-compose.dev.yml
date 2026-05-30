@@ -15,11 +15,17 @@ services:
       - NODE_ENV=development
       - DATABASE_URL=postgresql://user:password@db:5432/mobilemoney_stellar
       - REDIS_URL=redis://redis:6379
+      - MTN_BASE_URL=http://provider-mock:4010/mtn
+      - MTN_TARGET_ENVIRONMENT=sandbox
+      - AIRTEL_BASE_URL=http://provider-mock:4010/airtel
+      - AIRTEL_COUNTRY=NG
+      - AIRTEL_CURRENCY=NGN
     env_file:
       - .env
     depends_on:
       - db
       - redis
+      - provider-mock
 
   db:
     image: postgres:16-alpine
@@ -36,9 +42,26 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    command: redis-server /usr/local/etc/redis/redis.conf
     volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis_dev_data:/data
-    command: redis-server --appendonly yes
+
+  provider-mock:
+    image: node:20-alpine
+    working_dir: /app
+    command: npx tsx watch scripts/provider-mock-server.ts
+    ports:
+      - "4010:4010"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - PROVIDER_MOCK_PORT=4010
+      - PROVIDER_MOCK_DELAY_MS=0
+      - PROVIDER_MOCK_BALANCE=100000
+      - PROVIDER_MOCK_CURRENCY=XAF
 
 volumes:
   postgres_dev_data:

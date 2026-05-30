@@ -5,7 +5,7 @@ import {
   is2FAEnabled,
   type BackupCode,
 } from "../auth/2fa";
-import { getUserById } from "../services/userService";
+// import { getUserById } from "../services/userService";
 
 /**
  * Middleware to require 2FA verification for sensitive operations
@@ -32,8 +32,8 @@ export function requireTwoFactor(
     }
 
     try {
-      // Get user information
-      const user = await getUserById(req.jwtUser.userId);
+      // Use user object from res.locals (populated by attachUserObject middleware)
+      const user = res.locals.user;
       if (!user) {
         return res.status(404).json({
           error: "User not found",
@@ -150,8 +150,8 @@ export function optionalTwoFactor(
     }
 
     try {
-      // Get user information
-      const user = await getUserById(req.jwtUser.userId);
+      // Use user object from res.locals (populated by attachUserObject middleware)
+      const user = res.locals.user;
       if (!user) {
         return res.status(404).json({
           error: "User not found",

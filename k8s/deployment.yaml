@@ -9,6 +9,11 @@ spec:
   selector:
     matchLabels:
       app: mobile-money
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # one extra pod while rolling (blue-green style)
+      maxUnavailable: 0  # never take a pod down before the new one is ready
   template:
     metadata:
       labels:
@@ -18,6 +23,7 @@ spec:
         prometheus.io/port: "3000"
         prometheus.io/path: "/metrics"
     spec:
+      terminationGracePeriodSeconds: 60
       initContainers:
         - name: wait-for-db
           image: postgres:16-alpine
@@ -41,17 +47,52 @@ spec:
                 secretKeyRef:
                   name: redis-secrets
                   key: redis-url
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          # Readiness: pod only receives traffic once /ready returns 200
           readinessProbe:
             httpGet:
               path: /ready
               port: 3000
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 2
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 2   # must pass twice before marked ready
             failureThreshold: 3
+          # Liveness: restart pod if /health fails repeatedly
           livenessProbe:
             httpGet:
               path: /health
               port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 20
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Startup: give the app up to 90 s to boot before liveness kicks in
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 18  # 18 × 5 s = 90 s max startup window
+          lifecycle:
+            preStop:
+              exec:
+                # Drain in-flight requests before the pod is removed
+                command: ["/bin/sh", "-c", "sleep 5"]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mobile-money-pdb
+spec:
+  minAvailable: 2          # always keep at least 2 pods up during voluntary disruptions
+  selector:
+    matchLabels:
+      app: mobile-money

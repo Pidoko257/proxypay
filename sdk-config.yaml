@@ -1,0 +1,16 @@
+generatorName: kotlin
+library: jvm-retrofit2
+packageName: com.mobilemoney.sdk
+artifactId: mobile-money-sdk
+artifactVersion: 1.0.0
+enumPropertyNaming: original
+modelPropertyNaming: camelCase
+dateLibrary: java8
+serializationLibrary: gson
+useCoroutines: true
+omitGradleWrapper: true
+hideGenerationTimestamp: true
+additionalProperties:
+  useRxJava3: false
+  useAndroidMavenGradlePlugin: true
+  androidSupport: true

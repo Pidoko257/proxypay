@@ -9,10 +9,28 @@ const TRANSIENT_HINTS =
 const PERMANENT_HINTS =
   /invalid|insufficient|bad request|malformed|unauthorized|forbidden|not found|wrong\s+number|duplicate|rejected|bad\s+request|400|401|403|404|422/i;
 
-export function isTransientError(error: unknown): boolean {
+export function isTransientError(error: unknown, provider?: string): boolean {
+  let innerError = error;
+  if (error && typeof error === "object" && "originalError" in error && (error as any).originalError) {
+    innerError = (error as any).originalError;
+  }
+
+  if (provider && innerError && typeof innerError === "object" && "response" in innerError) {
+    const status = (innerError as any).response?.status;
+    if (status) {
+      const p = provider.toLowerCase();
+      if (p === "mtn") {
+        if (status === 400 || status === 401 || status === 404 || status === 409) return false;
+      } else if (p === "airtel" || p === "orange") {
+        if (status === 400 || status === 401) return false;
+      }
+      if (status >= 500 || status === 429) return true;
+    }
+  }
+
   const msg =
     error instanceof Error
-      ? `${error.message} ${(error as NodeJS.ErrnoException).code ?? ""}`
+      ? `${error.message} ${(error as NodeJS.ErrnoException).code ?? ""} ${innerError instanceof Error ? innerError.message : String(innerError)}`
       : String(error);
 
   if (PERMANENT_HINTS.test(msg)) return false;
@@ -26,6 +44,7 @@ function sleep(ms: number): Promise<void> {
 export interface WithRetryOptions {
   maxAttempts: number;
   baseDelayMs: number;
+  provider?: string;
   /** Called after a failed attempt when another attempt will follow */
   onRetry?: (info: { attempt: number; error: unknown }) => void | Promise<void>;
 }
@@ -48,7 +67,7 @@ export async function withRetry<T>(
     } catch (error) {
       lastError = error;
       const canRetry =
-        isTransientError(error) && attempt < maxAttempts;
+        isTransientError(error, options.provider) && attempt < maxAttempts;
       if (!canRetry) throw error;
 
       console.warn(

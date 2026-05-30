@@ -1,0 +1,18 @@
+{{- if .Values.app.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mobile-money.fullname" . }}
+  labels:
+    {{ include "mobile-money.labels" . | indent 4 }}
+  annotations:
+    {{- toYaml .Values.serviceAnnotations | nindent 4 }}
+spec:
+  type: {{ .Values.app.service.type }}
+  selector:
+    app: {{ include "mobile-money.name" . }}
+  ports:
+    - protocol: TCP
+      port: {{ .Values.app.service.port }}
+      targetPort: {{ .Values.app.service.targetPort }}
+{{- end }}

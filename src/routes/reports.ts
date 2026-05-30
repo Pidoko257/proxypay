@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { pool } from "../config/database";
+import { pool, queryRead } from "../config/database";
 import { redisClient } from "../config/redis";
 import { requireAuth, AuthRequest } from "../middleware/auth";
 import { TimeoutPresets, haltOnTimedout } from "../middleware/timeout";
@@ -119,7 +119,6 @@ const formatCSV = async (report: ReconciliationReport): Promise<string> => {
 // GET /api/reports/reconciliation
 reportsRoutes.get(
   "/reconciliation",
-  TimeoutPresets.medium,
   haltOnTimedout,
   requireAuth,
   async (req: AuthRequest, res: Response) => {
@@ -161,9 +160,10 @@ reportsRoutes.get(
           const cached = await redisClient.get(cacheKey);
           if (cached) {
             console.log(`Cache hit for ${cacheKey}`);
+            const cachedStr = typeof cached === 'string' ? cached : cached.toString();
             return format === 'csv' 
-              ? res.header('Content-Type', 'text/csv').send(cached)
-              : res.json(JSON.parse(cached));
+              ? res.header('Content-Type', 'text/csv').send(cachedStr)
+              : res.json(JSON.parse(cachedStr));
           }
         } catch (cacheError) {
           console.warn("Cache read failed:", cacheError);
@@ -185,7 +185,7 @@ reportsRoutes.get(
         ORDER BY date DESC, provider
       `;
 
-      const result = await pool.query(query, [startDate, endDate]);
+       const result = await queryRead(query, [startDate, endDate]);
 
       // Process results
       const providerData: { [key: string]: { count: number; volume: number; successful: number; failed: number } } = {};
@@ -321,7 +321,6 @@ reportsRoutes.get(
 // GET /api/reports/aml
 reportsRoutes.get(
   "/aml",
-  TimeoutPresets.quick,
   haltOnTimedout,
   requireAuth,
   async (req: AuthRequest, res: Response) => {

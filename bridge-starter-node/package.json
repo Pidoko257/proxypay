@@ -1,0 +1,30 @@
+{
+  "name": "bridge-starter-node",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "audit:high": "npm audit --audit-level=high",
+    "snyk:test:high": "snyk test --severity-threshold=high",
+    "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
+    "build": "tsc",
+    "start": "node dist/app.js",
+    "reconcile": "ts-node-dev --transpile-only src/scripts/reconcile.ts",
+    "reconcile:loop": "ts-node-dev --transpile-only src/scripts/reconcile.ts --loop"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.15.2",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.6.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^6.0.3"
+  }
+}

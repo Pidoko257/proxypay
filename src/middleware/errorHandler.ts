@@ -2,6 +2,8 @@ import { Request, Response, NextFunction } from "express";
 import { ErrorResponse } from "../types/api";
 import { ERROR_CODES, getHttpStatus } from "../constants/errorCodes";
 import { getLocalizedMessage } from "../locales/messages";
+import { resolveLocale, resolveLocaleFromRequest } from "../utils/i18n";
+import logger from "../utils/logger";
 
 /**
  * Extended Error interface with error-specific properties.
@@ -22,7 +24,49 @@ export interface AppError extends Error {
   code?: string;
   statusCode?: number;
   details?: Record<string, unknown>;
+  locale?: string;
+  requestId?: string;
 }
+
+const RESERVED_ERROR_FIELDS = new Set([
+  "name",
+  "message",
+  "stack",
+  "code",
+  "statusCode",
+  "details",
+  "locale",
+  "requestId",
+]);
+
+const getCodeFromStatus = (statusCode: number): string => {
+  if (statusCode === 400) return ERROR_CODES.INVALID_INPUT;
+  if (statusCode === 401) return ERROR_CODES.UNAUTHORIZED;
+  if (statusCode === 403) return ERROR_CODES.FORBIDDEN;
+  if (statusCode === 404) return ERROR_CODES.NOT_FOUND;
+  if (statusCode === 409) return ERROR_CODES.CONFLICT;
+  if (statusCode === 429) return ERROR_CODES.LIMIT_EXCEEDED;
+  if (statusCode === 503) return ERROR_CODES.SERVICE_UNAVAILABLE;
+  return ERROR_CODES.INTERNAL_ERROR;
+};
+
+const extractLegacyDetails = (err: AppError): Record<string, unknown> => {
+  if (err.details && typeof err.details === "object") {
+    return err.details;
+  }
+
+  const details = Object.entries(err as unknown as Record<string, unknown>).reduce(
+    (acc, [key, value]) => {
+      if (!RESERVED_ERROR_FIELDS.has(key) && value !== undefined) {
+        acc[key] = value;
+      }
+      return acc;
+    },
+    {} as Record<string, unknown>,
+  );
+
+  return details;
+};
 
 /**
  * Creates a standardized error with code, status, and optional details.
@@ -104,42 +148,6 @@ export const createError = (
  * // Setup in Express app
  * app.use(routes);
  * app.use(errorHandler); // Must be last
- * 
- * @example
- * // Response for French client with validation error
- * // Request: POST /api/transfer -H "Accept-Language: fr"
- * // Response: 400
- * {
- *   "code": "INVALID_PHONE_FORMAT",
- *   "message": "Le format du numéro de téléphone est invalide",
- *   "message_en": "Phone number format is invalid",
- *   "timestamp": "2026-03-27T10:30:00.000Z",
- *   "requestId": "req-123-abc",
- *   "details": { "received": "invalid-phone" }  // Only in development
- * }
- * 
- * @example
- * // Response for English client with business logic error
- * // Request: POST /api/withdraw -H "Accept-Language: en"
- * // Response: 429
- * {
- *   "code": "LIMIT_EXCEEDED",
- *   "message": "Daily transaction limit exceeded",
- *   "message_en": "Daily transaction limit exceeded",
- *   "timestamp": "2026-03-27T10:31:00.000Z",
- *   "requestId": "req-456-def"
- * }
- * 
- * @example
- * // Response for unsupported language (fallback to English)
- * // Request: GET /api/users/invalid -H "Accept-Language: de"
- * // Response: 404
- * {
- *   "code": "NOT_FOUND",
- *   "message": "Resource not found",
- *   "message_en": "Resource not found",
- *   "timestamp": "2026-03-27T10:32:00.000Z"
- * }
  */
 export const errorHandler = (
   err: AppError,
@@ -147,37 +155,44 @@ export const errorHandler = (
   res: Response,
   _next: NextFunction,
 ) => {
-  (res.locals as Record<string, unknown>)["__criticalError"] = err;
-  console.error(err.stack);
+  const responseWithLocals = res as Response & {
+    locals?: Record<string, unknown>;
+  };
+  responseWithLocals.locals = responseWithLocals.locals || {};
+  responseWithLocals.locals["__criticalError"] = err;
+  const inferredCode = err.code || getCodeFromStatus(err.statusCode || 500);
+  const statusCode =
+    typeof err.statusCode === "number" && err.statusCode >= 400
+      ? err.statusCode
+      : getHttpStatus(inferredCode) || 500;
 
-  // Determine HTTP status code
-  const statusCode = err.statusCode || getHttpStatus(errorCode) || 500;
+  const errorCode = err.code || getCodeFromStatus(statusCode);
 
-  // Get request ID if available
-  const requestId = (req as any).requestId || undefined;
+  const locale = resolveLocale(err.locale || resolveLocaleFromRequest(req));
+  const localizedMessage = getLocalizedMessage(errorCode, locale);
+  const englishMessage = getLocalizedMessage(errorCode, "en");
 
-  // Log error for debugging
-  console.error({
-    timestamp: new Date().toISOString(),
+  const requestId = err.requestId || (req as any).requestId || undefined;
+
+  logger.error({
     requestId,
     code: errorCode,
     message: err.message,
     stack: err.stack,
     statusCode,
-  });
+  }, 'Request Error');
 
-  // Build error response
-  const body: ErrorResponse = {
+  const body: ErrorResponse & { statusCode: number } = {
     code: errorCode,
     message: localizedMessage,
     message_en: englishMessage,
     timestamp: new Date().toISOString(),
+    statusCode,
     requestId,
-    details: err.details,
+    details: extractLegacyDetails(err),
   };
 
-  // Don't expose stack traces or detailed errors in production
-  if (process.env.NODE_ENV !== "development") {
+  if (process.env.NODE_ENV === "production") {
     delete body.details;
   }
 

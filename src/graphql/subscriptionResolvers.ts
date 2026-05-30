@@ -1,7 +1,7 @@
 import { withFilter } from "graphql-subscriptions";
-import type { PubSubEngine } from "graphql-subscriptions";
 import {
   SubscriptionChannels,
+  transactionChannel,
   type TransactionCreatedPayload,
   type TransactionUpdatedPayload,
   type DisputeCreatedPayload,
@@ -11,73 +11,61 @@ import {
   type TypedPubSub,
 } from "./subscriptions";
 
+// ---------------------------------------------------------------------------
+// Payload formatters
+// ---------------------------------------------------------------------------
 
-/**
- * Formats a transaction payload for subscription responses
- */
-function formatTransactionPayload(payload: TransactionCreatedPayload | TransactionUpdatedPayload) {
-  const basePayload: any = {
+function formatTransactionPayload(
+  payload: TransactionCreatedPayload | TransactionUpdatedPayload,
+) {
+  const base: Record<string, unknown> = {
     id: payload.id,
     referenceNumber: payload.referenceNumber,
     status: payload.status,
     retryCount: 0,
   };
-  
-  // Add optional fields based on payload type
-  if ("type" in payload && payload.type) {
-    basePayload.type = payload.type;
-    basePayload.amount = payload.amount;
-    basePayload.phoneNumber = payload.phoneNumber;
-    basePayload.provider = payload.provider;
-    basePayload.stellarAddress = payload.stellarAddress;
-    basePayload.tags = payload.tags;
-    basePayload.createdAt = payload.createdAt;
+
+  if ("type" in payload) {
+    base.type = payload.type;
+    base.amount = payload.amount;
+    base.phoneNumber = payload.phoneNumber;
+    base.provider = payload.provider;
+    base.stellarAddress = payload.stellarAddress;
+    base.tags = payload.tags;
+    base.createdAt = payload.createdAt;
   }
-  
-  if ("updatedAt" in payload && payload.updatedAt) {
-    basePayload.updatedAt = payload.updatedAt;
-  }
-  
-  if ("jobProgress" in payload) {
-    basePayload.jobProgress = payload.jobProgress;
-  }
-  
-  return basePayload;
+
+  if ("updatedAt" in payload) base.updatedAt = payload.updatedAt;
+  if ("jobProgress" in payload) base.jobProgress = payload.jobProgress;
+
+  return base;
 }
 
-/**
- * Formats a dispute payload for subscription responses
- */
-function formatDisputePayload(payload: DisputeCreatedPayload | DisputeUpdatedPayload) {
-  const basePayload: any = {
+function formatDisputePayload(
+  payload: DisputeCreatedPayload | DisputeUpdatedPayload,
+) {
+  const base: Record<string, unknown> = {
     id: payload.id,
     status: payload.status,
     notes: [],
   };
-  
-  // Add optional fields based on payload type
-  if ("transactionId" in payload && payload.transactionId) {
-    basePayload.transactionId = payload.transactionId;
-    basePayload.reason = payload.reason;
-    basePayload.reportedBy = payload.reportedBy;
-    basePayload.createdAt = payload.createdAt;
+
+  if ("transactionId" in payload) {
+    base.transactionId = payload.transactionId;
+    base.reason = payload.reason;
+    base.reportedBy = payload.reportedBy;
+    base.createdAt = payload.createdAt;
   }
-  
+
   if ("assignedTo" in payload) {
-    basePayload.assignedTo = payload.assignedTo;
-    basePayload.resolution = payload.resolution;
+    base.assignedTo = payload.assignedTo;
+    base.resolution = payload.resolution;
+    base.updatedAt = payload.updatedAt;
   }
-  
-  if ("updatedAt" in payload && payload.updatedAt) {
-    basePayload.updatedAt = payload.updatedAt;
-  }
-  
-  return basePayload;
+
+  return base;
 }
 
-/**
- * Formats a dispute note payload for subscription responses
- */
 function formatDisputeNotePayload(payload: DisputeNoteAddedPayload) {
   return {
     id: payload.id,
@@ -88,9 +76,6 @@ function formatDisputeNotePayload(payload: DisputeNoteAddedPayload) {
   };
 }
 
-/**
- * Formats a bulk import job payload for subscription responses
- */
 function formatBulkImportJobPayload(payload: BulkImportJobUpdatedPayload) {
   return {
     jobId: payload.jobId,
@@ -103,115 +88,143 @@ function formatBulkImportJobPayload(payload: BulkImportJobUpdatedPayload) {
 }
 
 // ---------------------------------------------------------------------------
-// Subscription Resolvers
+// Subscription resolvers factory
 // ---------------------------------------------------------------------------
 
 export function createSubscriptionResolvers(pubsub: TypedPubSub) {
   return {
     Subscription: {
-      // Transaction subscriptions
-      transactionCreated: {
-        subscribe: () =>
-          pubsub.asyncIterator<TransactionCreatedPayload>([
-            SubscriptionChannels.TRANSACTION_CREATED,
-          ]),
-        resolve: (payload: TransactionCreatedPayload) => ({
-          ...formatTransactionPayload(payload),
-        }),
-      },
-
+      // ── transactionUpdated ──────────────────────────────────────────────
+      // Subscribes to a per-transaction Redis channel so only the relevant
+      // connection receives the event — no server-side filtering needed.
       transactionUpdated: {
-        subscribe: withFilter(
-          () =>
-            pubsub.asyncIterator<TransactionUpdatedPayload>([
-              SubscriptionChannels.TRANSACTION_UPDATED,
-            ]),
-          (payload: any, _variables: any, _context: any, _info: any) => {
-            // If no ID specified, broadcast to all
-            if (!_variables?.id) return true;
-            // Only send updates for the specific transaction
-            return payload?.id === _variables.id;
-          },
-        ),
-        resolve: (payload: TransactionUpdatedPayload) => ({
-          ...formatTransactionPayload(payload),
-        }),
+        subscribe: (_parent: unknown, args: { id: string }, context: any) => {
+          // Reject unauthenticated WS connections
+          if (!context?.auth?.authenticated) {
+            throw new Error("UNAUTHENTICATED: valid authToken required");
+          }
+          // Subscribe to the per-transaction channel
+          const channel = args.id
+            ? transactionChannel(args.id)
+            : SubscriptionChannels.TRANSACTION_UPDATED;
+          return pubsub.asyncIterator<TransactionUpdatedPayload>(channel);
+        },
+        resolve: (payload: TransactionUpdatedPayload) =>
+          formatTransactionPayload(payload),
       },
 
+      // ── transactionCreated ──────────────────────────────────────────────
+      transactionCreated: {
+        subscribe: (_parent: unknown, _args: unknown, context: any) => {
+          if (!context?.auth?.authenticated) {
+            throw new Error("UNAUTHENTICATED: valid authToken required");
+          }
+          return pubsub.asyncIterator<TransactionCreatedPayload>(
+            SubscriptionChannels.TRANSACTION_CREATED,
+          );
+        },
+        resolve: (payload: TransactionCreatedPayload) =>
+          formatTransactionPayload(payload),
+      },
+
+      // ── transactionCompleted ────────────────────────────────────────────
       transactionCompleted: {
-        subscribe: () =>
-          pubsub.asyncIterator<TransactionUpdatedPayload>([
+        subscribe: (_parent: unknown, _args: unknown, context: any) => {
+          if (!context?.auth?.authenticated) {
+            throw new Error("UNAUTHENTICATED: valid authToken required");
+          }
+          return pubsub.asyncIterator<TransactionUpdatedPayload>(
             SubscriptionChannels.TRANSACTION_COMPLETED,
-          ]),
-        resolve: (payload: TransactionUpdatedPayload) => ({
-          ...formatTransactionPayload(payload),
-        }),
+          );
+        },
+        resolve: (payload: TransactionUpdatedPayload) =>
+          formatTransactionPayload(payload),
       },
 
+      // ── transactionFailed ───────────────────────────────────────────────
       transactionFailed: {
-        subscribe: () =>
-          pubsub.asyncIterator<TransactionUpdatedPayload>([
+        subscribe: (_parent: unknown, _args: unknown, context: any) => {
+          if (!context?.auth?.authenticated) {
+            throw new Error("UNAUTHENTICATED: valid authToken required");
+          }
+          return pubsub.asyncIterator<TransactionUpdatedPayload>(
             SubscriptionChannels.TRANSACTION_FAILED,
-          ]),
-        resolve: (payload: TransactionUpdatedPayload) => ({
-          ...formatTransactionPayload(payload),
-        }),
+          );
+        },
+        resolve: (payload: TransactionUpdatedPayload) =>
+          formatTransactionPayload(payload),
       },
 
-      // Dispute subscriptions
+      // ── disputeCreated ──────────────────────────────────────────────────
       disputeCreated: {
-        subscribe: () =>
-          pubsub.asyncIterator<DisputeCreatedPayload>([
+        subscribe: (_parent: unknown, _args: unknown, context: any) => {
+          if (!context?.auth?.authenticated) {
+            throw new Error("UNAUTHENTICATED: valid authToken required");
+          }
+          return pubsub.asyncIterator<DisputeCreatedPayload>(
             SubscriptionChannels.DISPUTE_CREATED,
-          ]),
-        resolve: (payload: DisputeCreatedPayload) => formatDisputePayload(payload),
+          );
+        },
+        resolve: (payload: DisputeCreatedPayload) =>
+          formatDisputePayload(payload),
       },
 
+      // ── disputeUpdated ──────────────────────────────────────────────────
       disputeUpdated: {
         subscribe: withFilter(
-          () =>
-            pubsub.asyncIterator<DisputeUpdatedPayload>([
+          (_parent: unknown, _args: unknown, context: any) => {
+            if (!context?.auth?.authenticated) {
+              throw new Error("UNAUTHENTICATED: valid authToken required");
+            }
+            return pubsub.asyncIterator<DisputeUpdatedPayload>(
               SubscriptionChannels.DISPUTE_UPDATED,
-            ]),
-          (payload: any, _variables: any, _context: any, _info: any) => {
-            // If no ID specified, broadcast to all
-            if (!_variables?.id) return true;
-            // Only send updates for the specific dispute
-            return payload?.id === _variables.id;
+            );
+          },
+          (payload: any, variables: any) => {
+            if (!variables?.id) return true;
+            return payload?.id === variables.id;
           },
         ),
-        resolve: (payload: DisputeUpdatedPayload) => formatDisputePayload(payload),
+        resolve: (payload: DisputeUpdatedPayload) =>
+          formatDisputePayload(payload),
       },
 
+      // ── disputeNoteAdded ────────────────────────────────────────────────
       disputeNoteAdded: {
         subscribe: withFilter(
-          () =>
-            pubsub.asyncIterator<DisputeNoteAddedPayload>([
+          (_parent: unknown, _args: unknown, context: any) => {
+            if (!context?.auth?.authenticated) {
+              throw new Error("UNAUTHENTICATED: valid authToken required");
+            }
+            return pubsub.asyncIterator<DisputeNoteAddedPayload>(
               SubscriptionChannels.DISPUTE_NOTE_ADDED,
-            ]),
-          (payload: any, _variables: any, _context: any, _info: any) => {
-            // If no disputeId specified, broadcast to all
-            if (!_variables?.disputeId) return true;
-            // Only send notes for the specific dispute
-            return payload?.disputeId === _variables.disputeId;
+            );
+          },
+          (payload: any, variables: any) => {
+            if (!variables?.disputeId) return true;
+            return payload?.disputeId === variables.disputeId;
           },
         ),
-        resolve: (payload: DisputeNoteAddedPayload) => formatDisputeNotePayload(payload),
+        resolve: (payload: DisputeNoteAddedPayload) =>
+          formatDisputeNotePayload(payload),
       },
 
-      // Bulk import job subscriptions
+      // ── bulkImportJobUpdated ────────────────────────────────────────────
       bulkImportJobUpdated: {
         subscribe: withFilter(
-          () =>
-            pubsub.asyncIterator<BulkImportJobUpdatedPayload>([
+          (_parent: unknown, _args: unknown, context: any) => {
+            if (!context?.auth?.authenticated) {
+              throw new Error("UNAUTHENTICATED: valid authToken required");
+            }
+            return pubsub.asyncIterator<BulkImportJobUpdatedPayload>(
               SubscriptionChannels.BULK_IMPORT_JOB_UPDATED,
-            ]),
-          (payload: any, _variables: any, _context: any, _info: any) => {
-            // Only send updates for the specific job
-            return payload?.jobId === _variables.jobId;
+            );
           },
+          (payload: any, variables: any) =>
+            payload?.jobId === variables.jobId,
         ),
-        resolve: (payload: BulkImportJobUpdatedPayload) => formatBulkImportJobPayload(payload),
+        resolve: (payload: BulkImportJobUpdatedPayload) =>
+          formatBulkImportJobPayload(payload),
       },
     },
   };

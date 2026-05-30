@@ -1,19 +1,20 @@
-import { ExpressAdapter } from "@bull-board/express";
 import { createBullBoard } from "@bull-board/api";
-import { BullMQAdapter } from "@bull-board/api/dist/queueAdapters/bullMQ";
-import { transactionQueue } from "./transactionQueue";
-
-const createQueueAdapter = () => {
-  return new BullMQAdapter(transactionQueue, {
-    readOnlyMode: false,
-  });
-};
+import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
+import { ExpressAdapter } from "@bull-board/express";
+import { Router } from "express";
+import { deadLetterQueue } from "./dlq";
+import { providerBalanceAlertQueue } from "./providerBalanceAlertQueue";
 
 export function createQueueDashboard() {
+  const router = Router();
   const serverAdapter = new ExpressAdapter();
+  serverAdapter.setBasePath("/admin/queues");
 
   createBullBoard({
-    queues: [createQueueAdapter()],
+    queues: [
+      new BullMQAdapter(providerBalanceAlertQueue),
+      new BullMQAdapter(deadLetterQueue),
+    ],
     serverAdapter: serverAdapter,
     options: {
       uiConfig: {
@@ -22,7 +23,7 @@ export function createQueueDashboard() {
     },
   });
 
-  serverAdapter.setBasePath("/admin/queues");
+  router.use("/", serverAdapter.getRouter());
 
-  return serverAdapter.getRouter();
+  return router;
 }

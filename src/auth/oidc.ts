@@ -3,7 +3,6 @@ import passport from "passport";
 import { Strategy as GoogleStrategy, Profile as GoogleProfile, VerifyCallback as GoogleVerifyCallback } from "passport-google-oauth20";
 import { Strategy as OpenIDConnectStrategy } from "passport-openidconnect";
 import { Router, Request, Response } from "express";
-import jwt, { JwtHeader, JwtPayload } from "jsonwebtoken";
 import { pool } from "../config/database";
 import { ssoConfig } from "../config/sso";
 import { generateToken } from "./jwt";

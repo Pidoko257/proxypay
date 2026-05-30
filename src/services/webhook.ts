@@ -1,4 +1,5 @@
 import { createHmac } from "crypto";
+import { webhookPayloadSchema, flatWebhookPayloadSchema } from "./webhookSchema";
 import { gzip } from "zlib";
 import { promisify } from "util";
 import { Transaction, WebhookDeliveryUpdate } from "../models/transaction";
@@ -175,8 +176,9 @@ export class WebhookService {
     this.sleepImpl = options.sleep ?? wait;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
-    this.compress =
-      options.compress ?? process.env.WEBHOOK_COMPRESSION === "true";
+    this.compress = options.compress ?? (process.env.WEBHOOK_COMPRESSION === "true");
+    // Zod schemas for payload validation
+    // Imported lazily to avoid circular dependencies
   }
 
   buildPayload(event: WebhookEvent, transaction: Transaction): WebhookPayload {
@@ -259,6 +261,11 @@ export class WebhookService {
     }
 
     const payload = this.buildPayload(event, transaction);
+    const validation = webhookPayloadSchema.safeParse(payload);
+    if (!validation.success) {
+      this.logger.warn(`[webhook] payload validation failed: ${validation.error}`);
+      return { status: "failed", attempts: 0, lastAttemptAt: null, deliveredAt: null, lastError: "Payload validation failed" };
+    }
     const rawPayload = JSON.stringify(payload);
     const signature = this.signPayload(rawPayload);
     const { body, extraHeaders } = await prepareBody(rawPayload, this.compress);
@@ -345,6 +352,11 @@ export class WebhookService {
     }
 
     const payload = this.buildFlatPayload(event, transaction);
+    const validation = flatWebhookPayloadSchema.safeParse(payload);
+    if (!validation.success) {
+      this.logger.warn(`[webhook] flat payload validation failed: ${validation.error}`);
+      return { status: "failed", attempts: 0, lastAttemptAt: null, deliveredAt: null, lastError: "Payload validation failed" };
+    }
     const rawPayload = JSON.stringify(payload);
     const signature = this.signPayload(rawPayload);
     const { body, extraHeaders } = await prepareBody(rawPayload, this.compress);

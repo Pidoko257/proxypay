@@ -15,7 +15,7 @@ import { hashPassword } from '../utils/password';
 import { redisClient } from '../config/redis';
 import { TransactionModel } from '../models/transaction';
 import { EmailService } from '../services/email';
-import { authRateLimiter } from '../middleware/authRateLimit';
+import { loginRateLimiter, registerRateLimiter } from '../middleware/authRateLimit';
 
 const emailService = new EmailService();
 
@@ -28,13 +28,14 @@ export const registerSchema = z.object({
     .min(12, 'Password must be at least 12 characters')
     .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
     .regex(/[a-z]/, 'Password must contain at least one lowercase letter')
+    .regex(/[0-9]/, 'Password must contain at least one number')
     .regex(/[^A-Za-z0-9]/, 'Password must contain at least one special character'),
 });
 
 /**
  * POST /api/auth/register
  */
-authRoutes.post('/register', authRateLimiter, validateRequest(registerSchema), async (req: Request, res: Response) => {
+authRoutes.post('/register', registerRateLimiter, validateRequest(registerSchema), async (req: Request, res: Response) => {
   const { phone_number, password } = req.body as z.infer<typeof registerSchema>;
   try {
     const passwordHash = await hashPassword(password);
@@ -62,7 +63,7 @@ authRoutes.use('/sso/oidc', createOIDCRouter());
  * Enforces account lockout after 5 failed attempts within 10 minutes.
  * Sends an email notification when an account is locked.
  */
-authRoutes.post('/login', authRateLimiter, async (req: Request, res: Response) => {
+authRoutes.post('/login', loginRateLimiter, async (req: Request, res: Response) => {
   const { phone_number } = req.body;
 
   if (!phone_number) {
@@ -308,7 +309,7 @@ authRoutes.get('/me', authenticateToken, async (req: Request, res: Response) => 
     const permissions = await getUserPermissions(payload.userId);
 
     const cacheKey = `user:balance:stats:${payload.userId}`;
-    let balanceStats = { total_deposited: "0", total_withdrawn: "0", current_balance: "0" };
+    let balanceStats = { total_deposited: "0", total_withdrawn: "0", current_balance: "0", available_balance: "0", pending_balance: "0" };
 
     if (redisClient.isOpen) {
       const cachedStats = await redisClient.get(cacheKey);
@@ -326,6 +327,8 @@ authRoutes.get('/me', authenticateToken, async (req: Request, res: Response) => 
             total_deposited: dbStats.total_deposited || "0",
             total_withdrawn: dbStats.total_withdrawn || "0",
             current_balance: dbStats.current_balance || "0",
+            available_balance: dbStats.available_balance || "0",
+            pending_balance: dbStats.pending_balance || "0",
           };
           await redisClient.set(cacheKey, JSON.stringify(balanceStats), { EX: 3600 });
         }
@@ -338,6 +341,8 @@ authRoutes.get('/me', authenticateToken, async (req: Request, res: Response) => 
           total_deposited: dbStats.total_deposited || "0",
           total_withdrawn: dbStats.total_withdrawn || "0",
           current_balance: dbStats.current_balance || "0",
+          available_balance: dbStats.available_balance || "0",
+          pending_balance: dbStats.pending_balance || "0",
         };
       }
     }
@@ -351,6 +356,8 @@ authRoutes.get('/me', authenticateToken, async (req: Request, res: Response) => 
         total_deposited: balanceStats.total_deposited,
         total_withdrawn: balanceStats.total_withdrawn,
         current_balance: balanceStats.current_balance,
+        available_balance: balanceStats.available_balance,
+        pending_balance: balanceStats.pending_balance,
       },
       tokenInfo: {
         issuedAt: payload.iat,

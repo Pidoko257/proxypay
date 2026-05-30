@@ -15,6 +15,7 @@ import session from "express-session";
 import * as Sentry from "@sentry/node";
 import { register } from "prom-client";
 import { startStellarExporter } from "./services/stellarExporter";
+import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 
 import {
   apiVersionMiddleware,
@@ -495,6 +496,10 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
     await shutdownQueue();
     console.log("[Shutdown] Queue resources closed");
 
+    console.log("[Shutdown] Stopping heartbeat service");
+    stopHeartbeatService();
+    console.log("[Shutdown] Heartbeat service stopped");
+
     console.log("[Shutdown] Closing PostgreSQL pool");
     await pool.end();
     console.log("[Shutdown] PostgreSQL pool closed");
@@ -532,6 +537,9 @@ async function initializeRuntime(): Promise<void> {
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
+
+  // Initialize System Heartbeat Metric
+  startHeartbeatService();
 
   const { getQueueHealth, pauseQueueEndpoint, resumeQueueEndpoint } =
     await import("./queue/health");

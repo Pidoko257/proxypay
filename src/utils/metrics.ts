@@ -187,3 +187,11 @@ export const crossChainAnomalyTotal = new Counter({
   labelNames: ["chain", "asset", "reason"],
   registers: [register],
 });
+
+// System Heartbeat Metric
+export const systemHeartbeat = new Gauge({
+  name: "system_heartbeat",
+  help: "System heartbeat metric indicating baseline availability state (1=available, 0=unavailable)",
+  labelNames: ["service"],
+  registers: [register],
+});

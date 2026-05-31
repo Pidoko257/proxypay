@@ -55,6 +55,7 @@ export async function startApolloServer(
 
     validationRules: [
       depthLimit(5),
+        // Enforce strict query complexity limit of 500 points per request
       createComplexityRule({
         maximumComplexity: 500,
         estimators: [

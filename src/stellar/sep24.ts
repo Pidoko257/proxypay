@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import { sep24RateLimiter } from "../middleware/rateLimit";
 import { v4 as uuidv4 } from "uuid";
 import { Transaction, Keypair, StrKey } from "stellar-sdk";
-import { getStellarServer, getNetworkPassphrase, STELLAR_NETWORKS } from "../config/stellar";
+import { getStellarServer, getNetworkPassphrase, getHorizonUrls, STELLAR_NETWORKS } from "../config/stellar";
 import { enqueueSepWebhook } from "../services/stellar/webhooks";
 
 
@@ -130,7 +130,7 @@ export const getSep24Config = () => ({
       sep6_enabled: true,
       deposits_enabled: true,
       withdrawals_enabled: true,
-      transfer_server: process.env.STELLAR_HORIZON_URL || "https://horizon-testnet.stellar.org",
+      transfer_server: getHorizonUrls()[0],
       sep24_enabled: true,
       min_amount: 1,
       max_amount: 1000000,

@@ -57,7 +57,7 @@ export const env = cleanEnv(process.env, {
   }),
   STELLAR_HORIZON_URL: str({
     default: "https://horizon-testnet.stellar.org",
-    desc: "Stellar Horizon server URL",
+    desc: "Stellar Horizon server URL, or a comma-separated list of URLs (primary first, then fallbacks) for automatic node rotation/failover",
   }),
   STELLAR_NETWORK: str({
     default: "testnet",

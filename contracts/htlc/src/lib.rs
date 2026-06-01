@@ -388,4 +388,53 @@ mod tests {
         }));
         assert!(result.is_err(), "initialize should fail with invalid required_signatures");
     }
+
+    #[test]
+    fn test_htlc_refund_before_timelock_fails() {
+        let (env, sender, receiver, token, client) = setup(None);
+        let amount: i128 = 500_000;
+        
+        let preimage = BytesN::from_array(&env, &[1; 32]);
+        let hashlock: BytesN<32> = env.crypto().sha256(&preimage.clone().into()).into();
+        let timelock = 1000;
+        
+        env.ledger().set_timestamp(100);
+
+        let approved_signers: Vec<Address> = Vec::new(&env);
+        let required_signatures = 0u32;
+        client.initialize(&sender, &receiver, &token, &amount, &hashlock, &timelock, &approved_signers, &required_signatures);
+
+        // Try to refund exactly one second before timelock
+        env.ledger().set_timestamp(999);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.refund();
+        }));
+        assert!(result.is_err(), "refund should fail before timelock expires");
+    }
+
+    #[test]
+    fn test_htlc_refund_exact_timelock() {
+        let (env, sender, receiver, token, client) = setup(None);
+        let amount: i128 = 500_000;
+        
+        let preimage = BytesN::from_array(&env, &[1; 32]);
+        let hashlock: BytesN<32> = env.crypto().sha256(&preimage.clone().into()).into();
+        let timelock = 1000;
+        
+        env.ledger().set_timestamp(100);
+
+        let approved_signers: Vec<Address> = Vec::new(&env);
+        let required_signatures = 0u32;
+        client.initialize(&sender, &receiver, &token, &amount, &hashlock, &timelock, &approved_signers, &required_signatures);
+
+        // Time reaches exactly the timelock
+        env.ledger().set_timestamp(1000);
+
+        client.refund();
+        
+        let token_client = TokenClient::new(&env, &token);
+        assert_eq!(token_client.balance(&sender), 1_000_000);
+        assert!(client.get_state().refunded);
+    }
 }

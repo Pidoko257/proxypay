@@ -1,4 +1,4 @@
-import { pool, queryRead, queryWrite } from "../config/database";
+import { queryRead, queryWrite } from "../config/database";
 import { generateReferenceNumber } from "../utils/referenceGenerator";
 import { encrypt, decrypt } from "../utils/encryption";
 import { WebSocketManager } from "../websocket";
@@ -59,7 +59,6 @@ interface DecodedTransactionCursor {
 const MAX_TAGS = 10;
 const TAG_REGEX = /^[a-z0-9-]+$/;
 const MAX_METADATA_BYTES = 10240;
-const MAX_NOTES_LENGTH = 256;
 
 const TRANSACTION_SELECT_COLUMNS = `
   id,
@@ -217,28 +216,6 @@ export class TransactionModel {
     const metadata = validateMetadata(data.metadata);
     const ref = await generateReferenceNumber();
 
-    // Invalidate caches before creating transaction to ensure fresh data on next query
-    if (data.userId) {
-      await CachedTransactionInvalidation.invalidateUserCaches(
-        data.userId,
-      ).catch((err) => {
-        console.warn(
-          "[cache] Failed to invalidate user caches on transaction create",
-          err,
-        );
-      });
-    }
-    if (data.provider) {
-      await CachedTransactionInvalidation.invalidateProviderStats(
-        data.provider,
-      ).catch((err) => {
-        console.warn(
-          "[cache] Failed to invalidate provider stats on transaction create",
-          err,
-        );
-      });
-    }
-
     const result = await queryWrite(
       `INSERT INTO transactions (
         reference_number, provider_reference, type, amount, currency,
@@ -270,7 +247,41 @@ export class TransactionModel {
       ],
     );
 
-    return mapTransactionRow(result.rows[0]);
+    const transaction = mapTransactionRow(result.rows[0]);
+
+    // Invalidate caches after successful transaction creation.
+    if (data.userId) {
+      await Promise.resolve(
+        CachedTransactionInvalidation.invalidateUserCaches(data.userId),
+      ).catch((err) => {
+        console.warn(
+          "[cache] Failed to invalidate user caches on transaction create",
+          err,
+        );
+      });
+    }
+
+    if (data.provider) {
+      await Promise.resolve(
+        CachedTransactionInvalidation.invalidateProviderStats(data.provider),
+      ).catch((err) => {
+        console.warn(
+          "[cache] Failed to invalidate provider stats on transaction create",
+          err,
+        );
+      });
+    } else {
+      await Promise.resolve(
+        CachedTransactionInvalidation.invalidateGeneralStats(),
+      ).catch((err) => {
+        console.warn(
+          "[cache] Failed to invalidate general stats on transaction create",
+          err,
+        );
+      });
+    }
+
+    return transaction;
   }
 
   async findById(id: string, userId?: string) {
@@ -295,7 +306,7 @@ export class TransactionModel {
       params.push(userId);
     }
 
-    q += ` RETURNING user_id, reference_number, updated_at`;
+    q += ` RETURNING user_id, provider, reference_number, updated_at`;
 
     const res = await queryWrite(q, params);
     if (!res.rowCount) return;
@@ -304,8 +315,8 @@ export class TransactionModel {
 
     // ── Invalidate caches on transaction status update ────────────────────
     if (row.user_id) {
-      await CachedTransactionInvalidation.invalidateUserCaches(
-        row.user_id,
+      await Promise.resolve(
+        CachedTransactionInvalidation.invalidateUserCaches(row.user_id),
       ).catch((err) => {
         console.warn(
           "[cache] Failed to invalidate user caches on transaction status update",
@@ -313,14 +324,26 @@ export class TransactionModel {
         );
       });
     }
-    await CachedTransactionInvalidation.invalidateGeneralStats().catch(
-      (err) => {
+
+    if (row.provider) {
+      await Promise.resolve(
+        CachedTransactionInvalidation.invalidateProviderStats(row.provider),
+      ).catch((err) => {
+        console.warn(
+          "[cache] Failed to invalidate provider stats on transaction update",
+          err,
+        );
+      });
+    } else {
+      await Promise.resolve(
+        CachedTransactionInvalidation.invalidateGeneralStats(),
+      ).catch((err) => {
         console.warn(
           "[cache] Failed to invalidate general stats on transaction update",
           err,
         );
-      },
-    );
+      });
+    }
 
     // ── Publish GraphQL subscription event ──────────────────────────────
     // Publish to both the per-transaction channel (targeted) and the
@@ -331,7 +354,7 @@ export class TransactionModel {
       id,
       referenceNumber: row.reference_number,
       status,
-      updatedAt: row.updated_at.toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
     };
 
     await pubsub.publish(transactionChannel(id), payload);

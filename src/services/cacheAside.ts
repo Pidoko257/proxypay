@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { cachedQueryManager, QUERY_TTL_POLICIES, CacheTags, CacheOptions } from "./cachedQueryManager";
+import { cachedQueryManager, QUERY_TTL_POLICIES, CacheTags } from "./cachedQueryManager";
 import { logger } from "./logger";
 
 /**
@@ -125,9 +125,10 @@ export class TransactionCacheInvalidation {
   static async invalidateProviderStats(provider: string): Promise<void> {
     const tags = [
       CacheTags.provider(provider),
+      CacheTags.providerVolumes(),
       CacheTags.generalStats(),
     ];
-    
+
     await cachedQueryManager.invalidateByTags(tags);
     logger.info("Provider stats caches invalidated", { provider, tags });
   }

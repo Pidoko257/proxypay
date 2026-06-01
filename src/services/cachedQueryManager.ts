@@ -78,27 +78,14 @@ export class CacheTags {
   static provider(provider: string): string {
     return `provider:${provider}`;
   }
+
+  static providerVolumes(): string {
+    return `provider:volumes`;
+  }
   
   static auditHistory(userId: string): string {
     return `user:${userId}:audit-history`;
   }
-}
-
-/**
- * Generates a unique cache key from base key and parameters
- */
-function generateCacheKey(baseKey: string, params?: Record<string, any>): string {
-  if (!params || Object.keys(params).length === 0) {
-    return `cache:${baseKey}`;
-  }
-  
-  // Sort params for consistent cache key generation
-  const sortedParams = Object.keys(params)
-    .sort()
-    .map(key => `${key}=${encodeURIComponent(JSON.stringify(params[key]))}`)
-    .join("&");
-  
-  return `cache:${baseKey}:${Buffer.from(sortedParams).toString("base64")}`;
 }
 
 /**

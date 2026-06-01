@@ -559,6 +559,10 @@ async function initializeRuntime(): Promise<void> {
     await layeredCache.init();
     console.log("Layered cache (L1/L2) initialized");
 
+    const { providerSettingsService } = await import("./services/providerSettingsService");
+    await providerSettingsService.getAllSettings();
+    console.log("Provider settings cache initialized");
+
     const { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob } =
       await import("./queue");
     startProviderBalanceAlertWorker();

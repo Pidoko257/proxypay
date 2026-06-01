@@ -44,6 +44,8 @@ import {
   ComplianceDocumentCreateInput,
   ComplianceDocumentUpdateInput,
 } from "../models/complianceDocument";
+import { providerSettingsService } from "../services/providerSettingsService";
+import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -2623,6 +2625,51 @@ router.delete(
         .json({ message: "Failed to archive compliance document" });
     }
   },
+);
+
+// =========================
+// PROVIDER SETTINGS
+// =========================
+
+router.get(
+  "/provider-settings",
+  requireAdmin,
+  logAdminAction("GET_PROVIDER_SETTINGS"),
+  async (req: Request, res: Response) => {
+    try {
+      const settings = await providerSettingsService.getAllSettings();
+      res.json(settings);
+    } catch (error) {
+      console.error("Error fetching provider settings:", error);
+      res.status(500).json({ message: "Failed to fetch provider settings" });
+    }
+  }
+);
+
+router.put(
+  "/provider-settings/:providerName",
+  requireAdmin,
+  logAdminAction("UPDATE_PROVIDER_SETTINGS"),
+  async (req: Request, res: Response) => {
+    try {
+      const providerName = req.params.providerName;
+      const { failure_threshold, timeout_ms, fallback_order } = req.body;
+      
+      const settings = await providerSettingsService.upsertProviderSettings(
+        providerName,
+        failure_threshold || 3,
+        timeout_ms || 5000,
+        fallback_order || null
+      );
+      
+      resetCircuitBreakerForProvider(providerName);
+      
+      res.json({ message: "Provider settings updated successfully", settings });
+    } catch (error) {
+      console.error("Error updating provider settings:", error);
+      res.status(500).json({ message: "Failed to update provider settings" });
+    }
+  }
 );
 
 export { router as adminRoutes };

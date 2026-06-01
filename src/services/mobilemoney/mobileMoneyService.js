@@ -113,10 +113,21 @@ var MobileMoneyService = /** @class */ (function () {
         }
     }
     MobileMoneyService.prototype.failoverEnabled = function () {
-        return (String(process.env.PROVIDER_FAILOVER_ENABLED || "false").toLowerCase() ===
-            "true");
+        var envVal = process.env.PROVIDER_FAILOVER_ENABLED;
+        if (envVal !== undefined) {
+            return String(envVal).toLowerCase() === "true";
+        }
+        return true; // Default to true so DB-driven fallback applies
     };
     MobileMoneyService.prototype.getBackupProviderKey = function (primary) {
+        try {
+            var settings = require("../../providerSettingsService").providerSettingsService.cache.get("provider_setting_" + primary.toLowerCase());
+            if (settings && settings.fallback_order) {
+                return settings.fallback_order.toLowerCase();
+            }
+        } catch (e) {
+            console.error("Failed to read providerSettings cache", e);
+        }
         var envKey = "PROVIDER_BACKUP_".concat(primary.toUpperCase());
         var val = process.env[envKey];
         return val ? val.toLowerCase() : null;

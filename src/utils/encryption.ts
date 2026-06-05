@@ -251,7 +251,8 @@ export function encryptFieldForUser(value: string | null | undefined, userId: st
 export function decryptFieldForUser(raw: string | null | undefined, userId: string): string | null | undefined {
   if (raw == null || raw === "") return raw;
   const payload = deserializePayload(raw);
-  const keys = getDecryptionKeys(userId);
+  const keysMap = getEncryptionKeys();
+  const keys = Array.from(keysMap.values()).map((k) => deriveKey(k));
   for (let i = 0; i < keys.length; i++) {
     try {
       return decryptAES(payload, keys[i]);
@@ -298,7 +299,8 @@ export function decrypt(encryptedData: string | null | undefined): string | null
   const authTag = Buffer.from(authTagHex, "hex");
   const ciphertext = Buffer.from(ciphertextHex, "hex");
 
-  const keys = getDecryptionKeys();
+  const keysMap = getEncryptionKeys();
+  const keys = Array.from(keysMap.values()).map((k) => deriveKey(k));
   for (let i = 0; i < keys.length; i++) {
     try {
       const decipher = crypto.createDecipheriv(ALGORITHM, keys[i], iv, { authTagLength: AUTH_TAG_LENGTH });

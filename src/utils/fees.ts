@@ -74,7 +74,7 @@ export interface FeeResult {
 
 export interface VipFeeResult extends FeeResult {
   /** The VIP tier the user currently qualifies for. */
-  tier: VipTier;
+  tier: MerchantTier;
   /** Discount percentage applied to the base fee rate. */
   discountPercent: number;
   /** The user's sum of completed transaction amounts in the last 30 days. */
@@ -137,10 +137,10 @@ export async function getThirtyDayVolume(userId: string): Promise<number> {
  * Pure function — no I/O.
  */
 export function mapVolumeToTier(volume: number): TierConfig {
-  // VIP_TIERS is ordered highest→lowest, so the first match is the best tier.
+  // MERCHANT_TIERS is ordered highest→lowest, so the first match is the best tier.
   return (
-    VIP_TIERS.find((t) => volume >= t.minVolume) ??
-    VIP_TIERS[VIP_TIERS.length - 1]   // STANDARD (fallback, should never be needed)
+    MERCHANT_TIERS.find((t) => volume >= t.minVolume) ??
+    MERCHANT_TIERS[MERCHANT_TIERS.length - 1]   // BRONZE (fallback, should never be needed)
   );
 }
 

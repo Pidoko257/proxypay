@@ -67,7 +67,15 @@ jobs:
           --all-features
           -- -D warnings
 
-      - name: Build contracts (wasm)
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2. Build & WASM
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & WASM
+    runs-on: ubuntu-latest
+    needs: lint
+    defaults:
+      run:
         working-directory: contracts
 
     steps:

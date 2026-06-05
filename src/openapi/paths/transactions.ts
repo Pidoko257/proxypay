@@ -125,7 +125,7 @@ registry.registerPath({
     }),
     query: z.object({
       download: z.string().optional().openapi({ description: 'Set to 0 to display inline instead of downloading' }),
-    }).optional(),
+    }),
   },
   responses: {
     200: {

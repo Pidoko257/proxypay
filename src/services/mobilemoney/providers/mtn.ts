@@ -248,15 +248,14 @@ export class MTNProvider {
           };
         }
 
-        const status = String(matched.status ?? "").toUpperCase();
-        const providerReference = getProviderReference(matched);
+        const status = String(responseItem.status ?? "").toUpperCase();
         const success = status === "SUCCESSFUL" || status === "SUCCESS";
 
         return {
           referenceId: item.referenceId,
-          success: status === "SUCCESSFUL" || status === "SUCCESS",
+          success,
           error:
-            status !== "SUCCESSFUL" && status !== "SUCCESS"
+            !success
               ? responseItem.errorReason ||
                 responseItem.message ||
                 `Status: ${status}`

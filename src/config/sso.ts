@@ -1,4 +1,4 @@
-import { SSOConfig } from "../auth/sso";
+import { SSOConfig } from "../auth/sso.js";
 
 /**
  * SSO Configuration
@@ -186,7 +186,7 @@ export async function initializeSSOProviders(): Promise<void> {
     return;
   }
 
-  const { ssoService } = await import("../auth/sso");
+  const { ssoService } = await import("../auth/sso.js");
 
   for (const providerConfig of config.providers) {
     try {

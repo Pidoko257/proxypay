@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
+import * as StellarSdk from "stellar-sdk";
 import { generateToken } from "../auth/jwt";
 import {
   updateAdminNotesHandler,
@@ -1399,7 +1400,7 @@ router.post(
         );
       }
 
-      const { calculateFee } = await import("../utils/fees");
+      const { calculateFee } = await import("../utils/fees.js");
       const results: BulkTransactionActionResult[] = [];
 
       for (const transactionId of transactionIds) {
@@ -1829,7 +1830,7 @@ router.post(
       }
 
       const { runManualProviderReconciliation } =
-        await import("../jobs/providerReconciliationJob");
+        await import("../jobs/providerReconciliationJob.js");
       const result = await runManualProviderReconciliation(
         provider,
         reportDate,
@@ -1975,7 +1976,7 @@ router.get(
   requireAdmin,
   async (_req: Request, res: Response) => {
     try {
-      const { queryRead } = await import("../config/database");
+      const { queryRead } = await import("../config/database.js");
       const result = await queryRead<{
         report_date: string;
         user_fees: string;
@@ -2295,16 +2296,16 @@ const validateComplianceCreate = (
   body: Record<string, unknown>,
 ): ValidationResult<ComplianceDocumentCreateInput> => {
   const title = normalizeString(body.title, "title", true);
-  if (!title.ok) return title;
+  if (!title.ok) return title as ValidationResult<ComplianceDocumentCreateInput>;
 
   const docBody = normalizeString(body.body, "body", true);
-  if (!docBody.ok) return docBody;
+  if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentCreateInput>;
 
   const summary = normalizeString(body.summary, "summary", false);
-  if (!summary.ok) return summary;
+  if (!summary.ok) return summary as ValidationResult<ComplianceDocumentCreateInput>;
 
   const provider = normalizeString(body.provider, "provider", false);
-  if (!provider.ok) return provider;
+  if (!provider.ok) return provider as ValidationResult<ComplianceDocumentCreateInput>;
   if (provider.value && provider.value.length > 100) {
     return { ok: false, message: "provider must be 100 characters or fewer" };
   }
@@ -2314,16 +2315,16 @@ const validateComplianceCreate = (
     "sourceUrl",
     false,
   );
-  if (!sourceUrl.ok) return sourceUrl;
+  if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentCreateInput>;
 
   const country = normalizeCountry(getCountryValue(body));
-  if (!country.ok) return country;
+  if (!country.ok) return country as ValidationResult<ComplianceDocumentCreateInput>;
 
   const tags = normalizeTags(body.tags);
-  if (!tags.ok) return tags;
+  if (!tags.ok) return tags as ValidationResult<ComplianceDocumentCreateInput>;
 
   const status = normalizeStatus(body.status);
-  if (!status.ok) return status;
+  if (!status.ok) return status as ValidationResult<ComplianceDocumentCreateInput>;
 
   return {
     ok: true,
@@ -2364,25 +2365,25 @@ const validateComplianceUpdate = (
 
   if (Object.prototype.hasOwnProperty.call(body, "title")) {
     const title = normalizeString(body.title, "title", true);
-    if (!title.ok) return title;
+    if (!title.ok) return title as ValidationResult<ComplianceDocumentUpdateInput>;
     input.title = title.value as string;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "body")) {
     const docBody = normalizeString(body.body, "body", true);
-    if (!docBody.ok) return docBody;
+    if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentUpdateInput>;
     input.body = docBody.value as string;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "summary")) {
     const summary = normalizeString(body.summary, "summary", false);
-    if (!summary.ok) return summary;
+    if (!summary.ok) return summary as ValidationResult<ComplianceDocumentUpdateInput>;
     input.summary = summary.value ?? null;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "provider")) {
     const provider = normalizeString(body.provider, "provider", false);
-    if (!provider.ok) return provider;
+    if (!provider.ok) return provider as ValidationResult<ComplianceDocumentUpdateInput>;
     if (provider.value && provider.value.length > 100) {
       return { ok: false, message: "provider must be 100 characters or fewer" };
     }
@@ -2398,7 +2399,7 @@ const validateComplianceUpdate = (
       "sourceUrl",
       false,
     );
-    if (!sourceUrl.ok) return sourceUrl;
+    if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentUpdateInput>;
     input.sourceUrl = sourceUrl.value ?? null;
   }
 
@@ -2408,19 +2409,19 @@ const validateComplianceUpdate = (
     Object.prototype.hasOwnProperty.call(body, "country_code")
   ) {
     const country = normalizeCountry(getCountryValue(body));
-    if (!country.ok) return country;
+    if (!country.ok) return country as ValidationResult<ComplianceDocumentUpdateInput>;
     input.countryCode = country.value ?? null;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "tags")) {
     const tags = normalizeTags(body.tags);
-    if (!tags.ok) return tags;
+    if (!tags.ok) return tags as ValidationResult<ComplianceDocumentUpdateInput>;
     input.tags = tags.value ?? [];
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "status")) {
     const status = normalizeStatus(body.status);
-    if (!status.ok) return status;
+    if (!status.ok) return status as ValidationResult<ComplianceDocumentUpdateInput>;
     input.status = status.value;
   }
 
@@ -2509,15 +2510,17 @@ router.get(
       const limit = parsePositiveInt(req.query.limit, 25, 100);
       const country = normalizeCountry(getQueryString(req.query.country));
       if (!country.ok) {
-        throw createError(ERROR_CODES.INVALID_INPUT, country.message, {
-          message: country.message,
+        const err = country as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
         });
       }
 
       const status = normalizeStatus(getQueryString(req.query.status));
       if (!status.ok) {
-        throw createError(ERROR_CODES.INVALID_INPUT, status.message, {
-          message: status.message,
+        const err = status as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
         });
       }
 
@@ -2603,8 +2606,9 @@ router.post(
     try {
       const validation = validateComplianceCreate(req.body ?? {});
       if (!validation.ok) {
-        throw createError(ERROR_CODES.INVALID_INPUT, validation.message, {
-          message: validation.message,
+        const err = validation as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
         });
       }
 
@@ -2632,8 +2636,9 @@ router.patch(
     try {
       const validation = validateComplianceUpdate(req.body ?? {});
       if (!validation.ok) {
-        throw createError(ERROR_CODES.INVALID_INPUT, validation.message, {
-          message: validation.message,
+        const err = validation as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
         });
       }
 
@@ -3024,7 +3029,7 @@ router.get(
             return { status: "unhealthy" as const, responseTime: undefined };
           }),
         (async () => {
-          const stats = await transactionModel.getStatistics(
+          const stats = await (transactionModel as any).getStatistics(
             new Date(Date.now() - 24 * 60 * 60 * 1000),
             new Date(),
           );
@@ -3032,7 +3037,7 @@ router.get(
             totalCount: stats.totalTransactions,
             successRate: stats.successRate,
             totalVolume: stats.totalVolume,
-            activeUsers: await UserModel.countActiveUsers(24),
+            activeUsers: await (UserModel as any).countActiveUsers(24),
           };
         })().catch((err) => {
           console.error("[Dashboard] Transaction stats error:", err);
@@ -3067,12 +3072,12 @@ router.get(
           responseTime,
         },
         queue: {
-          totalJobs: queueStats.total || 0,
-          pendingJobs: queueStats.pending || 0,
-          activeJobs: queueStats.active || 0,
-          completedJobs: queueStats.completed || 0,
-          failedJobs: queueStats.failed || 0,
-          dlqSize: queueStats.dlq || 0,
+          totalJobs: (queueStats as any).total || 0,
+          pendingJobs: (queueStats as any).pending || 0,
+          activeJobs: (queueStats as any).active || 0,
+          completedJobs: (queueStats as any).completed || 0,
+          failedJobs: (queueStats as any).failed || 0,
+          dlqSize: (queueStats as any).dlq || 0,
         },
         transactions: {
           totalCount: transactionStats.totalCount,
@@ -3154,12 +3159,12 @@ router.get(
       const stats = await getQueueStats();
 
       res.json({
-        totalJobs: stats.total || 0,
-        pendingJobs: stats.pending || 0,
-        activeJobs: stats.active || 0,
-        completedJobs: stats.completed || 0,
-        failedJobs: stats.failed || 0,
-        dlqSize: stats.dlq || 0,
+        totalJobs: (stats as any).total || 0,
+        pendingJobs: (stats as any).pending || 0,
+        activeJobs: (stats as any).active || 0,
+        completedJobs: (stats as any).completed || 0,
+        failedJobs: (stats as any).failed || 0,
+        dlqSize: (stats as any).dlq || 0,
         timestamp: new Date().toISOString(),
       });
     } catch (error) {

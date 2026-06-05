@@ -122,7 +122,6 @@ const logger: Logger = pino(
         ...REDACT_KEYS.map((key) => `req.headers.${key}`),
         ...REDACT_KEYS.map((key) => `*.req.headers.${key}`),
       ],
-      placeholder: '[REDACTED]',
       censor: '[REDACTED]',
     },
 

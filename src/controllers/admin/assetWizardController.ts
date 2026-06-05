@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { AssetIssuanceService } from "../../services/stellar/issuanceService";
 import { AnchoredAssetModel } from "../../models/anchoredAsset";
-import { logger } from "../../utils/logger";
+import logger from "../../utils/logger";
 import { z } from "zod";
 import { ERROR_CODES } from "../../constants/errorCodes";
 import { createError } from "../../middleware/errorHandler";
@@ -66,7 +66,7 @@ export class AssetWizardController {
         details: error.issues,
       });
     }
-    logger.error("[asset-wizard] Issuance failed:", error);
+    logger.error(error, "[asset-wizard] Issuance failed");
     throw createError(ERROR_CODES.INTERNAL_ERROR, "Asset issuance failed. Please check logs.");
   }
 };
@@ -82,7 +82,7 @@ export class AssetWizardController {
     const sanitized = assets.map(({ issuerSecretKey, distributionSecretKey, ...rest }) => rest);
     res.json({ success: true, data: sanitized });
   } catch (error) {
-    logger.error("[asset-wizard] List failed:", error);
+    logger.error(error, "[asset-wizard] List failed");
     throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to list assets.");
   }
 };

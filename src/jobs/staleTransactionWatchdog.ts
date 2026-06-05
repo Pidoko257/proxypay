@@ -15,7 +15,7 @@ const transactionModel = new TransactionModel();
  *   - 'pending' or 'unknown' → expires as failed (no infinite pending in DB)
  */
 export async function runStaleTransactionWatchdog(
-  service?: MobileMoneyService,
+  service?: InstanceType<typeof MobileMoneyService>,
 ): Promise<void> {
   const staleHours = parseInt(
     process.env.STALE_TRANSACTION_HOURS || "12",

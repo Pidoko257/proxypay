@@ -9,9 +9,9 @@ import {
   AccountingDiscrepancyType,
   AccountingReviewStatus
 } from "../services/accountingReconciliation/model";
-import { logger } from "../services/logger";
 import { z } from "zod";
 import { AccountingService, AccountingProvider } from "../services/accounting";
+import logger from "../utils/logger";
 
 const DailyReconcileSchema = z.object({
   provider: z.enum(["quickbooks", "xero"]),
@@ -63,7 +63,7 @@ export class AccountingReconciliationController {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Validation error", details: error.issues });
       }
-      logger.error("Failed to run accounting reconciliation:", error);
+      logger.error(error, "Failed to run accounting reconciliation");
       next(error);
     }
   };
@@ -82,7 +82,7 @@ export class AccountingReconciliationController {
       const reports = await this.reconService.getReports(limit, offset);
       res.json({ success: true, data: reports });
     } catch (error) {
-      logger.error("Failed to fetch accounting reconciliation reports:", error);
+      logger.error(error, "Failed to fetch accounting reconciliation reports");
       next(error);
     }
   };
@@ -113,7 +113,7 @@ export class AccountingReconciliationController {
         },
       });
     } catch (error) {
-      logger.error("Failed to fetch accounting reconciliation report details:", error);
+      logger.error(error, "Failed to fetch accounting reconciliation report details");
       next(error);
     }
   };
@@ -138,7 +138,7 @@ export class AccountingReconciliationController {
       
       res.json({ success: true, message: "Discrepancy marked as resolved" });
     } catch (error) {
-      logger.error("Failed to resolve discrepancy:", error);
+      logger.error(error, "Failed to resolve discrepancy");
       next(error);
     }
   };
@@ -158,7 +158,7 @@ export class AccountingReconciliationController {
       const reports = await this.reconService.getReportsByConnection(connectionId, limit, offset);
       res.json({ success: true, data: reports });
     } catch (error) {
-      logger.error("Failed to fetch accounting reconciliation reports by connection:", error);
+      logger.error(error, "Failed to fetch accounting reconciliation reports by connection");
       next(error);
     }
   };
@@ -186,7 +186,7 @@ export class AccountingReconciliationController {
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       res.status(200).send(csv);
     } catch (error) {
-      logger.error("Failed to export accounting reconciliation report:", error);
+      logger.error(error, "Failed to export accounting reconciliation report");
       next(error);
     }
   };

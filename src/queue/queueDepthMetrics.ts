@@ -57,7 +57,7 @@ export async function getQueueStatsAggregate(): Promise<QueueDepthMetrics> {
   ]);
 
   // Parse Redis memory info
-  const memoryMatch = redisInfo.match(/used_memory:(\d+)/);
+  const memoryMatch = String(redisInfo).match(/used_memory:(\d+)/);
   const redis_memory_bytes = memoryMatch ? parseInt(memoryMatch[1], 10) : 0;
 
   const queues = [

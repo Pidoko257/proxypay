@@ -215,7 +215,7 @@ export class LedgerService {
     userId: string
   ): Promise<PostedEntry[]> {
     // Determine settlement delay from user
-    const { UserModel } = await import('../models/users');
+    const { UserModel } = await import('../models/users.js');
     const userModel = new UserModel();
     const user = await userModel.findById(userId);
     const delayDays = user?.settlementDelayDays || 0;

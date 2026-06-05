@@ -32,15 +32,15 @@ describe("System Heartbeat Metric", () => {
       expect(systemHeartbeat.name).toBe("system_heartbeat");
     });
 
-    it("should have correct metric help text", () => {
-      const metrics = systemHeartbeat.get();
+    it("should have correct metric help text", async () => {
+      const metrics = await systemHeartbeat.get();
       expect(metrics.help).toBe(
         "System heartbeat metric indicating baseline availability state (1=available, 0=unavailable)",
       );
     });
 
-    it("should have service label", () => {
-      const metrics = systemHeartbeat.get();
+    it("should have service label", async () => {
+      const metrics = await systemHeartbeat.get();
       expect(metrics.type).toBe("gauge");
       expect(metrics.labelNames).toContain("service");
     });
@@ -53,7 +53,7 @@ describe("System Heartbeat Metric", () => {
       // Give it a moment to set the initial value
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const status = getHeartbeatStatus();
+      const status = await getHeartbeatStatus();
       expect(status).toBe(1);
     });
 
@@ -68,7 +68,7 @@ describe("System Heartbeat Metric", () => {
       // Give it a moment to update
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const status = getHeartbeatStatus();
+      const status = await getHeartbeatStatus();
       expect(status).toBe(0);
     });
 
@@ -78,7 +78,7 @@ describe("System Heartbeat Metric", () => {
       // Check multiple times to ensure consistency
       for (let i = 0; i < 3; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
-        const status = getHeartbeatStatus();
+        const status = await getHeartbeatStatus();
         expect(status).toBe(1);
       }
     });
@@ -93,12 +93,12 @@ describe("System Heartbeat Metric", () => {
 
       // Wait for first update
       await new Promise((resolve) => setTimeout(resolve, 150));
-      let status = getHeartbeatStatus();
+      let status = await getHeartbeatStatus();
       expect(status).toBe(1);
 
       // Wait for second update
       await new Promise((resolve) => setTimeout(resolve, 150));
-      status = getHeartbeatStatus();
+      status = await getHeartbeatStatus();
       expect(status).toBe(1);
 
       // Clean up
@@ -109,11 +109,11 @@ describe("System Heartbeat Metric", () => {
       for (let i = 0; i < 3; i++) {
         startHeartbeatService();
         await new Promise((resolve) => setTimeout(resolve, 50));
-        expect(getHeartbeatStatus()).toBe(1);
+        expect(await getHeartbeatStatus()).toBe(1);
 
         stopHeartbeatService();
         await new Promise((resolve) => setTimeout(resolve, 50));
-        expect(getHeartbeatStatus()).toBe(0);
+        expect(await getHeartbeatStatus()).toBe(0);
       }
     });
   });
@@ -123,7 +123,7 @@ describe("System Heartbeat Metric", () => {
       startHeartbeatService();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const metrics = systemHeartbeat.get();
+      const metrics = await systemHeartbeat.get();
       const heartbeatValue = metrics.values.find(
         (v: any) => v.labels.service === "mobile-money",
       );
@@ -139,7 +139,7 @@ describe("System Heartbeat Metric", () => {
       stopHeartbeatService();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const metrics = systemHeartbeat.get();
+      const metrics = await systemHeartbeat.get();
       const heartbeatValue = metrics.values.find(
         (v: any) => v.labels.service === "mobile-money",
       );
@@ -152,7 +152,7 @@ describe("System Heartbeat Metric", () => {
       startHeartbeatService();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const metrics = systemHeartbeat.get();
+      const metrics = await systemHeartbeat.get();
       const heartbeatValue = metrics.values.find(
         (v: any) => v.labels.service === "mobile-money",
       );
@@ -170,14 +170,14 @@ describe("System Heartbeat Metric", () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       // The service should continue running even if there are errors
-      expect(getHeartbeatStatus()).toBe(1);
+      expect(await getHeartbeatStatus()).toBe(1);
 
       consoleSpy.mockRestore();
     });
 
     it("should return 0 if heartbeat status cannot be retrieved", async () => {
       // Don't start the service, so there's no heartbeat value
-      const status = getHeartbeatStatus();
+      const status = await getHeartbeatStatus();
       expect(status).toBe(0);
     });
   });
@@ -187,7 +187,7 @@ describe("System Heartbeat Metric", () => {
       startHeartbeatService();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const metrics = systemHeartbeat.get();
+      const metrics = await systemHeartbeat.get();
       const prometheusOutput = `# HELP ${metrics.name} ${metrics.help}\n# TYPE ${metrics.name} ${metrics.type}`;
 
       expect(prometheusOutput).toContain("system_heartbeat");

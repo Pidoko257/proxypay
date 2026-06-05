@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { ProviderReconService } from "../services/providerReconService";
 import { ReconciliationModel } from "../models/reconciliation";
-import { logger } from "../services/logger";
+import logger from "../utils/logger";
 import { z } from "zod";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
@@ -52,7 +52,7 @@ export class ReconciliationController {
           details: error.issues,
         });
       }
-      logger.error("Manual reconciliation upload failed:", error);
+      logger.error(error, "Manual reconciliation upload failed");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to run reconciliation",
@@ -72,7 +72,7 @@ export class ReconciliationController {
       const reports = await this.reconModel.getReports(limit, offset);
       res.json({ success: true, data: reports });
     } catch (error) {
-      logger.error("Failed to fetch reports:", error);
+      logger.error(error, "Failed to fetch reports");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch reconciliation reports",
@@ -106,7 +106,7 @@ export class ReconciliationController {
         },
       });
     } catch (error) {
-      logger.error("Failed to fetch report details:", error);
+      logger.error(error, "Failed to fetch report details");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch report details",
@@ -136,7 +136,7 @@ export class ReconciliationController {
       await this.reconModel.resolveDiscrepancy(id, notes);
       res.json({ success: true, message: "Discrepancy marked as resolved" });
     } catch (error) {
-      logger.error("Failed to resolve discrepancy:", error);
+      logger.error(error, "Failed to resolve discrepancy");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to resolve discrepancy",

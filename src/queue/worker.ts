@@ -17,8 +17,6 @@ import { EmailService } from "../services/email";
 import { withRetry } from "../services/retry";
 import { notifyTransactionWebhook, WebhookService } from "../services/webhook";
 import { smsService } from "../services/sms";
-import { emailService } from "../services/email"; // Added missing import
-import { pushService } from "../services/push"; // Added missing import
 import { notificationRouter } from "../services/notificationRouter";
 import { pushNotificationService } from "../services/push";
 import { capturePersistentFailure } from "./dlq";

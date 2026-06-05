@@ -8,7 +8,7 @@ import { requireAuth, AuthRequest } from "../middleware/auth";
 import { travelRuleService, TravelRuleRecord } from "../compliance/travelRule";
 import { createError } from "../middleware/errorHandler";
 import { ERROR_CODES } from "../constants/errorCodes";
-import { travelRuleCheckHandler } from "../handlers/travelRuleCheckHandler";
+import { travelRuleCheckHandler } from "../controllers/complianceController";
 
 export const travelRuleRoutes = Router();
 

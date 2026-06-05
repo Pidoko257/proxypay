@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
-import multer from "multer";
+import multer, { MulterError } from "multer";
 import { Readable } from "stream";
 import csvParser from "csv-parser";
 import { MerchantService } from "../services/merchantService";

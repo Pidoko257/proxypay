@@ -1,5 +1,5 @@
 import { AccountingChartOfAccountsReconciliationService } from "../services/accountingReconciliation/service";
-import { logger } from "../services/logger";
+import logger from "../utils/logger";
 
 /**
  * Daily accounting reconciliation job.
@@ -20,6 +20,6 @@ export async function runAccountingReconciliationJob() {
     
     logger.info("[accounting-reconciliation-job] Daily accounting reconciliation job completed successfully");
   } catch (error) {
-    logger.error("[accounting-reconciliation-job] Daily accounting reconciliation job failed:", error);
+    logger.error(error, "[accounting-reconciliation-job] Daily accounting reconciliation job failed");
   }
 }

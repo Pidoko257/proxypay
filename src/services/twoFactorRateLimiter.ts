@@ -18,7 +18,7 @@ export class TwoFactorRateLimiter {
     if (!redisClient.isOpen) return false;
 
     const attempts = await redisClient.get(this.getKey(userId));
-    return attempts !== null && parseInt(attempts, 10) >= MAX_ATTEMPTS;
+    return attempts !== null && parseInt(String(attempts), 10) >= MAX_ATTEMPTS;
   }
 
   /**
@@ -36,11 +36,11 @@ export class TwoFactorRateLimiter {
       await redisClient.expire(key, LOCKOUT_DURATION_SECONDS);
     }
 
-    if (count >= MAX_ATTEMPTS) {
+    if (Number(count) >= MAX_ATTEMPTS) {
       logger.warn(`[2FA] User ${userId} has been locked out after ${count} failed attempts`);
     }
 
-    return count;
+    return Number(count);
   }
 
   /**
@@ -59,7 +59,7 @@ export class TwoFactorRateLimiter {
     if (!redisClient.isOpen) return MAX_ATTEMPTS;
 
     const attemptsRaw = await redisClient.get(this.getKey(userId));
-    const attempts = attemptsRaw ? parseInt(attemptsRaw, 10) : 0;
+    const attempts = attemptsRaw ? parseInt(String(attemptsRaw), 10) : 0;
     return Math.max(0, MAX_ATTEMPTS - attempts);
   }
 
@@ -70,7 +70,7 @@ export class TwoFactorRateLimiter {
     if (!redisClient.isOpen) return 0;
 
     const ttl = await redisClient.ttl(this.getKey(userId));
-    return Math.max(0, ttl);
+    return Math.max(0, Number(ttl));
   }
 }
 

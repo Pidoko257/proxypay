@@ -6,8 +6,9 @@ import { AccountingDiscrepancyType } from "../../src/services/accountingReconcil
 jest.mock("../../src/services/ledgerService");
 jest.mock("../../src/services/accounting");
 jest.mock("../../src/services/accountingReconciliation/model");
-jest.mock("../../src/services/logger", () => ({
-  logger: {
+jest.mock("../../src/utils/logger", () => ({
+  __esModule: true,
+  default: {
     info: jest.fn(),
     error: jest.fn(),
     warn: jest.fn(),

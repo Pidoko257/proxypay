@@ -200,13 +200,13 @@ export class WebhookService {
       timestamp: this.now().toISOString(),
       transaction_id: transaction.id,
       reference_number: transaction.referenceNumber,
-      transaction_type: transaction.type,
+      transaction_type: transaction.type as "deposit" | "withdraw",
       amount: transaction.amount,
       currency: (transaction as any).currency || "USD",
       phone_number: transaction.phoneNumber,
       provider: transaction.provider,
       stellar_address: transaction.stellarAddress,
-      status: transaction.status,
+      status: transaction.status as "pending" | "completed" | "failed" | "cancelled",
       user_id: transaction.userId || undefined,
       notes: transaction.notes || undefined,
       tags: transaction.tags ? transaction.tags.join(",") : undefined,
@@ -284,7 +284,7 @@ export class WebhookService {
             "X-Webhook-Signature": signature,
             ...extraHeaders,
           },
-          body,
+          body: body as any,
         });
         lastStatusCode = response.status;
         if (!response.ok)
@@ -375,7 +375,7 @@ export class WebhookService {
             "X-Webhook-Signature": signature,
             ...extraHeaders,
           },
-          body,
+          body: body as any,
         });
         lastStatusCode = response.status;
         if (!response.ok)
@@ -438,7 +438,7 @@ export class WebhookService {
             "X-Webhook-Signature": signature,
             ...extraHeaders,
           },
-          body,
+          body: body as any,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         this.logger.log(

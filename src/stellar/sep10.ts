@@ -5,7 +5,6 @@ import { v4 as uuidv4 } from "uuid";
 import { getStellarServer, getNetworkPassphrase } from "../config/stellar";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
-import type { Account as HorizonAccount } from "stellar-sdk/lib/horizon";
 
 /**
  * SEP-10: Stellar Authentication
@@ -99,7 +98,7 @@ export function getSep10Config(): Sep10Config {
 // ============================================================================
 
 export class Sep10Service {
-  private config: Sep10Config;
+  protected config: Sep10Config;
   private serverKeypair: StellarSdk.Keypair;
   private stellarServer: StellarSdk.Horizon.Server | null;
 

@@ -66,10 +66,10 @@ function updateHeartbeat(): void {
  * Get the current heartbeat status.
  * Useful for testing and debugging.
  */
-export function getHeartbeatStatus(): number {
+export async function getHeartbeatStatus(): Promise<number> {
   try {
     // Access the internal metric value
-    const metrics = systemHeartbeat.get();
+    const metrics = await systemHeartbeat.get();
     const heartbeatMetric = metrics.values.find(
       (v: any) => v.labels.service === "mobile-money",
     );

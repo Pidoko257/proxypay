@@ -3,6 +3,8 @@ import { Pool } from 'pg';
 import KYCService, { KYCLevel, DocumentType } from '../services/kyc';
 import { z } from 'zod';
 import { UserModel } from '../models/users';
+import { createError } from "../middleware/errorHandler";
+import { ERROR_CODES } from "../constants/errorCodes";
 
 // Validation schemas
 const CreateApplicantSchema = z.object({

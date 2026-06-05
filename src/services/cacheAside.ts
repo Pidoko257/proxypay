@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import { cachedQueryManager, QUERY_TTL_POLICIES, CacheTags } from "./cachedQueryManager";
-import { logger } from "./logger";
+import logger from "../utils/logger";
 
 /**
  * Cache-aside middleware wrapper for expensive queries
@@ -70,7 +70,7 @@ export function cacheAsideMiddleware(options: CacheAsideOptions) {
               ttlSeconds: ttl,
               tags: options.tags,
             }).catch(error => {
-              logger.warn("Failed to cache response", { cacheKey, error });
+              logger.warn({ cacheKey, error }, "Failed to cache response");
             });
           });
         }
@@ -79,7 +79,7 @@ export function cacheAsideMiddleware(options: CacheAsideOptions) {
       
       next();
     } catch (error) {
-      logger.warn("Cache-aside middleware error, continuing without cache", { error });
+      logger.warn({ error }, "Cache-aside middleware error, continuing without cache");
       next();
     }
   };
@@ -116,7 +116,7 @@ export class TransactionCacheInvalidation {
     ];
     
     await cachedQueryManager.invalidateByTags(tags);
-    logger.info("User transaction caches invalidated", { userId, tags });
+    logger.info({ userId, tags }, "User transaction caches invalidated");
   }
   
   /**
@@ -130,7 +130,7 @@ export class TransactionCacheInvalidation {
     ];
 
     await cachedQueryManager.invalidateByTags(tags);
-    logger.info("Provider stats caches invalidated", { provider, tags });
+    logger.info({ provider, tags }, "Provider stats caches invalidated");
   }
   
   /**

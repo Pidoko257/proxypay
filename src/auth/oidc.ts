@@ -6,6 +6,7 @@ import { Router, Request, Response } from "express";
 import { pool } from "../config/database";
 import { ssoConfig } from "../config/sso";
 import { generateToken } from "./jwt";
+import jwt, { JwtHeader, JwtPayload } from "jsonwebtoken";
 
 interface OIDCProviderMetadata {
   issuer: string;

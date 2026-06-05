@@ -550,7 +550,7 @@ function verifyMfaCode(secret: string | null | undefined, code: string): boolean
   // For minimal surface, validate a 6-digit TOTP window using the same algorithm
   // the rest of the codebase uses (speakeasy-compatible 30s window).
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+     
     const speakeasy = require('speakeasy');
     return speakeasy.totp.verify({
       secret,
@@ -668,8 +668,8 @@ router.post('/accounts/:id/sign', sep30Limiter, async (req: Request, res: Respon
 
     // ── 2FA verification ────────────────────────────────────────────────────
     // Look up the user's TOTP secret from the DB to verify the submitted code.
-    const { pool: dbPool } = await import('../config/database');
-    const userRow = await dbPool.query<{ two_factor_secret: string | null }>(
+    const { pool: dbPool } = await import('../config/database.js');
+    const userRow = await dbPool.query(
       'SELECT two_factor_secret FROM users WHERE id = $1',
       [body.userId],
     );
@@ -697,13 +697,11 @@ router.post('/accounts/:id/sign', sep30Limiter, async (req: Request, res: Respon
     // ────────────────────────────────────────────────────────────────────────
 
     // Decode the XDR envelope and sign it with the managed key
-    const { Transaction, TransactionEnvelope } = await import('stellar-sdk');
-    let tx: InstanceType<typeof Transaction>;
+    const { TransactionBuilder } = await import('stellar-sdk');
+    const { getNetworkPassphrase } = await import('../config/stellar.js');
+    let tx: any;
     try {
-      const xdrBytes = Buffer.from(body.transaction, 'base64');
-      tx = TransactionEnvelope.fromXDR(xdrBytes).tx().build
-        ? (new Transaction(body.transaction))
-        : (new Transaction(body.transaction));
+      tx = TransactionBuilder.fromXDR(body.transaction, getNetworkPassphrase());
     } catch {
       return res.status(400).json({ error: 'Invalid XDR transaction envelope' });
     }

@@ -14,7 +14,7 @@ import highThroughputService, {
 } from "../services/stellar/highThroughputService";
 import { createError } from "../middleware/errorHandler";
 import { ERROR_CODES } from "../constants/errorCodes";
-import { authenticateToken } from "../middleware/auth";
+
 interface CsvRow {
   amount: string;
   phoneNumber: string;

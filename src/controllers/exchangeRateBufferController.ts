@@ -4,7 +4,7 @@ import {
   exchangeRateBufferService,
 } from "../services/exchangeRateBufferService";
 import { currencyService } from "../services/currency";
-import { logger } from "../services/logger";
+import logger from "../utils/logger";
 import { z } from "zod";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
@@ -40,7 +40,7 @@ export class ExchangeRateBufferController {
       const buffers = await this.service.getAllBuffers();
       res.json({ success: true, data: buffers });
     } catch (err) {
-      logger.error("Failed to list buffers:", err);
+      logger.error(err, "Failed to list buffers");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch exchange rate buffers",
@@ -60,7 +60,7 @@ export class ExchangeRateBufferController {
       }
       res.json({ success: true, data: buffer });
     } catch (err) {
-      logger.error("Failed to get buffer:", err);
+      logger.error(err, "Failed to get buffer");
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch buffer");
     }
   };
@@ -75,7 +75,7 @@ export class ExchangeRateBufferController {
       );
       res.json({ success: true, data: buffers });
     } catch (err) {
-      logger.error("Failed to get buffers by provider:", err);
+      logger.error(err, "Failed to get buffers by provider");
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch buffers");
     }
   };
@@ -96,7 +96,7 @@ export class ExchangeRateBufferController {
           details: err.issues,
         });
       }
-      logger.error("Failed to create buffer:", err);
+      logger.error(err, "Failed to create buffer");
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to create buffer");
     }
   };
@@ -129,7 +129,7 @@ export class ExchangeRateBufferController {
           details: err.issues,
         });
       }
-      logger.error("Failed to update buffer:", err);
+      logger.error(err, "Failed to update buffer");
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to update buffer");
     }
   };
@@ -153,7 +153,7 @@ export class ExchangeRateBufferController {
       }
       res.json({ success: true, message: "Buffer deleted" });
     } catch (err) {
-      logger.error("Failed to delete buffer:", err);
+      logger.error(err, "Failed to delete buffer");
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to delete buffer");
     }
   };
@@ -196,7 +196,7 @@ export class ExchangeRateBufferController {
         },
       });
     } catch (err) {
-      logger.error("Failed to preview buffered rate:", err);
+      logger.error(err, "Failed to preview buffered rate");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to compute buffered rate",

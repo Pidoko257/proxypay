@@ -70,14 +70,15 @@ export interface RestoreOptions {
  */
 function deriveBackupKey(): Buffer {
   const masterKey = env.DB_ENCRYPTION_KEY;
-  return crypto
-    .hkdfSync(
+  return Buffer.from(
+    crypto.hkdfSync(
       "sha256",
       masterKey,
       Buffer.from("backup-encryption"),
       Buffer.from("database-backup"),
       32,
-    );
+    )
+  );
 }
 
 /**

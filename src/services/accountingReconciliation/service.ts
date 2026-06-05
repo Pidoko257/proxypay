@@ -8,7 +8,7 @@ import {
   AccountingDiscrepancyType,
   AccountingReviewStatus
 } from "./model";
-import { logger } from "../../services/logger";
+import logger from "../../utils/logger";
 import axios from "axios";
 
 export class AccountingChartOfAccountsReconciliationService {
@@ -72,7 +72,7 @@ export class AccountingChartOfAccountsReconciliationService {
       return report.id;
 
     } catch (error) {
-      logger.error(`Chart of accounts reconciliation failed for ${report.id}:`, error);
+      logger.error(error, `Chart of accounts reconciliation failed for ${report.id}`);
       await this.reconModel.updateReport(report.id, {
         status: AccountingReconciliationStatus.Failed,
         summary: { error: (error as Error).message },
@@ -427,7 +427,7 @@ export class AccountingChartOfAccountsReconciliationService {
           reportDate
         );
       } catch (error) {
-        logger.error(`Failed to run reconciliation for connection ${connection.id}:`, error);
+        logger.error(error, `Failed to run reconciliation for connection ${connection.id}`);
         // Continue with other connections
       }
     }

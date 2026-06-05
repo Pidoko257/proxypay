@@ -435,7 +435,7 @@ sep24Router.get("/fee", async (req: Request, res: Response) => {
   }
 });
 
-ssep24Router.post(
+sep24Router.post(
   "/deposit",
   sep24Limiter,
   async (req: Request, res: Response) => {

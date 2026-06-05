@@ -65,12 +65,12 @@ async function addTransactionJob(
     jobId?: string;
   },
 ) {
-  const queue = await import("../queue/transactionQueue");
+  const queue = await import("../queue/transactionQueue.js");
   return queue.addTransactionJob(data, options);
 }
 
 async function getJobProgress(jobId: string) {
-  const queue = await import("../queue/transactionQueue");
+  const queue = await import("../queue/transactionQueue.js");
   return queue.getJobProgress(jobId);
 }
 
@@ -314,7 +314,7 @@ async function monitorTransactionForAML(
     const result = await amlService.monitorTransaction({
       id: transaction.id,
       userId: transaction.userId,
-      type: transaction.type,
+      type: transaction.type as import("../services/aml").AMLTransactionType,
       amount,
       createdAt:
         transaction.createdAt instanceof Date
@@ -859,7 +859,7 @@ export const refundTransactionHandler = async (req: Request, res: Response) => {
     }
 
     const amount = parseFloat(transaction.amount);
-    const { calculateFee } = await import("../utils/fees");
+    const { calculateFee } = await import("../utils/fees.js");
     const { fee } = await calculateFee(amount);
     const refundAmount = parseFloat((amount - fee).toFixed(2));
 

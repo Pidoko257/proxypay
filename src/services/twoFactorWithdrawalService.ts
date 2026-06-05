@@ -69,10 +69,10 @@ export class TwoFactorWithdrawalService {
       const isValidTOTP = verifyTOTPToken(user.two_factor_secret!, request.token);
       if (isValidTOTP) {
         await twoFactorRateLimiter.resetFailures(request.userId);
-        logger.info(`[2FA] Successful TOTP verification for withdrawal`, {
+        logger.info({
           userId: request.userId,
           method: 'totp'
-        });
+        }, `[2FA] Successful TOTP verification for withdrawal`);
         return { success: true, method: 'totp' };
       }
     }
@@ -82,11 +82,11 @@ export class TwoFactorWithdrawalService {
       const backupCodeResult = await this.verifyBackupCode(request.userId, request.backupCode);
       if (backupCodeResult.success) {
         await twoFactorRateLimiter.resetFailures(request.userId);
-        logger.info(`[2FA] Successful backup code verification for withdrawal`, {
+        logger.info({
           userId: request.userId,
           method: 'backup',
           codeId: backupCodeResult.codeId
-        });
+        }, `[2FA] Successful backup code verification for withdrawal`);
         return { success: true, method: 'backup' };
       }
     }
@@ -95,12 +95,12 @@ export class TwoFactorWithdrawalService {
     const newCount = await twoFactorRateLimiter.incrementFailures(request.userId);
     const triesLeft = Math.max(0, 3 - newCount);
 
-    logger.warn(`[2FA] Failed 2FA verification for withdrawal`, {
+    logger.warn({
       userId: request.userId,
       hasToken: !!request.token,
       hasBackupCode: !!request.backupCode,
       triesRemaining: triesLeft
-    });
+    }, `[2FA] Failed 2FA verification for withdrawal`);
 
     return { 
       success: false, 
@@ -126,11 +126,11 @@ export class TwoFactorWithdrawalService {
 
     await this.userModel.updateMandatory2FAWithdrawals(userId, enabled);
 
-    logger.info(`[2FA] Updated mandatory 2FA withdrawals preference`, {
+    logger.info({
       userId,
       enabled,
       has2FAEnabled: is2FAEnabled(user)
-    });
+    }, `[2FA] Updated mandatory 2FA withdrawals preference`);
   }
 
   /**
@@ -194,7 +194,7 @@ export class TwoFactorWithdrawalService {
         client.release();
       }
     } catch (error) {
-      logger.error('[2FA] Error verifying backup code:', error);
+      logger.error(error, '[2FA] Error verifying backup code');
       return { success: false };
     }
   }

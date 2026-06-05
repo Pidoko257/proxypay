@@ -128,7 +128,7 @@ const JOBS: JobConfig[] = [
     // Default: run every minute to pick up due subscriptions
     schedule: process.env.SUBSCRIPTION_CRON || "*/1 * * * *",
     handler: async () => {
-      const { runSubscriptionJob } = await import("./subscriptionJob");
+      const { runSubscriptionJob } = await import("./subscriptionJob.js");
       return runSubscriptionJob();
     },
   },

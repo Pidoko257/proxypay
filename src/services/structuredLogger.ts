@@ -111,7 +111,7 @@ function serializeError(
 
 function serializeUnknown(value: unknown): unknown {
   if (value instanceof Error) {
-    return serializeError(value);
+    return serializeError(value as Error & { code?: string | number; [key: string]: unknown });
   }
 
   if (Array.isArray(value)) {

@@ -50,7 +50,7 @@ async function getGeoReader(): Promise<MaxmindReader | null> {
   readerPromise = (async () => {
     try {
       const maxmind = (await import('maxmind')) as typeof import('maxmind');
-      return await maxmind.open(geoDbPath);
+      return (await maxmind.open(geoDbPath)) as unknown as MaxmindReader;
     } catch {
       return null;
     }

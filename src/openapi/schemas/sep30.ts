@@ -110,7 +110,7 @@ export const AuditLogEntrySchema = registry.register(
       signerPublicKey: StellarPublicKeySchema.nullable().optional(),
       fromState: RecoverySessionStateSchema.nullable().optional(),
       toState: RecoverySessionStateSchema,
-      metadata: z.record(z.unknown()).nullable().optional(),
+      metadata: z.record(z.string(), z.unknown()).nullable().optional(),
       occurredAt: z.string().datetime(),
       ipAddress: z.string().nullable().optional(),
     })

@@ -1,4 +1,4 @@
-import { connect, StringCodec, type NatsConnection, type JsMsg } from "nats";
+import { connect, StringCodec, consumerOpts, type NatsConnection, type JsMsg } from "nats";
 
 const NATS_URL = process.env.NATS_URL || "nats://localhost:4222";
 
@@ -40,13 +40,13 @@ class NatsManager {
     }
 
     const js = this.connection.jetstream();
-    const subscription = js.subscribe(subject, {
-      durable,
-      queue: queueGroup,
-      ack: "explicit",
-      maxAckPending: concurrency * 2,
-      ackWait: NATS_ACK_WAIT_MS,
-    });
+    const opts = consumerOpts();
+    opts.durable(durable);
+    opts.queue(queueGroup);
+    opts.manualAck();
+    opts.maxAckPending(concurrency * 2);
+    opts.ackWait(NATS_ACK_WAIT_MS);
+    const subscription = await js.subscribe(subject, opts);
 
     const activeMessages = new Set<Promise<void>>();
 

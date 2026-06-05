@@ -10,8 +10,7 @@ import { createError } from "../middleware/errorHandler";
 // Validation schemas
 const updateMandatory2FASchema = z.object({
   enabled: z.boolean({
-    required_error: "enabled field is required",
-    invalid_type_error: "enabled must be a boolean",
+    message: "enabled must be a boolean",
   }),
 });
 
@@ -45,7 +44,7 @@ export const getWithdrawal2FASettings = async (req: Request, res: Response) => {
       canEnableMandatory: settings.canEnableMandatory,
     });
   } catch (error) {
-    logger.error("[2FA] Error getting withdrawal 2FA settings:", error);
+    logger.error(error, "[2FA] Error getting withdrawal 2FA settings");
     throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error", {
       error: "Internal server error",
     });
@@ -117,11 +116,11 @@ export const updateMandatory2FAWithdrawals = async (
       enabled,
     );
 
-    logger.info(`[2FA] Updated mandatory 2FA withdrawals`, {
+    logger.info({
       userId,
       enabled,
       verified: enabled,
-    });
+    }, `[2FA] Updated mandatory 2FA withdrawals`);
 
     return res.json({
       success: true,
@@ -131,7 +130,7 @@ export const updateMandatory2FAWithdrawals = async (
         : "Mandatory 2FA for withdrawals has been disabled",
     });
   } catch (error: any) {
-    logger.error("[2FA] Error updating mandatory 2FA withdrawals:", error);
+    logger.error(error, "[2FA] Error updating mandatory 2FA withdrawals");
 
     if (
       error.message?.includes(
@@ -187,7 +186,7 @@ export const verifyWithdrawal2FA = async (req: Request, res: Response) => {
       error: result.error,
     });
   } catch (error) {
-    logger.error("[2FA] Error verifying withdrawal 2FA:", error);
+    logger.error(error, "[2FA] Error verifying withdrawal 2FA");
     throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error", {
       error: "Internal server error",
     });

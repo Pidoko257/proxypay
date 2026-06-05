@@ -9,7 +9,7 @@ import { getNetworkPassphrase } from "../config/stellar";
 const federationQuerySchema = z.object({
   q: z.string().min(1, "q is required"),
   type: z.enum(["name", "id", "txid", "forward"], {
-    errorMap: () => ({ message: "type must be one of: name, id, txid, forward" }),
+    message: "type must be one of: name, id, txid, forward",
   }),
 });
 

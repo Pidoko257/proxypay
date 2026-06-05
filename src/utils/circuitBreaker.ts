@@ -44,7 +44,7 @@ function getCircuitKey(provider: string, operation: string): string {
 }
 
 async function getBreakerOptions(name: string, provider: string): Promise<CircuitBreakerOptions> {
-  const { providerSettingsService } = await import("../services/providerSettingsService");
+  const { providerSettingsService } = await import("../services/providerSettingsService.js");
   const settings = await providerSettingsService.getProviderSettings(provider);
 
   const timeoutMs = settings ? settings.timeout_ms : Number(process.env.PROVIDER_CIRCUIT_BREAKER_TIMEOUT_MS ?? 5_000);
@@ -195,12 +195,12 @@ export async function checkAndResetCircuitBreaker(provider: string, operation: s
   }
 
   // Only reset if open
-  if (breaker.opened) {
+  if ((breaker as any).opened) {
     try {
       const healthResult = await checkMobileMoneyHealth();
       const providerHealth = healthResult.providers[provider as keyof typeof healthResult.providers];
       if (providerHealth && providerHealth.status === "up") {
-        breaker.close();
+        (breaker as any).close();
         console.log(`Circuit breaker for ${provider}:${operation} reset due to health check`);
         return true;
       }

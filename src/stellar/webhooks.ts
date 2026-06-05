@@ -4,6 +4,7 @@ import { z } from "zod";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { notifyTransactionWebhook, WebhookEvent } from "../services/webhook";
 import { enqueueSepWebhook } from "../services/stellar/webhooks";
+import { ingestRateLimiter } from "../middleware/ingestRateLimit";
 
 const router = Router();
 const transactionModel = new TransactionModel();
@@ -103,7 +104,8 @@ router.post("/webhook", async (req: RawBodyRequest, res: Response) => {
     // Fall back to memo-based lookup if no match by hash
     if (transactions.length === 0 && payload.memo) {
       const memoValue = parseMemoValue(payload.memo);
-      transactions = await transactionModel.findByReferenceNumber(memoValue);
+      const tx = await transactionModel.findByReferenceNumber(memoValue);
+      transactions = tx ? [tx] : [];
 
       if (transactions.length === 0) {
         transactions = await transactionModel.findByMetadata({

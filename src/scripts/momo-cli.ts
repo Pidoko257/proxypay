@@ -138,7 +138,7 @@ export async function runCli(args: string[]): Promise<void> {
       );
 
       // Dynamically load BullMQ dependencies only when actually executing queue operation
-      const { addTransactionJob } = await import("../queue");
+      const { addTransactionJob } = await import("../queue/index.js");
 
       for (const tx of retriable) {
         const prevStatus = tx.status;
@@ -194,7 +194,7 @@ if (require.main === module) {
       if (process.argv[2] === "retry-batch") {
         try {
           const { transactionQueue } =
-            await import("../queue/transactionQueue");
+            await import("../queue/transactionQueue.js");
           await transactionQueue.close();
         } catch {
           // ignore

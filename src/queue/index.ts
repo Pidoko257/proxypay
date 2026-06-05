@@ -3,6 +3,10 @@ import { transactionQueue } from "./transactionQueue";
 import { transactionWorker, closeWorker } from "./worker";
 import { syncQueue } from "./syncQueue";
 import { syncWorker, closeSyncWorker } from "./syncWorker";
+import { connection } from "./config";
+import { startProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
+import { scheduleProviderBalanceAlertJob } from "./providerBalanceAlertQueue";
+import { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker } from "./accountingTokenRefreshWorker";
 
 export async function shutdownQueue(): Promise<void> {
   await Promise.all([
@@ -11,7 +15,6 @@ export async function shutdownQueue(): Promise<void> {
     transactionQueue.close().catch(() => undefined),
     syncQueue.close().catch(() => undefined),
   ]);
-  await connection.quit().catch(() => undefined);
 }
 
 export {
@@ -46,7 +49,7 @@ export {
   resumeQueueEndpoint,
 } from "./health";
 export {
-  getQueueDepth,
+  getQueueStatsAggregate,
   queueDepthHandler,
   queueDepthPrometheusHandler,
 } from "./queueDepthMetrics";

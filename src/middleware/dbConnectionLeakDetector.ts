@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import { PoolClient } from "pg";
 import logger from "../utils/logger";
-import { Counter, Gauge, Histogram, register } from "../utils/metrics";
+import { Counter, Gauge, Histogram } from "prom-client";
+import { register } from "../utils/metrics";
 
 const LEAK_LOG_THRESHOLD_MS = parseInt(
   process.env.DB_LEAK_LOG_THRESHOLD_MS || "5000",
@@ -57,7 +58,7 @@ function setupClientLeakDetection(
   trackedConn: TrackedConnection,
 ): void {
   const originalRelease = client.release.bind(client);
-  const connectionId = client.processID;
+  const connectionId = (client as any).processID;
 
   (client as any).release = function (): void {
     connectionTrackers.delete(connectionId);
@@ -109,7 +110,7 @@ export function trackConnectionCheckout(
     requestId: options?.requestId,
   };
 
-  connectionTrackers.set(client.processID, trackedConn);
+  connectionTrackers.set((client as any).processID, trackedConn);
   setupClientLeakDetection(client, trackedConn);
 }
 

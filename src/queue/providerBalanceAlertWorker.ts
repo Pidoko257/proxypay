@@ -18,8 +18,8 @@ export function startProviderBalanceAlertWorker(): void {
   providerBalanceAlertWorker = new Worker<ProviderBalanceAlertJobData>(
     PROVIDER_BALANCE_ALERT_QUEUE_NAME,
     async (job: Job<ProviderBalanceAlertJobData>) => {
-      const log = childLoggerWithTrace(job.data);
-      (log ?? console).log?.(`[${PROVIDER_BALANCE_ALERT_JOB_NAME}] Running job ${job.id}`);
+      const log = childLoggerWithTrace(job.data as unknown as Record<string, unknown>);
+      (log ?? console).info(`[${PROVIDER_BALANCE_ALERT_JOB_NAME}] Running job ${job.id}`);
       await runProviderBalanceAlertJob();
     },
     {

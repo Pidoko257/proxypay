@@ -484,7 +484,7 @@ export class StellarService {
     error?: any,
   ): Promise<void> {
     try {
-      const { pool } = await import("../../config/database");
+      const { pool } = await import("../../config/database.js");
       
       const auditData = {
         transaction_hash: txHash,

@@ -109,10 +109,7 @@ export class HighThroughputReconciliationService {
         executionTimeMs: endTime - startTime,
       };
     } catch (error) {
-      logger.error(
-        `High-throughput reconciliation failed for ${config.provider}:`,
-        error,
-      );
+      logger.error(error, `High-throughput reconciliation failed for ${config.provider}`);
       throw error;
     }
   }
@@ -130,6 +127,7 @@ export class HighThroughputReconciliationService {
     discrepanciesCount: number;
     totalProcessedRows: number;
     orphanedProviderCount: number;
+    orphanedDbCount: number;
   }> {
     return new Promise((resolve, reject) => {
       let processedRows = 0;
@@ -221,12 +219,19 @@ export class HighThroughputReconciliationService {
             await Promise.all(batchPromises);
 
             const orphanedProviderCount = processedRows - matchedProviderRefs.size;
+            let orphanedDbCount = 0;
+            for (const ref of dbByReference.keys()) {
+              if (!matchedProviderRefs.has(ref)) {
+                orphanedDbCount++;
+              }
+            }
 
             resolve({
               matchedCount,
               discrepanciesCount,
               totalProcessedRows: processedRows,
               orphanedProviderCount,
+              orphanedDbCount,
             });
           } catch (err) {
             reject(err);

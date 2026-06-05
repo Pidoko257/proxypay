@@ -2,7 +2,7 @@ import { Worker, Job } from "bullmq";
 import { queueOptions } from "./config";
 import { ACCOUNTING_TOKEN_REFRESH_QUEUE_NAME, AccountingTokenRefreshJobData } from "./accountingTokenRefreshQueue";
 import { AccountingService } from "../services/accounting";
-import { logger } from "../services/logger";
+import logger from "../utils/logger";
 
 let worker: Worker | null = null;
 
@@ -29,7 +29,7 @@ export function startAccountingTokenRefreshWorker(): void {
         
         logger.info(`Successfully refreshed tokens for ${provider} connection ${connectionId}`);
       } catch (error) {
-        logger.error(`Failed to refresh tokens for ${provider} connection ${connectionId}:`, error);
+        logger.error(error, `Failed to refresh tokens for ${provider} connection ${connectionId}`);
         throw error; // Re-throw to trigger BullMQ retry
       }
     },
@@ -37,7 +37,7 @@ export function startAccountingTokenRefreshWorker(): void {
   );
 
   worker.on("failed", (job, err) => {
-    logger.error(`Accounting token refresh job ${job?.id} failed:`, err);
+    logger.error(err, `Accounting token refresh job ${job?.id} failed`);
   });
 
   logger.info("Accounting token refresh worker started");

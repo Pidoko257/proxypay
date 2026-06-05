@@ -54,32 +54,36 @@ jobs:
             ${{ env.IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-        - name: Install Sentry CLI
-          if: steps.check_deploy.outputs.deploy_available == 'true'
-          run: |
-            curl -sL https://sentry.io/get-cli/ | bash
-        - name: Create Sentry release
-          if: steps.check_deploy.outputs.deploy_available == 'true'
-          env:
-            SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-            SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-            SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          run: |
-            sentry-cli releases new -p ${{ secrets.SENTRY_PROJECT }} ${{ env.SENTRY_RELEASE }}
-        - name: Associate commits with release
-          if: steps.check_deploy.outputs.deploy_available == 'true'
-          env:
-            SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-            SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          run: |
-            sentry-cli releases set-commits --auto ${{ env.SENTRY_RELEASE }}
-        - name: Finalize Sentry release
-          if: steps.check_deploy.outputs.deploy_available == 'true'
-          env:
-            SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-            SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          run: |
-            sentry-cli releases finalize ${{ env.SENTRY_RELEASE }}
+
+      - name: Install Sentry CLI
+        if: steps.check_deploy.outputs.deploy_available == 'true'
+        run: |
+          curl -sL https://sentry.io/get-cli/ | bash
+
+      - name: Create Sentry release
+        if: steps.check_deploy.outputs.deploy_available == 'true'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          sentry-cli releases new -p ${{ secrets.SENTRY_PROJECT }} ${{ env.SENTRY_RELEASE }}
+
+      - name: Associate commits with release
+        if: steps.check_deploy.outputs.deploy_available == 'true'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+        run: |
+          sentry-cli releases set-commits --auto ${{ env.SENTRY_RELEASE }}
+
+      - name: Finalize Sentry release
+        if: steps.check_deploy.outputs.deploy_available == 'true'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+        run: |
+          sentry-cli releases finalize ${{ env.SENTRY_RELEASE }}
 
       # ── Kubernetes deploy ──────────────────────────────────────────────────
       - name: Configure kubectl
@@ -125,14 +129,15 @@ jobs:
           done
           echo "Healthcheck failed after ${{ env.HEALTHCHECK_RETRIES }} attempts"
           exit 1
-        - name: Register Sentry deployment
-          if: steps.check_deploy.outputs.deploy_available == 'true' && steps.healthcheck.outcome == 'success'
-          env:
-            SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-            SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-            SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          run: |
-            sentry-cli releases deploys ${{ env.SENTRY_RELEASE }} new -e production
+
+      - name: Register Sentry deployment
+        if: steps.check_deploy.outputs.deploy_available == 'true' && steps.healthcheck.outcome == 'success'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          sentry-cli releases deploys ${{ env.SENTRY_RELEASE }} new -e production
 
       # ── Automated rollback ─────────────────────────────────────────────────
       - name: Rollback on failure

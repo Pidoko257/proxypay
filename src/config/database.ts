@@ -4,6 +4,9 @@ import { isReadOnlyQuery } from "../utils/readOnlyDetector";
 import { dbReplicaLagSeconds, dbReplicaReadEnabled } from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 
+const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
+const isDRMode = (): boolean => !!DR_DATABASE_URL;
+
 const productionSsl =
   process.env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined;
 

@@ -6,7 +6,7 @@ import { z } from "zod";
 import KYCService, { KYCLevel, KYCStatus, DocumentType } from "../services/kyc";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
-import {UserModel} from "../models/user";
+import {UserModel} from "../models/users";
 
 /**
  * SEP-12: KYC API

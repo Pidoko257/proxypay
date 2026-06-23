@@ -134,6 +134,40 @@ class SlowQueryPool extends Pool {
   }
 }
 
+const isProd = process.env.NODE_ENV === "production";
+
+// Min connections in pool
+// Prod: 10 to ensure a warm baseline of connections ready to serve immediate traffic and avoid connection setup latency.
+// Dev/Test: 2 to conserve local database resources while allowing concurrency.
+const dbPoolMin = parseInt(
+  process.env.DB_POOL_MIN || (isProd ? "10" : "2"),
+  10
+);
+
+// Max connections in pool
+// Prod: 100 (can be higher or lower depending on PgBouncer limits and workload, but 100 is a standard starting baseline).
+// Dev/Test: 10 to prevent developer machines from exhausting postgres connections.
+const dbPoolMax = parseInt(
+  process.env.DB_POOL_MAX || (isProd ? "100" : "10"),
+  10
+);
+
+// Idle timeout in milliseconds
+// Prod: 10000 (10s) to reclaim unused connections relatively quickly under variable load.
+// Dev/Test: 30000 (30s) to reduce connection churn during slow manual testing.
+const dbPoolIdleTimeout = parseInt(
+  process.env.DB_POOL_IDLE_TIMEOUT || (isProd ? "10000" : "30000"),
+  10
+);
+
+// Connection acquisition timeout in milliseconds
+// Prod: 5000 (5s) so the application fails fast under DB saturation instead of queueing infinitely and causing cascading failure.
+// Dev/Test: 2000 (2s) for fast developer feedback.
+const dbPoolConnectionTimeout = parseInt(
+  process.env.DB_POOL_ACQUIRE_TIMEOUT || (isProd ? "5000" : "2000"),
+  10
+);
+
 /**
  * Primary connection pool – now routes through PgBouncer for transaction-level pooling
  * This significantly reduces the number of direct connections to Postgres
@@ -141,9 +175,10 @@ class SlowQueryPool extends Pool {
  */
 export const pool = new Pool({
   connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
-  max: 1000,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 500,
+  min: dbPoolMin,
+  max: dbPoolMax,
+  idleTimeoutMillis: dbPoolIdleTimeout,
+  connectionTimeoutMillis: dbPoolConnectionTimeout,
   ssl: productionSsl,
 });
 

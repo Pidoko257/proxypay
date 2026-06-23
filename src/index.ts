@@ -332,6 +332,32 @@ app.get("/health/lb", async (req: Request, res: Response) => {
   res.status(healthy ? 200 : 503).json(responseData);
 });
 
+app.get("/health/db", async (_req: Request, res: Response) => {
+  try {
+    // Attempt to execute a simple query to verify database connection health.
+    await pool.query("SELECT 1");
+
+    res.json({
+      status: "ok",
+      activeConnections: pool.totalCount - pool.idleCount,
+      idleConnections: pool.idleCount,
+      waitingQueries: pool.waitingCount,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    console.error("Database health check failed:", err);
+    res.status(503).json({
+      status: "error",
+      message: "Database connection failed",
+      error: err.message || String(err),
+      activeConnections: pool.totalCount - pool.idleCount,
+      idleConnections: pool.idleCount,
+      waitingQueries: pool.waitingCount,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 app.use(globalTimeout);
 app.use(haltOnTimedout);
 

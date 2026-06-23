@@ -211,6 +211,7 @@ The API spec is auto-generated from Zod validation schemas at runtime — no man
 GET  /health                          # Liveness probe
 GET  /ready                           # Readiness (DB + Redis)
 GET  /health/lb                       # Load balancer health
+GET  /health/db                       # Database pool statistics
 
 # Transactions
 POST /api/transactions/deposit        # Mobile money → Stellar

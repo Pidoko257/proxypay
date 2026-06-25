@@ -540,6 +540,13 @@ async function initializeRuntime(): Promise<void> {
   const { startJobs } = await import("./jobs/scheduler.js");
   startJobs();
 
+  // Start Horizon account_merge stream listener
+  const { createAccountMergeMonitor } = await import("./stellar/accountMergeMonitor.js");
+  const { getStellarServer } = await import("./config/stellar.js");
+  createAccountMergeMonitor(pool, getStellarServer()).start().catch((err) =>
+    console.error("[account-merge-monitor] failed to start:", err),
+  );
+
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
 

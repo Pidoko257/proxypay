@@ -1,4 +1,5 @@
 import { PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getS3Client, s3Config, getS3ObjectUrl } from "../config/s3";
 import { generateUniqueFilename, generateS3Key } from "../middleware/upload";
 
@@ -82,6 +83,40 @@ export const fileExistsInS3 = async (key: string): Promise<boolean> => {
   } catch (error) {
     return false;
   }
+};
+
+export interface PresignedUrlResult {
+  url: string;
+  key: string;
+  expires_in: number;
+}
+
+/**
+ * Generate a presigned S3 PUT URL for direct client upload of KYC binary documents.
+ * The client uploads directly to S3 using the returned URL; no binary data passes through the server.
+ */
+export const getPresignedUploadUrl = async (
+  userId: string,
+  fieldName: string,
+  contentType: string = "image/jpeg",
+  expiresIn: number = 900, // 15 minutes
+): Promise<PresignedUrlResult> => {
+  const filename = generateUniqueFilename(`${fieldName}.${contentType.split("/")[1] || "bin"}`);
+  const key = generateS3Key(userId, filename);
+
+  const command = new PutObjectCommand({
+    Bucket: s3Config.bucket,
+    Key: key,
+    ContentType: contentType,
+    Metadata: {
+      uploadedBy: userId,
+      fieldName,
+      uploadedAt: new Date().toISOString(),
+    },
+  });
+
+  const url = await getSignedUrl(getS3Client(), command, { expiresIn });
+  return { url, key, expires_in: expiresIn };
 };
 
 /**

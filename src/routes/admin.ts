@@ -49,6 +49,9 @@ import { providerSettingsService } from "../services/providerSettingsService";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { sepWebhookQueue } from "../services/stellar/webhooks";
+import { webhookRetryQueue } from "../queue/webhookRetryQueue";
+import { layeredCache } from "../services/layeredCache";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -3195,6 +3198,127 @@ router.get(
     } catch (error) {
       console.error("[Queue] Stats fetch failed:", error);
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
+    }
+  },
+);
+
+/**
+ * GET /api/admin/webhooks/retry-status
+ * Returns retry queue state per webhook endpoint.
+ * Cached for 10 seconds to avoid overloading BullMQ.
+ */
+router.get(
+  "/webhooks/retry-status",
+  requireAdmin,
+  logAdminAction("GET_WEBHOOK_RETRY_STATUS"),
+  async (req: Request, res: Response) => {
+    const CACHE_KEY = "admin:webhooks:retry-status";
+    const CACHE_TTL = 10;
+
+    try {
+      const cached = await layeredCache.get<any>(CACHE_KEY);
+      if (cached) {
+        res.setHeader("X-Cache", "HIT");
+        res.json(cached);
+        return;
+      }
+
+      const MAX_JOBS = 2000;
+
+      const [
+        sepWaiting,
+        sepDelayed,
+        sepFailed,
+        retryWaiting,
+        retryDelayed,
+        retryFailed,
+      ] = await Promise.all([
+        sepWebhookQueue.getJobs(["waiting"], 0, MAX_JOBS),
+        sepWebhookQueue.getJobs(["delayed"], 0, MAX_JOBS),
+        sepWebhookQueue.getJobs(["failed"], 0, MAX_JOBS),
+        webhookRetryQueue.getJobs(["waiting"], 0, MAX_JOBS),
+        webhookRetryQueue.getJobs(["delayed"], 0, MAX_JOBS),
+        webhookRetryQueue.getJobs(["failed"], 0, MAX_JOBS),
+      ]);
+
+      const endpointMap = new Map<
+        string,
+        {
+          jobs_waiting: number;
+          jobs_delayed: number;
+          jobs_failed: number;
+          next_retry_at: number; // timestamp ms
+        }
+      >();
+
+      function getOrCreate(url: string) {
+        let entry = endpointMap.get(url);
+        if (!entry) {
+          entry = { jobs_waiting: 0, jobs_delayed: 0, jobs_failed: 0, next_retry_at: Infinity };
+          endpointMap.set(url, entry);
+        }
+        return entry;
+      }
+
+      function addJobs(
+        jobs: any[],
+        state: "waiting" | "delayed" | "failed",
+        urlField: string
+      ) {
+        for (const job of jobs) {
+          const url = job.data?.[urlField];
+          if (!url) continue;
+          const entry = getOrCreate(url);
+          entry[`jobs_${state}`]++;
+          if (state === "delayed") {
+            const scheduledAt = (job.timestamp || 0) + (job.delay || 0);
+            if (scheduledAt < entry.next_retry_at) {
+              entry.next_retry_at = scheduledAt;
+            }
+          }
+        }
+      }
+
+      addJobs(sepWaiting, "waiting", "callbackUrl");
+      addJobs(sepDelayed, "delayed", "callbackUrl");
+      addJobs(sepFailed, "failed", "callbackUrl");
+      addJobs(retryWaiting, "waiting", "endpointUrl");
+      addJobs(retryDelayed, "delayed", "endpointUrl");
+      addJobs(retryFailed, "failed", "endpointUrl");
+
+      const endpoints = Array.from(endpointMap.entries()).map(
+        ([url, state]) => ({
+          url,
+          jobs_waiting: state.jobs_waiting,
+          jobs_delayed: state.jobs_delayed,
+          jobs_failed: state.jobs_failed,
+          next_retry_at:
+            state.next_retry_at !== Infinity
+              ? new Date(state.next_retry_at).toISOString()
+              : null,
+        })
+      );
+
+      endpoints.sort((a, b) => b.jobs_delayed - a.jobs_delayed);
+
+      const responseBody = {
+        endpoints,
+        cached_at: new Date().toISOString(),
+      };
+
+      await layeredCache.set(CACHE_KEY, responseBody, CACHE_TTL);
+
+      res.setHeader("X-Cache", "MISS");
+      res.json(responseBody);
+    } catch (err) {
+      console.error("[Admin] Failed to fetch webhook retry status:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch webhook retry status",
+        {
+          message: err instanceof Error ? err.message : "Unknown error",
+        }
+      );
     }
   },
 );

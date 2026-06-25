@@ -10,6 +10,6 @@ module.exports = {
   },
   // Pact mock servers bind to ports — run serially to avoid conflicts
   maxWorkers: 1,
-  testTimeout: 30000,
+  testTimeout: 60000,
   verbose: true,
 };

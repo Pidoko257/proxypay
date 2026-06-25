@@ -1,4 +1,4 @@
-describe("Datadog Tracer initialisation", () => {
+describe("OpenTelemetry tracer initialisation", () => {
   const ORIGINAL_ENV = process.env;
 
   beforeEach(() => {
@@ -10,43 +10,51 @@ describe("Datadog Tracer initialisation", () => {
     process.env = ORIGINAL_ENV;
   });
 
-  it("calls tracer.init with env from NODE_ENV", () => {
+  it("starts the NodeSDK with the configured service name", () => {
     process.env.NODE_ENV = "production";
+    process.env.OTEL_SERVICE_NAME = "proxypay";
 
-    const initMock = jest.fn();
-    // The compiled CJS import looks for module.default or module itself
-    jest.doMock("dd-trace", () => {
-      const mockTracer = { init: initMock };
-      // Support both `import tracer from 'dd-trace'` styles
-      (mockTracer as any).default = mockTracer;
-      return mockTracer;
-    });
+    const startMock = jest.fn();
+    jest.doMock("@opentelemetry/sdk-node", () => ({
+      NodeSDK: jest.fn().mockImplementation(() => ({ start: startMock, shutdown: jest.fn() })),
+    }));
+    jest.doMock("@opentelemetry/auto-instrumentations-node", () => ({
+      getNodeAutoInstrumentations: jest.fn().mockReturnValue([]),
+    }));
+    jest.doMock("@opentelemetry/exporter-trace-otlp-http", () => ({
+      OTLPTraceExporter: jest.fn().mockImplementation(() => ({})),
+    }));
+    jest.doMock("@opentelemetry/exporter-jaeger", () => ({
+      JaegerExporter: jest.fn().mockImplementation(() => ({})),
+    }));
 
     require("../src/tracer");
 
-    expect(initMock).toHaveBeenCalledWith({
-      logInjection: true,
-      env: "production",
-      service: "proxypay",
-    });
+    expect(startMock).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to 'development' when NODE_ENV is not set", () => {
-    delete process.env.NODE_ENV;
+  it("selects the Jaeger exporter when OTEL_EXPORTER=jaeger", () => {
+    process.env.OTEL_EXPORTER = "jaeger";
 
-    const initMock = jest.fn();
-    jest.doMock("dd-trace", () => {
-      const mockTracer = { init: initMock };
-      (mockTracer as any).default = mockTracer;
-      return mockTracer;
-    });
+    const JaegerExporterMock = jest.fn().mockImplementation(() => ({}));
+    const OTLPExporterMock = jest.fn().mockImplementation(() => ({}));
+
+    jest.doMock("@opentelemetry/sdk-node", () => ({
+      NodeSDK: jest.fn().mockImplementation(() => ({ start: jest.fn(), shutdown: jest.fn() })),
+    }));
+    jest.doMock("@opentelemetry/auto-instrumentations-node", () => ({
+      getNodeAutoInstrumentations: jest.fn().mockReturnValue([]),
+    }));
+    jest.doMock("@opentelemetry/exporter-trace-otlp-http", () => ({
+      OTLPTraceExporter: OTLPExporterMock,
+    }));
+    jest.doMock("@opentelemetry/exporter-jaeger", () => ({
+      JaegerExporter: JaegerExporterMock,
+    }));
 
     require("../src/tracer");
 
-    expect(initMock).toHaveBeenCalledWith({
-      logInjection: true,
-      env: "development",
-      service: "proxypay",
-    });
+    expect(JaegerExporterMock).toHaveBeenCalledTimes(1);
+    expect(OTLPExporterMock).not.toHaveBeenCalled();
   });
 });

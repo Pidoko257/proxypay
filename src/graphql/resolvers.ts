@@ -560,6 +560,24 @@ export const resolvers = {
       const p = await ctx.getJobProgress(parent.id);
       return p;
     },
+
+    user: (
+      parent: MappedTransaction,
+      _args: unknown,
+      ctx: GraphQLContext,
+    ) => {
+      if (!parent.userId) return null;
+      return ctx.loaders.userById.load(parent.userId);
+    },
+
+    organization: (
+      parent: MappedTransaction,
+      _args: unknown,
+      ctx: GraphQLContext,
+    ) => {
+      if (!parent.organizationId) return null;
+      return ctx.loaders.organizationById.load(parent.organizationId);
+    },
   },
 };
 

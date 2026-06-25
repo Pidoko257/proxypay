@@ -399,7 +399,7 @@ app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
 app.use("/api/admin/auth", createAdminSep10Router());
-app.use("/sep10", createSep10Router());
+app.use("/sep10", createSep10Router(undefined, redisClient));
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);
 app.use("/sep38", sep38Router);

@@ -1,0 +1,165 @@
+name: Pact Contract Tests
+
+on:
+  push:
+    branches: [main, develop, "feat/**", "Create-SEP-10-Challenge-Endpoint"]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. Consumer — generate pacts from proxypay-frontend contract tests
+  # ────────────────────────────────────────────────────────────────────────────
+  consumer-pacts:
+    name: Consumer Pact Tests (proxypay-frontend)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate consumer pacts
+        run: npm run test:pact:consumer
+        env:
+          CI: "true"
+
+      - name: Upload generated pact files
+        uses: actions/upload-artifact@v4
+        with:
+          name: pact-files
+          path: pacts/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. Publish pacts to Pact Broker (only on pushes to main/develop)
+  # ────────────────────────────────────────────────────────────────────────────
+  publish-pacts:
+    name: Publish Pacts to Broker
+    runs-on: ubuntu-latest
+    needs: consumer-pacts
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download pact files
+        uses: actions/download-artifact@v4
+        with:
+          name: pact-files
+          path: pacts/
+
+      - name: Publish pacts
+        run: npm run pact:publish
+        env:
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 3. Provider verification — ProxyPay backend verifies consumer pact
+  # ────────────────────────────────────────────────────────────────────────────
+  provider-verification:
+    name: Provider Verification (ProxyPay API)
+    runs-on: ubuntu-latest
+    needs: consumer-pacts
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run database migrations
+        run: npm run migrate:up
+        env:
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
+
+      - name: Download pact files (from consumer job)
+        uses: actions/download-artifact@v4
+        with:
+          name: pact-files
+          path: pacts/
+
+      - name: Run provider verification
+        run: npm run test:pact:provider
+        env:
+          CI: "true"
+          NODE_ENV: test
+          DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-jwt-secret-32-chars-long-ok-x
+          SESSION_SECRET: test-session-secret
+          STELLAR_ISSUER_SECRET: SCZANGBA5WDBJ7PFBPZU2XRJKPCXIHNVXOLOFSMV3GW5LKSTPHITKOP
+          # Broker config — only publish results when broker is available
+          PACT_BROKER_URL: ${{ secrets.PACT_BROKER_URL }}
+          PACT_BROKER_TOKEN: ${{ secrets.PACT_BROKER_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. Gate — both consumer tests and provider verification must pass
+  # ────────────────────────────────────────────────────────────────────────────
+  pact-gate:
+    name: ✅ Pact Gate
+    runs-on: ubuntu-latest
+    needs: [consumer-pacts, provider-verification]
+    if: always()
+    steps:
+      - name: Verify all pact jobs passed
+        run: |
+          echo "Consumer pacts: ${{ needs.consumer-pacts.result }}"
+          echo "Provider verification: ${{ needs.provider-verification.result }}"
+
+          if [[ "${{ needs.consumer-pacts.result }}"      != "success" ||
+                "${{ needs.provider-verification.result }}" != "success" ]]; then
+            echo "❌ Pact contract check failed — consumer or provider job did not pass."
+            exit 1
+          fi
+          echo "✅ All pact contract jobs passed."

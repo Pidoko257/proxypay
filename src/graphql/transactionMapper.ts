@@ -15,6 +15,8 @@ export interface MappedTransaction {
   tags: string[];
   retryCount?: number;
   createdAt: string;
+  userId?: string | null;
+  organizationId?: string | null;
 }
 
 export function mapTransactionRow(
@@ -39,6 +41,10 @@ export function mapTransactionRow(
     createdAt?: Date;
     retry_count?: number;
     retryCount?: number;
+    user_id?: string | null;
+    userId?: string | null;
+    organization_id?: string | null;
+    organizationId?: string | null;
   };
   const created = r.created_at ?? r.createdAt;
   return {
@@ -55,5 +61,7 @@ export function mapTransactionRow(
     retryCount: Number(r.retry_count ?? r.retryCount ?? 0),
     createdAt:
       created instanceof Date ? created.toISOString() : String(created ?? ""),
+    userId: r.user_id ?? r.userId ?? null,
+    organizationId: r.organization_id ?? r.organizationId ?? null,
   };
 }

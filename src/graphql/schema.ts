@@ -3,7 +3,15 @@ import { gql } from "apollo-server-express";
 export const typeDefs = gql`
   type User {
     id: ID!
-    subject: String!
+    subject: String
+    phoneNumber: String
+    kycLevel: String
+    status: String
+  }
+
+  type Organization {
+    id: ID!
+    name: String!
   }
 
   type Transaction {
@@ -20,6 +28,8 @@ export const typeDefs = gql`
     retryCount: Int
     createdAt: String!
     jobProgress: Float
+    user: User
+    organization: Organization
   }
 
   type DepositResult {

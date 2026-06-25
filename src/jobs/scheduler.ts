@@ -21,6 +21,10 @@ import { runReconciliationJob } from "./reconciliationJob";
 import { runDatabaseBackupJob } from "./databaseBackupJob";
 import { runDatabaseBackupVerifyJob } from "./databaseBackupVerifyJob";
 import {
+  scheduleMomoReconciliationJob,
+  startMomoReconciliationWorker,
+} from "../queue";
+import {
   INDEX_REINDEX_CRON,
   INDEX_REINDEX_JOB_ENABLED,
 } from "../config/env";
@@ -186,5 +190,11 @@ export function startJobs(): void {
   // DB-polling notification mechanisms.
   startNotificationWorker().catch((err) => {
     console.warn("Failed to start NotificationWorker:", err);
+  });
+
+  // Start BullMQ-based MoMo reconciliation (every 10 minutes)
+  startMomoReconciliationWorker();
+  scheduleMomoReconciliationJob().catch((err) => {
+    console.warn("[scheduler] Failed to schedule momo-reconciliation job:", err);
   });
 }

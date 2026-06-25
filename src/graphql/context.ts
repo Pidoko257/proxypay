@@ -7,6 +7,7 @@ import { addTransactionJob, getJobProgress } from "../queue";
 import { getBulkImportJob } from "../routes/bulk";
 import type { TypedPubSub } from "./subscriptions";
 import { getRedisPubSub } from "./redisPubSub";
+import { createDataLoaders, type DataLoaders } from "./dataLoaders";
 
 const transactionModel = new TransactionModel();
 const disputeService = new DisputeService();
@@ -28,6 +29,8 @@ export interface GraphQLContext {
   getJobProgress: typeof getJobProgress;
   getBulkImportJob: typeof getBulkImportJob;
   pubsub: TypedPubSub;
+  /** Per-request DataLoaders — never shared between requests. */
+  loaders: DataLoaders;
 }
 
 function resolveAuth(req: Request): GraphQLAuth {
@@ -71,5 +74,6 @@ export function buildGraphqlContext(req: Request): GraphQLContext {
     getJobProgress,
     getBulkImportJob,
     pubsub,
+    loaders: createDataLoaders(),
   };
 }

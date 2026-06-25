@@ -87,3 +87,15 @@ export {
 
 // Trace-ID propagation utilities
 export { withTraceId, traceIdFromJob, childLoggerWithTrace, TRACE_ID_KEY } from "./trace";
+
+// MoMo Reconciliation
+export {
+  momoReconciliationQueue,
+  scheduleMomoReconciliationJob,
+  closeMomoReconciliationQueue,
+} from "./momoReconciliationQueue";
+export type { MomoReconciliationJobData } from "./momoReconciliationQueue";
+export {
+  startMomoReconciliationWorker,
+  closeMomoReconciliationWorker,
+} from "./momoReconciliationWorker";

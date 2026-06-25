@@ -553,3 +553,61 @@ export async function getPoolStats(): Promise<{
     replicas: replicaStats,
   };
 }
+
+/**
+ * Sets the PostgreSQL session variable `app.current_tenant_id` on the provided
+ * client so that Row-Level Security policies can enforce tenant isolation.
+ *
+ * Must be called inside an open transaction (`BEGIN` has already been issued)
+ * because `SET LOCAL` is scoped to the current transaction and is automatically
+ * cleared when the transaction ends — preventing context leakage across
+ * connection-pool reuse.
+ *
+ * Usage:
+ *   const client = await pool.connect();
+ *   try {
+ *     await client.query('BEGIN');
+ *     await setTenantContext(client, organizationId);
+ *     // ... tenant-scoped queries ...
+ *     await client.query('COMMIT');
+ *   } finally {
+ *     client.release();
+ *   }
+ *
+ * @param client         - An active pg PoolClient
+ * @param organizationId - UUID of the current tenant's organisation
+ */
+export async function setTenantContext(
+  client: PoolClient,
+  organizationId: string,
+): Promise<void> {
+  await client.query("SELECT set_config('app.current_tenant_id', $1, TRUE)", [
+    organizationId,
+  ]);
+}
+
+/**
+ * Executes `fn` inside a transaction with the tenant context pre-set.
+ * The transaction is automatically rolled back on error.
+ *
+ * @param organizationId - UUID of the current tenant's organisation
+ * @param fn             - Callback that receives the tenant-scoped client
+ */
+export async function withTenantTransaction<T>(
+  organizationId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await setTenantContext(client, organizationId);
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}

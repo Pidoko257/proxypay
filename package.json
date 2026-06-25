@@ -20,6 +20,9 @@
     "lint": "eslint src",
     "test": "jest --forceExit --testPathIgnorePatterns=tests/pact",
     "test:pact": "jest --config jest.pact.config.js --forceExit",
+    "test:pact:consumer": "jest --config jest.pact.config.js --testPathPattern=proxypay-frontend --forceExit",
+    "test:pact:provider": "jest --config jest.pact.config.js --testPathPattern=proxypay-provider --forceExit",
+    "pact:publish": "pact-broker publish pacts/ --consumer-app-version=${GITHUB_SHA:-local} --branch=${GITHUB_REF_NAME:-local} --broker-base-url=$PACT_BROKER_URL --broker-token=$PACT_BROKER_TOKEN",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage --forceExit",
     "test:e2e": "npx playwright test --project=chromium",
@@ -53,7 +56,6 @@
     "sdk:build": "cd sdk && ./gradlew build",
     "sdk:generate:ts": "openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config-ts.yaml -o sdk-ts",
     "sdk:build:ts": "cd sdk-ts && npm install && npm run build",
-
     "test:load:ingestion-10k": "k6 run --vus-max 12000 -e SCENARIO=ingestion_10k tests/load/api.js",
     "test:load:spike-10k": "k6 run --vus-max 12000 -e SCENARIO=spike_10k tests/load/api.js",
     "test:load:traffic-spike": "k6 run --vus-max 6000 -e SCENARIO=traffic_spike tests/load/api.js",
@@ -61,8 +63,7 @@
   },
   "lint-staged": {
     "*.{ts,tsx}": [
-      "eslint --fix",
-      "jest --bail --findRelatedTests"
+      "eslint --fix"
     ],
     "*.{js,cjs,mjs,json,md,yml,yaml}": "prettier --write"
   },

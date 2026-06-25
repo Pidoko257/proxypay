@@ -64,6 +64,12 @@ export interface Sep10Config {
   homeDomain: string;
 }
 
+export interface RedisLike {
+  set(key: string, value: string, options: { EX: number }): Promise<unknown>;
+  get(key: string): Promise<string | null>;
+  del(key: string): Promise<unknown>;
+}
+
 export function getSep10Config(): Sep10Config {
   const signingKey = process.env.STELLAR_SIGNING_KEY || process.env.STELLAR_ISSUER_SECRET;
   if (!signingKey) {
@@ -87,7 +93,7 @@ export function getSep10Config(): Sep10Config {
     webAuthDomain: process.env.WEB_AUTH_DOMAIN || "https://api.proxypay.com",
     networkPassphrase: getNetworkPassphrase(),
     jwtSecret,
-    challengeExpiresIn: 900, // 15 minutes
+    challengeExpiresIn: 300, // 5 minutes per SEP-10 spec
     jwtExpiresIn: "1h",
     homeDomain: process.env.STELLAR_HOME_DOMAIN || "api.proxypay.com",
   };
@@ -101,11 +107,13 @@ export class Sep10Service {
   protected config: Sep10Config;
   private serverKeypair: StellarSdk.Keypair;
   private stellarServer: StellarSdk.Horizon.Server | null;
+  private redis: RedisLike | null;
 
-  constructor(config: Sep10Config, stellarServer?: StellarSdk.Horizon.Server) {
+  constructor(config: Sep10Config, stellarServer?: StellarSdk.Horizon.Server, redis?: RedisLike) {
     this.config = config;
     this.serverKeypair = StellarSdk.Keypair.fromSecret(config.signingKey);
     this.stellarServer = stellarServer || null;
+    this.redis = redis || null;
   }
 
   /**
@@ -277,7 +285,7 @@ export class Sep10Service {
    * @param homeDomain - Optional home domain (defaults to config)
    * @returns Challenge response with transaction XDR and network passphrase
    */
-  generateChallenge(clientPublicKey: string, homeDomain?: string): Sep10ChallengeResponse {
+  async generateChallenge(clientPublicKey: string, homeDomain?: string): Promise<Sep10ChallengeResponse> {
     // Validate account address
     if (!Sep10Service.isValidPublicKey(clientPublicKey)) {
       throw new Error("Invalid Stellar public key");
@@ -334,8 +342,19 @@ export class Sep10Service {
     const transaction = builder.build();
     transaction.sign(this.serverKeypair);
 
+    const xdr = transaction.toXDR();
+
+    // Cache the challenge in Redis keyed by account, TTL = challengeExpiresIn
+    if (this.redis) {
+      await this.redis.set(
+        `sep10:challenge:${clientPublicKey}`,
+        xdr,
+        { EX: this.config.challengeExpiresIn }
+      );
+    }
+
     return {
-      transaction: transaction.toXDR(),
+      transaction: xdr,
       network_passphrase: this.config.networkPassphrase,
     };
   }
@@ -394,6 +413,27 @@ export class Sep10Service {
 
     if (clientAccountID && clientPublicKey !== clientAccountID) {
       throw new Error("First manageData operation source must match client account");
+    }
+
+    // Verify the submitted XDR matches the cached challenge (replay protection)
+    if (this.redis) {
+      const cacheKey = `sep10:challenge:${clientPublicKey}`;
+      const cached = await this.redis.get(cacheKey);
+      if (!cached) {
+        throw new Error("Challenge not found or expired. Please request a new challenge.");
+      }
+      // Compare only the base transaction XDR (before client re-signing).
+      // The cached XDR is server-signed; the submitted XDR has additional client signature(s).
+      // We reconstruct the server-only XDR from the submitted transaction to compare.
+      const cachedTx = StellarSdk.TransactionBuilder.fromXDR(
+        cached,
+        this.config.networkPassphrase
+      ) as StellarSdk.Transaction;
+      if (cachedTx.hash().toString("hex") !== transaction.hash().toString("hex")) {
+        throw new Error("Submitted transaction does not match the issued challenge.");
+      }
+      // Consume the challenge (one-time use)
+      await this.redis.del(cacheKey);
     }
 
     // Verify server signature (always required for SEP-10)
@@ -480,7 +520,7 @@ export class Sep10Service {
 // SEP-10 Router
 // ============================================================================
 
-export function createSep10Router(service?: Sep10Service): Router {
+export function createSep10Router(service?: Sep10Service, redis?: RedisLike): Router {
   const router = Router();
   
   // Only create service if not provided and config is valid
@@ -488,7 +528,10 @@ export function createSep10Router(service?: Sep10Service): Router {
   
   if (!sep10Service) {
     try {
-      sep10Service = new Sep10Service(getSep10Config());
+      // Import redis lazily to avoid circular deps in test environments
+       
+      const { redisClient } = require("../config/redis");
+      sep10Service = new Sep10Service(getSep10Config(), undefined, redis ?? redisClient);
     } catch (error) {
       console.warn("[SEP-10] Failed to initialize SEP-10 service:", error);
       // Service will be null, routes will return 503
@@ -501,11 +544,11 @@ export function createSep10Router(service?: Sep10Service): Router {
    * SEP-10 challenge endpoint
    * Returns a challenge transaction for the client to sign
    */
-  router.get("/", (req: Request, res: Response) => {
+  router.get("/", async (req: Request, res: Response, next) => {
     if (!sep10Service) {
-      throw createError(ERROR_CODES.SERVICE_UNAVAILABLE, "SEP-10 service not configured", {
+      return next(createError(ERROR_CODES.SERVICE_UNAVAILABLE, "SEP-10 service not configured", {
         error: "SEP-10 service not configured",
-      });
+      }));
     }
 
     try {
@@ -513,13 +556,13 @@ export function createSep10Router(service?: Sep10Service): Router {
 
       // Validate required parameters
       if (!account || typeof account !== "string") {
-        throw createError(ERROR_CODES.INVALID_INPUT, "account parameter is required", {
+        return next(createError(ERROR_CODES.INVALID_INPUT, "account parameter is required", {
           error: "account parameter is required",
-        });
+        }));
       }
 
-      // Generate the challenge transaction
-      const challenge = sep10Service.generateChallenge(
+      // Generate the challenge transaction (caches in Redis)
+      const challenge = await sep10Service.generateChallenge(
         account,
         home_domain as string | undefined
       );
@@ -529,12 +572,12 @@ export function createSep10Router(service?: Sep10Service): Router {
       console.error("[SEP-10] Error generating challenge:", error);
       
       if (error instanceof Error) {
-        throw createError(ERROR_CODES.INVALID_INPUT, error.message, {
+        return next(createError(ERROR_CODES.INVALID_INPUT, error.message, {
           error: error.message,
-        });
+        }));
       }
 
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to generate challenge transaction");
+      return next(createError(ERROR_CODES.INTERNAL_ERROR, "Failed to generate challenge transaction"));
     }
   });
 

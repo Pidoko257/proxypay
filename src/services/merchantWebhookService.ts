@@ -5,6 +5,7 @@ import {
   WebhookDeliveryLog,
 } from "../models/merchantWebhook";
 import { SAMPLE_WEBHOOK_PAYLOAD } from "../routes/webhooks";
+import { enqueueWebhookRetry } from "../queue/webhookRetryQueue";
 
 const model = new MerchantWebhookModel();
 
@@ -146,6 +147,16 @@ export class MerchantWebhookService {
           durationMs: result.durationMs,
           isTest: false,
         });
+
+        if (result.status === "failed") {
+          await enqueueWebhookRetry({
+            webhookId: webhook.id,
+            endpointUrl: webhook.url,
+            secret: webhook.secret,
+            eventType,
+            payload,
+          });
+        }
       }),
     );
   }

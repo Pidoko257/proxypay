@@ -12,6 +12,7 @@ export async function shutdownQueue(): Promise<void> {
   await Promise.all([
     closeWorker().catch(() => undefined),
     closeSyncWorker().catch(() => undefined),
+    closeWebhookRetryWorker().catch(() => undefined),
     transactionQueue.close().catch(() => undefined),
     syncQueue.close().catch(() => undefined),
   ]);
@@ -87,3 +88,15 @@ export {
 
 // Trace-ID propagation utilities
 export { withTraceId, traceIdFromJob, childLoggerWithTrace, TRACE_ID_KEY } from "./trace";
+
+// Webhook Retry Queue
+export {
+  webhookRetryQueue,
+  enqueueWebhookRetry,
+  WEBHOOK_RETRY_QUEUE_NAME,
+} from "./webhookRetryQueue";
+export type { WebhookRetryJobData } from "./webhookRetryQueue";
+export {
+  webhookRetryWorker,
+  closeWebhookRetryWorker,
+} from "./webhookRetryWorker";

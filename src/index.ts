@@ -89,6 +89,7 @@ import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { slidingWindowRateLimit } from "./middleware/slidingWindowRateLimit";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -338,15 +339,18 @@ app.use(haltOnTimedout);
 app.use(apiVersionMiddleware);
 app.use(validateVersionMiddleware);
 app.use("/oauth", createOAuthRouter());
-app.use("/api/auth", authRoutes);
 
-app.use("/api/v1/transactions", transactionRoutesV1);
-app.use("/api/v1/transactions", transactionDisputeRoutesV1);
-app.use("/api/v1/transactions/bulk", bulkRoutesV1);
-app.use("/api/v1/disputes", disputeRoutesV1);
-app.use("/api/v1/stats", statsRoutesV1);
-app.use("/api/v1/vaults", vaultRoutesV1);
-app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+// Auth routes – 5 req/min per API key / IP
+app.use("/api/auth", slidingWindowRateLimit("auth"), authRoutes);
+
+// Payment / write routes – 60 req/min per API key / IP
+app.use("/api/v1/transactions", slidingWindowRateLimit("payment"), transactionRoutesV1);
+app.use("/api/v1/transactions", slidingWindowRateLimit("payment"), transactionDisputeRoutesV1);
+app.use("/api/v1/transactions/bulk", slidingWindowRateLimit("payment"), bulkRoutesV1);
+app.use("/api/v1/disputes", slidingWindowRateLimit("payment"), disputeRoutesV1);
+app.use("/api/v1/stats", slidingWindowRateLimit("readonly"), statsRoutesV1);
+app.use("/api/v1/vaults", slidingWindowRateLimit("payment"), vaultRoutesV1);
+app.use("/api/v1/compliance/travel-rule", slidingWindowRateLimit("readonly"), travelRuleRoutes);
 
 app.use(
   "/api/transactions",
@@ -364,13 +368,15 @@ app.use(
     );
     next();
   },
+  slidingWindowRateLimit("payment"),
   transactionRoutes,
 );
-app.use("/api/transactions", transactionDisputeRoutes);
-app.use("/api/transactions/bulk", bulkRoutes);
-app.use("/api/disputes", disputeRoutes);
-app.use("/api/stats", statsRoutes);
-app.use("/api/contacts", contactsRoutes);
+app.use("/api/transactions", slidingWindowRateLimit("payment"), transactionDisputeRoutes);
+app.use("/api/transactions/bulk", slidingWindowRateLimit("payment"), bulkRoutes);
+app.use("/api/disputes", slidingWindowRateLimit("payment"), disputeRoutes);
+// Read-only routes – 300 req/min per API key / IP
+app.use("/api/stats", slidingWindowRateLimit("readonly"), statsRoutes);
+app.use("/api/contacts", slidingWindowRateLimit("readonly"), contactsRoutes);
 app.use("/api/mtn", mtnCallbacksRouter);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
@@ -393,7 +399,7 @@ app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
 app.use("/api/admin/auth", createAdminSep10Router());
-app.use("/sep10", createSep10Router());
+app.use("/sep10", createSep10Router(undefined, redisClient));
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);
 app.use("/sep38", sep38Router);

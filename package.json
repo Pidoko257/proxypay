@@ -115,6 +115,7 @@
     "graphql-redis-subscriptions": "^2.6.1",
     "graphql-subscriptions": "^3.0.0",
     "graphql-ws": "^6.0.8",
+    "handlebars": "4.7.9",
     "helmet": "^8.1.0",
     "i18next": "^23.16.8",
     "import-in-the-middle": "^3.0.1",

@@ -1,0 +1,24 @@
+<h1 style="margin:0 0 16px;font-size:24px;font-weight:bold;color:#111827;">API Key Expiring Soon</h1>
+<p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.6;">
+  Hi {{firstName}}, one of your API keys will expire in <strong>{{daysRemaining}} day{{#unless singleDay}}s{{/unless}}</strong>.
+</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px;background-color:#fffbeb;border:1px solid #fcd34d;border-radius:6px;">
+  <tr>
+    <td style="padding:16px 20px;">
+      <p style="margin:0 0 8px;font-size:13px;font-weight:bold;color:#92400e;text-transform:uppercase;letter-spacing:0.5px;">Key Details</p>
+      <p style="margin:0 0 4px;font-size:14px;color:#374151;"><strong>Name:</strong> {{keyName}}</p>
+      <p style="margin:0 0 4px;font-size:14px;color:#374151;"><strong>Key ID:</strong> <span style="font-family:monospace;">{{keyId}}</span></p>
+      <p style="margin:0;font-size:14px;color:#374151;"><strong>Expires:</strong> {{expiresAt}}</p>
+    </td>
+  </tr>
+</table>
+<p style="margin:0 0 24px;font-size:15px;color:#374151;line-height:1.6;">
+  Rotate this key before it expires to avoid service disruption.
+</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0">
+  <tr>
+    <td style="border-radius:6px;background-color:#1a56db;">
+      <a href="{{dashboardUrl}}" style="display:inline-block;padding:12px 28px;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;">Manage API Keys</a>
+    </td>
+  </tr>
+</table>

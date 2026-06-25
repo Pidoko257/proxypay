@@ -1,0 +1,18 @@
+<h1 style="margin:0 0 16px;font-size:24px;font-weight:bold;color:#111827;">Account Temporarily Locked</h1>
+<p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.6;">
+  We detected multiple failed login attempts on your ProxyPay account. For your security, it has been temporarily locked.
+</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px;background-color:#fffbeb;border:1px solid #fcd34d;border-radius:6px;">
+  <tr>
+    <td style="padding:16px 20px;">
+      <p style="margin:0 0 8px;font-size:14px;color:#374151;">Locked for <strong>{{minutesRemaining}} minute{{#unless singleMinute}}s{{/unless}}</strong></p>
+      <p style="margin:0 0 8px;font-size:14px;color:#374151;">Access restored at: <strong>{{unlocksAtLocalized}}</strong></p>
+      {{#if ipAddress}}
+      <p style="margin:0;font-size:13px;color:#6b7280;">Request from IP: {{ipAddress}}</p>
+      {{/if}}
+    </td>
+  </tr>
+</table>
+<p style="margin:0;font-size:14px;color:#374151;line-height:1.6;">
+  If this wasn't you, please contact our support team immediately to secure your account.
+</p>

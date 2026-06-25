@@ -153,10 +153,11 @@ describe("WebhookService - Flat Payloads", () => {
         "https://example.com/webhooks",
         expect.objectContaining({
           method: "POST",
-          headers: {
+          headers: expect.objectContaining({
             "Content-Type": "application/json",
-            "X-Webhook-Signature": expect.stringMatching(/^sha256=[a-f0-9]+$/),
-          },
+            "X-ProxyPay-Signature-256": expect.stringMatching(/^[a-f0-9]{64}$/),
+            "X-ProxyPay-Timestamp": expect.stringMatching(/^\d+$/),
+          }),
           body: expect.stringContaining('"transaction_id":"txn_success"'),
         })
       );

@@ -32,6 +32,7 @@
     "migrate:create": "tsx src/scripts/migrate.ts create",
     "migrate:status": "tsx src/scripts/migrate.ts status",
     "seed": "tsx src/scripts/seed.ts",
+    "db:seed": "tsx src/scripts/seed.ts",
     "reconcile:ledger": "tsx src/scripts/reconcile-ledger.ts",
     "backup:create": "tsx src/scripts/backup.ts",
     "backup:verify": "tsx src/scripts/verify-backups.ts",
@@ -53,7 +54,6 @@
     "sdk:build": "cd sdk && ./gradlew build",
     "sdk:generate:ts": "openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config-ts.yaml -o sdk-ts",
     "sdk:build:ts": "cd sdk-ts && npm install && npm run build",
-
     "test:load:ingestion-10k": "k6 run --vus-max 12000 -e SCENARIO=ingestion_10k tests/load/api.js",
     "test:load:spike-10k": "k6 run --vus-max 12000 -e SCENARIO=spike_10k tests/load/api.js",
     "test:load:traffic-spike": "k6 run --vus-max 6000 -e SCENARIO=traffic_spike tests/load/api.js",
@@ -79,6 +79,7 @@
     "@node-saml/passport-saml": "^5.1.0",
     "@sendgrid/mail": "^8.1.6",
     "@sentry/node": "^10.47.0",
+    "@simplewebauthn/server": "13.1.0",
     "@types/passport": "^1.0.17",
     "@types/speakeasy": "^2.0.10",
     "@types/swagger-ui-express": "4.1.8",

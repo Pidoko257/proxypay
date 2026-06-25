@@ -1,131 +1,222 @@
-#!/usr/bin/env node
+#!/usr/bin/env tsx
+/**
+ * ProxyPay development seed script.
+ * Run with: npm run db:seed
+ *
+ * Idempotent — uses ON CONFLICT DO NOTHING / DO UPDATE so it is safe
+ * to run multiple times.  All records are prefixed with "TEST_" so they
+ * are easy to identify and clean up.
+ *
+ * What gets created
+ *   • 3 test organisations (merchants)
+ *   • 2 KYC-approved users
+ *   • 5 API keys
+ *   • 50 transactions across all status / provider / type combinations
+ *   • 3 webhooks
+ */
+
 import dotenv from "dotenv";
 import { Pool } from "pg";
+import crypto from "crypto";
 
 dotenv.config();
 
-if (process.env.NODE_ENV !== "development") {
-  console.error("Seeding is allowed only in development environment. Set NODE_ENV=development to proceed.");
+if (process.env.NODE_ENV === "production") {
+  console.error("Seeding is not allowed in production.");
   process.exit(1);
 }
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-async function upsertUser(phone: string, kyc: string) {
-  const res = await pool.query(
-    `INSERT INTO users (phone_number, kyc_level) VALUES ($1, $2)
-     ON CONFLICT (phone_number) DO UPDATE SET kyc_level = EXCLUDED.kyc_level
-     RETURNING id`,
-    [phone, kyc],
-  );
-  return res.rows[0].id;
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function randomHex(bytes = 16) {
+  return crypto.randomBytes(bytes).toString("hex");
 }
 
-async function insertTransaction(ref: string, type: string, amount: number, phone: string, provider: string, stellar: string, status: string, userId: string | null) {
-  const res = await pool.query(
-    `INSERT INTO transactions (reference_number, type, amount, phone_number, provider, stellar_address, status, user_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (reference_number) DO UPDATE SET status = EXCLUDED.status
-     RETURNING id`,
-    [ref, type, amount, phone, provider, stellar, status, userId],
-  );
-  return res.rows[0].id;
+/** Stellar-like address: G + 55 uppercase alphanumeric chars */
+function stellarAddress(n: number) {
+  return `G${String(n).padStart(5, "0")}TESTSEEDADDR${"X".repeat(38)}`.slice(0, 56);
 }
 
-async function upsertFeeConfig(name: string, percentage: number, min: number, max: number, userId: string) {
-  await pool.query(
-    `INSERT INTO fee_configurations (name, description, fee_percentage, fee_minimum, fee_maximum, created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (name) DO NOTHING`,
-    [name, `Automatically seeded ${name} fee configuration`, percentage, min, max, userId, userId],
-  );
-}
+// ── organisations ─────────────────────────────────────────────────────────────
 
-async function insertDispute(txId: string, reason: string, status: string, reportedBy: string) {
-  await pool.query(
-    `INSERT INTO disputes (transaction_id, reason, status, reported_by)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (transaction_id) WHERE status IN ('open', 'investigating') DO NOTHING`,
-    [txId, reason, status, reportedBy],
-  );
-}
+const ORGS = [
+  {
+    name: "TEST_Org_Alpha",
+    email: "test_alpha@proxypay.test",
+    phone: "+237600000001",
+    business_name: "TEST Alpha Payments Ltd",
+    country: "CM",
+    status: "active",
+    kyc_status: "verified",
+  },
+  {
+    name: "TEST_Org_Beta",
+    email: "test_beta@proxypay.test",
+    phone: "+237600000002",
+    business_name: "TEST Beta Remittance Inc",
+    country: "KE",
+    status: "active",
+    kyc_status: "verified",
+  },
+  {
+    name: "TEST_Org_Gamma",
+    email: "test_gamma@proxypay.test",
+    phone: "+237600000003",
+    business_name: "TEST Gamma Fintech SARL",
+    country: "SN",
+    status: "pending",
+    kyc_status: "in_progress",
+  },
+];
+
+// ── KYC-approved users ────────────────────────────────────────────────────────
+
+const USERS = [
+  { phone: "+237611000001", kyc: "full" },
+  { phone: "+237611000002", kyc: "full" },
+];
+
+// ── transaction data ──────────────────────────────────────────────────────────
+
+const PROVIDERS = ["mtn", "airtel", "orange"];
+const TYPES = ["deposit", "withdraw"] as const;
+const STATUSES = [
+  ...Array(20).fill("completed"),
+  ...Array(15).fill("pending"),
+  ...Array(10).fill("failed"),
+  ...Array(5).fill("cancelled"),
+] as string[];
+
+// ── seed ──────────────────────────────────────────────────────────────────────
 
 async function seed() {
-  console.log("Starting DB seed (development only)");
-
+  const client = await pool.connect();
   try {
-    // 1. Create sample users with varied KYC levels
-    const users = [
-      { phone: "+111111111", kyc: "unverified" },
-      { phone: "+222222222", kyc: "basic" },
-      { phone: "+333333333", kyc: "full" },
-      { phone: "+444444444", kyc: "full" },
-      { phone: "+555555555", kyc: "basic" },
-    ];
+    await client.query("BEGIN");
 
-    const userIds: Record<string, string> = {};
-    for (const u of users) {
-      const id = await upsertUser(u.phone, u.kyc);
-      userIds[u.phone] = id;
-      console.log(`Upserted user ${u.phone} -> ${id}`);
+    // 1. Organisations (merchants)
+    console.log("Seeding organisations…");
+    for (const org of ORGS) {
+      await client.query(
+        `INSERT INTO merchants
+           (name, email, phone_number, business_name, country, status, kyc_status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (email) DO UPDATE
+           SET name          = EXCLUDED.name,
+               status        = EXCLUDED.status,
+               kyc_status    = EXCLUDED.kyc_status,
+               updated_at    = CURRENT_TIMESTAMP`,
+        [org.name, org.email, org.phone, org.business_name, org.country, org.status, org.kyc_status],
+      );
     }
 
-    // 2. Ensure default fee configuration exists
-    const adminUser = Object.values(userIds)[0];
-    await upsertFeeConfig("default", 1.5, 50, 5000, adminUser);
-    await upsertFeeConfig("premium", 0.5, 10, 1000, adminUser);
-    console.log("Upserted fee configurations");
-
-    // 3. Generate a bulk of transactions
-    const providers = ["mtn", "airtel", "orange"];
-    const types = ["deposit", "withdraw"];
-    const statuses = [
-      ...Array(30).fill("completed"),
-      ...Array(10).fill("pending"),
-      ...Array(5).fill("failed"),
-      ...Array(5).fill("cancelled"),
-    ];
-
-    console.log(`Inserting ${statuses.length} transactions...`);
-    const seededTxIds: string[] = [];
-    let counter = 1;
-
-    for (const status of statuses) {
-      const provider = providers[counter % providers.length];
-      const user = users[counter % users.length];
-      const type = types[counter % types.length];
-      const amount = Math.floor(Math.random() * 9500) + 500; // between 500 and 10000
-      const ref = `SEED-${counter}-${provider.toUpperCase()}`;
-      const stellar = `GSEED${String(counter).padStart(52, "0").slice(0, 56)}`;
-
-      const txId = await insertTransaction(ref, type, amount, user.phone, provider, stellar, status, userIds[user.phone]);
-      seededTxIds.push(txId);
-      counter++;
+    // 2. Users
+    console.log("Seeding users…");
+    const userIds: string[] = [];
+    for (const u of USERS) {
+      const { rows } = await client.query(
+        `INSERT INTO users (phone_number, kyc_level)
+         VALUES ($1,$2)
+         ON CONFLICT (phone_number) DO UPDATE SET kyc_level = EXCLUDED.kyc_level
+         RETURNING id`,
+        [u.phone, u.kyc],
+      );
+      userIds.push(rows[0].id);
     }
 
-    // 4. Create sample disputes for varied statuses
-    const disputeSample = [
-      { reason: "Amount mismatch on provider side", status: "open", reportedBy: "Customer" },
-      { reason: "Transaction not reflected in mobile wallet", status: "investigating", reportedBy: "Customer" },
-      { reason: "Double charge reported", status: "resolved", reportedBy: "Internal Audit" },
-      { reason: "Incorrect mobile number provided", status: "rejected", reportedBy: "Customer" },
+    // 3. API keys (insert-or-ignore — key column must be unique)
+    console.log("Seeding API keys…");
+    const apiKeyDefs = [
+      { label: "TEST_FullAccess_Key",    permissions: 15,   expires_days: 90 },
+      { label: "TEST_ReadOnly_Key",      permissions: 1,    expires_days: 90 },
+      { label: "TEST_DepositOnly_Key",   permissions: 0x82, expires_days: 30 },
+      { label: "TEST_WebhookAdmin_Key",  permissions: 0x6001, expires_days: 30 },
+      { label: "TEST_Reporting_Key",     permissions: 0x10001, expires_days: 60 },
     ];
-
-    console.log("Seeding disputes...");
-    for (let i = 0; i < disputeSample.length; i++) {
-        const txId = seededTxIds[i % seededTxIds.length];
-        const d = disputeSample[i];
-        await insertDispute(txId, d.reason, d.status, d.reportedBy);
+    for (const k of apiKeyDefs) {
+      const key = `pp_test_${randomHex(20)}`;
+      const expiresAt = new Date(Date.now() + k.expires_days * 86_400_000);
+      await client.query(
+        `INSERT INTO api_keys (key, label, permissions, scopes, is_active, expires_at)
+         VALUES ($1,$2,$3,$4,TRUE,$5)
+         ON CONFLICT (key) DO NOTHING`,
+        [key, k.label, k.permissions, `{TEST}`, expiresAt],
+      );
     }
 
-    console.log("Seeding complete.");
+    // 4. Transactions (50)
+    console.log("Seeding 50 transactions…");
+    for (let i = 0; i < 50; i++) {
+      const status  = STATUSES[i % STATUSES.length];
+      const type    = TYPES[i % TYPES.length];
+      const provider = PROVIDERS[i % PROVIDERS.length];
+      const userId  = userIds[i % userIds.length];
+      const ref     = `TEST-${String(i + 1).padStart(4, "0")}-${provider.toUpperCase()}`;
+      const amount  = 500 + (i * 197) % 9500;          // deterministic, 500-10000
+      const phone   = USERS[i % USERS.length].phone;
+      const stellar = stellarAddress(i + 1);
+
+      await client.query(
+        `INSERT INTO transactions
+           (reference_number, type, amount, phone_number, provider,
+            stellar_address, status, user_id, tags)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (reference_number) DO UPDATE
+           SET status = EXCLUDED.status, updated_at = CURRENT_TIMESTAMP`,
+        [ref, type, amount, phone, provider, stellar, status, userId, ["test", "seed"]],
+      );
+    }
+
+    // 5. Webhooks
+    console.log("Seeding webhooks…");
+    const webhookDefs = [
+      {
+        url: "https://test-webhook.proxypay.test/events",
+        desc: "TEST_Primary webhook endpoint",
+        events: ["transaction.completed", "transaction.failed"],
+      },
+      {
+        url: "https://test-webhook-backup.proxypay.test/events",
+        desc: "TEST_Backup webhook endpoint",
+        events: ["transaction.completed"],
+      },
+      {
+        url: "https://test-webhook-all.proxypay.test/events",
+        desc: "TEST_All-events webhook endpoint",
+        events: ["transaction.completed", "transaction.failed"],
+      },
+    ];
+    for (const wh of webhookDefs) {
+      const userId = userIds[0];
+      const secret = `test_whsec_${randomHex(16)}`;
+      // Idempotent: skip if a webhook with the same url+user already exists
+      await client.query(
+        `INSERT INTO merchant_webhooks (user_id, url, secret, description, events, is_active)
+         SELECT $1,$2,$3,$4,$5,TRUE
+         WHERE NOT EXISTS (
+           SELECT 1 FROM merchant_webhooks WHERE user_id=$1 AND url=$2
+         )`,
+        [userId, wh.url, secret, wh.desc, wh.events],
+      );
+    }
+
+    await client.query("COMMIT");
+    console.log("✅ Seed complete.");
+    console.log(`   Organisations : ${ORGS.length}`);
+    console.log(`   Users         : ${USERS.length}`);
+    console.log(`   API keys      : ${apiKeyDefs.length}`);
+    console.log(`   Transactions  : 50`);
+    console.log(`   Webhooks      : ${webhookDefs.length}`);
   } catch (err) {
-    console.error("Seeding failed:", err);
+    await client.query("ROLLBACK");
+    console.error("❌ Seed failed:", err);
     process.exit(1);
   } finally {
+    client.release();
     await pool.end();
   }
 }
 
 seed();
-

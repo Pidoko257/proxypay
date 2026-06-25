@@ -456,3 +456,88 @@ authRoutes.get(
     }
   },
 );
+
+// ── Passkey (WebAuthn/FIDO2) routes ──────────────────────────────────────────
+import {
+  generateRegistrationOptionsForUser,
+  verifyRegistration,
+  generateAuthenticationOptionsForUser,
+  verifyAuthentication,
+} from "../auth/webauthn";
+
+/**
+ * POST /api/auth/passkey/registration/options
+ * Returns WebAuthn registration options for the authenticated user.
+ */
+authRoutes.post(
+  "/passkey/registration/options",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const { userId, email } = req.user as { userId: string; email: string };
+    try {
+      const options = await generateRegistrationOptionsForUser(userId, email);
+      res.json(options);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to generate registration options" });
+    }
+  },
+);
+
+/**
+ * POST /api/auth/passkey/registration/verify
+ * Verifies attestation response and stores the new credential.
+ */
+authRoutes.post(
+  "/passkey/registration/verify",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const { userId } = req.user as { userId: string };
+    try {
+      const result = await verifyRegistration(userId, req.body);
+      res.status(201).json({ verified: true, credentialId: result.credentialId });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : "Registration verification failed" });
+    }
+  },
+);
+
+/**
+ * POST /api/auth/passkey/authentication/options
+ * Returns WebAuthn authentication options for the given user.
+ * Body: { userId: string }
+ */
+authRoutes.post(
+  "/passkey/authentication/options",
+  async (req: Request, res: Response) => {
+    const { userId } = req.body as { userId?: string };
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+    try {
+      const options = await generateAuthenticationOptionsForUser(userId);
+      res.json(options);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to generate authentication options" });
+    }
+  },
+);
+
+/**
+ * POST /api/auth/passkey/authentication/verify
+ * Verifies assertion response and returns a JWT on success.
+ * Body: { userId: string, response: AuthenticationResponseJSON }
+ */
+authRoutes.post(
+  "/passkey/authentication/verify",
+  async (req: Request, res: Response) => {
+    const { userId, response } = req.body as { userId?: string; response?: unknown };
+    if (!userId || !response) {
+      return res.status(400).json({ error: "userId and response are required" });
+    }
+    try {
+      const { credentialId } = await verifyAuthentication(userId, response as any);
+      const token = generateToken({ userId, email: "" });
+      res.json({ verified: true, token, credentialId });
+    } catch (err) {
+      res.status(401).json({ error: err instanceof Error ? err.message : "Authentication verification failed" });
+    }
+  },
+);

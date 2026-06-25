@@ -1,5 +1,5 @@
-import { createHmac } from "crypto";
 import { webhookPayloadSchema, flatWebhookPayloadSchema } from "./webhookSchema";
+import { signPayload } from "./webhookSigning";
 import { gzip } from "zlib";
 import { promisify } from "util";
 import { Transaction, WebhookDeliveryUpdate } from "../models/transaction";
@@ -229,10 +229,6 @@ export class WebhookService {
     return payload;
   }
 
-  signPayload(rawPayload: string): string {
-    return `sha256=${createHmac("sha256", this.webhookSecret).update(rawPayload).digest("hex")}`;
-  }
-
   async sendTransactionEvent(
     event: WebhookEvent,
     transaction: Transaction,
@@ -267,7 +263,8 @@ export class WebhookService {
       return { status: "failed", attempts: 0, lastAttemptAt: null, deliveredAt: null, lastError: "Payload validation failed" };
     }
     const rawPayload = JSON.stringify(payload);
-    const signature = this.signPayload(rawPayload);
+    const timestamp = String(Math.floor(this.now().getTime() / 1000));
+    const signature = signPayload(this.webhookSecret, timestamp, rawPayload);
     const { body, extraHeaders } = await prepareBody(rawPayload, this.compress);
 
     let lastError: string | null = null;
@@ -281,7 +278,8 @@ export class WebhookService {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Webhook-Signature": signature,
+            "X-ProxyPay-Signature-256": signature,
+            "X-ProxyPay-Timestamp": timestamp,
             ...extraHeaders,
           },
           body: body as any,
@@ -358,7 +356,8 @@ export class WebhookService {
       return { status: "failed", attempts: 0, lastAttemptAt: null, deliveredAt: null, lastError: "Payload validation failed" };
     }
     const rawPayload = JSON.stringify(payload);
-    const signature = this.signPayload(rawPayload);
+    const timestamp = String(Math.floor(this.now().getTime() / 1000));
+    const signature = signPayload(this.webhookSecret, timestamp, rawPayload);
     const { body, extraHeaders } = await prepareBody(rawPayload, this.compress);
 
     let lastError: string | null = null;
@@ -372,7 +371,8 @@ export class WebhookService {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Webhook-Signature": signature,
+            "X-ProxyPay-Signature-256": signature,
+            "X-ProxyPay-Timestamp": timestamp,
             ...extraHeaders,
           },
           body: body as any,
@@ -425,7 +425,8 @@ export class WebhookService {
 
     for (const entry of entries) {
       const rawPayload = JSON.stringify(entry.payload);
-      const signature = this.signPayload(rawPayload);
+      const timestamp = String(Math.floor(this.now().getTime() / 1000));
+      const signature = signPayload(this.webhookSecret, timestamp, rawPayload);
       const useCompress = entry.compress ?? this.compress;
       const { body, extraHeaders } = await prepareBody(rawPayload, useCompress);
       const now = this.now();
@@ -435,7 +436,8 @@ export class WebhookService {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Webhook-Signature": signature,
+            "X-ProxyPay-Signature-256": signature,
+            "X-ProxyPay-Timestamp": timestamp,
             ...extraHeaders,
           },
           body: body as any,

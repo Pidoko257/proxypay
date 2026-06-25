@@ -12,10 +12,10 @@
  *   npm run migrate:status  – list applied and pending migrations
  *
  * SQL files must follow the naming convention:
- *   <NNN>_<description>.sql   (e.g. 001_initial_schema.sql)
+ *   YYYYMMDDHHMMSS_<description>.sql   (e.g. 20260101000001_initial_schema.sql)
  *
  * Rollback files must be stored alongside each migration as:
- *   <NNN>_<description>.down.sql
+ *   YYYYMMDDHHMMSS_<description>.down.sql
  */
 
 import fs from "fs";
@@ -66,14 +66,17 @@ interface MigrationFile {
   downPath: string | null;
 }
 
+// Matches YYYYMMDDHHMMSS_description.sql (14-digit timestamp prefix)
+const MIGRATION_RE = /^(\d{14})_(.+)\.sql$/;
+
 function discoverMigrations(): MigrationFile[] {
   const files = fs
     .readdirSync(MIGRATIONS_DIR)
-    .filter((f) => /^\d+_.+\.sql$/.test(f) && !f.endsWith(".down.sql"))
+    .filter((f) => MIGRATION_RE.test(f) && !f.endsWith(".down.sql"))
     .sort();
 
   const migrations = files.map((filename) => {
-    const match = filename.match(/^(\d+)_(.+)\.sql$/);
+    const match = filename.match(MIGRATION_RE);
     if (!match) throw new Error(`Unexpected migration filename: ${filename}`);
 
     const [, legacyVersion, label] = match;

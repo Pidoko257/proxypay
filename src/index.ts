@@ -1,13 +1,17 @@
+// Tracing must be initialized before any other imports so that
+// auto-instrumentation patches modules as they are first loaded.
+import "./tracer";
+
 // Initialize centralized configuration first
 import "./config/init";
-
-import "./tracer";
 import path from "path";
 import express, { NextFunction, Request, Response } from "express";
 import { IncomingMessage, Server } from "http";
 import compression from "compression";
 import dotenv from "dotenv";
 import helmet from "helmet";
+import cors from "cors";
+import { corsOptions } from "./config/express";
 import * as Sentry from "@sentry/node";
 import { register } from "prom-client";
 import spdy from "spdy";
@@ -127,6 +131,10 @@ app.use(sentryBreadcrumbMiddleware);
 
 app.use(metricsMiddleware);
 app.use(helmet());
+// CORS: exact-origin allowlist loaded from ALLOWED_ORIGINS env var.
+// Preflight OPTIONS requests are handled before any route logic runs.
+app.options("*", cors(corsOptions));
+app.use(cors(corsOptions));
 
 // Compression middleware
 if (process.env.COMPRESSION_ENABLED !== "false") {

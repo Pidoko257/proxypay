@@ -53,7 +53,6 @@
     "sdk:build": "cd sdk && ./gradlew build",
     "sdk:generate:ts": "openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config-ts.yaml -o sdk-ts",
     "sdk:build:ts": "cd sdk-ts && npm install && npm run build",
-
     "test:load:ingestion-10k": "k6 run --vus-max 12000 -e SCENARIO=ingestion_10k tests/load/api.js",
     "test:load:spike-10k": "k6 run --vus-max 12000 -e SCENARIO=spike_10k tests/load/api.js",
     "test:load:traffic-spike": "k6 run --vus-max 6000 -e SCENARIO=traffic_spike tests/load/api.js",
@@ -74,6 +73,7 @@
     "@asteasolutions/zod-to-openapi": "8.5.0",
     "@aws-sdk/client-s3": "^3.1017.0",
     "@aws-sdk/lib-storage": "^3.1017.0",
+    "@aws-sdk/s3-request-presigner": "3.1017.0",
     "@bull-board/api": "^6.20.6",
     "@bull-board/express": "^6.20.6",
     "@node-saml/passport-saml": "^5.1.0",
@@ -115,6 +115,7 @@
     "graphql-redis-subscriptions": "^2.6.1",
     "graphql-subscriptions": "^3.0.0",
     "graphql-ws": "^6.0.8",
+    "handlebars": "4.7.9",
     "helmet": "^8.1.0",
     "i18next": "^23.16.8",
     "import-in-the-middle": "^3.0.1",

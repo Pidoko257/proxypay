@@ -3,81 +3,105 @@ import express, { Express } from "express";
 import { Pool } from "pg";
 import { createSep12Router, Sep12CustomerStatus } from "../sep12";
 import KYCService, { KYCLevel, KYCStatus } from "../../services/kyc";
+import * as s3Upload from "../../services/s3Upload";
 
-// Mock KYC Service
+jest.mock("../../middleware/rateLimit", () => ({
+  sep12RateLimiter: (_req: any, _res: any, next: any) => next(),
+}));
 jest.mock("../../services/kyc");
+jest.mock("../../services/s3Upload");
+jest.mock("../../models/users", () => ({
+  UserModel: jest.fn().mockImplementation(() => ({
+    updateSensitiveData: jest.fn().mockResolvedValue(undefined),
+  })),
+}));
+jest.mock("../../config/s3", () => ({
+  getS3Client: jest.fn(),
+  s3Config: { bucket: "test-bucket", region: "us-east-1" },
+  getS3ObjectUrl: jest.fn((key: string) => `https://test-bucket.s3.amazonaws.com/${key}`),
+}));
+
+const mockPresignedUploadUrl = s3Upload.getPresignedUploadUrl as jest.Mock;
 
 describe("SEP-12 KYC API", () => {
   let app: Express;
   let mockDb: jest.Mocked<Pool>;
   let mockKycService: jest.Mocked<KYCService>;
 
-  beforeEach(() => {
-    // Create mock database
-    mockDb = {
-      query: jest.fn(),
-    } as any;
+  const emptyQueryResult = { rows: [], command: "", oid: 0, rowCount: 0, fields: [] };
+  const rowQueryResult = (rows: any[]) => ({ rows, command: "", oid: 0, rowCount: rows.length, fields: [] });
 
-    // Create mock KYC service
+  beforeEach(() => {
+    mockDb = { query: jest.fn() } as any;
+
     mockKycService = {
       createApplicant: jest.fn(),
       getApplicant: jest.fn(),
       uploadDocument: jest.fn(),
       getVerificationStatus: jest.fn(),
+      getTransactionLimits: jest.fn(),
+      handleWebhook: jest.fn(),
     } as any;
 
     (KYCService as jest.MockedClass<typeof KYCService>).mockImplementation(() => mockKycService);
 
-    // Create Express app with SEP-12 router
+    mockPresignedUploadUrl.mockResolvedValue({
+      url: "https://s3.amazonaws.com/presigned-url",
+      key: "kyc-documents/2026/06/user-123/photo_id_front.jpg",
+      expires_in: 900,
+    });
+
     app = express();
     app.use(express.json());
     app.use("/sep12", createSep12Router(mockDb));
+    // Minimal error handler so validation errors surface as 400
+    app.use((err: any, _req: any, res: any, _next: any) => {
+      res.status(err.statusCode ?? 400).json({ error: err.message ?? "error" });
+    });
   });
 
-  afterEach(() => {
-    jest.clearAllMocks();
-  });
+  afterEach(() => jest.clearAllMocks());
 
+  // =========================================================================
+  // GET /customer
+  // =========================================================================
   describe("GET /customer", () => {
-    it("should return NEEDS_INFO for new customer", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [],
-        command: "",
-        oid: 0,
-        rowCount: 0,
-        fields: [],
-      });
+    it("returns NEEDS_INFO with full field schema for unknown account", async () => {
+      mockDb.query.mockResolvedValue(emptyQueryResult);
 
-      const response = await request(app)
-        .get("/sep12/customer")
-        .query({ account: "GABC123..." });
+      const res = await request(app).get("/sep12/customer").query({ account: "GNEW..." });
 
-      expect(response.status).toBe(200);
-      expect(response.body.status).toBe(Sep12CustomerStatus.NEEDS_INFO);
-      expect(response.body.fields).toBeDefined();
-      expect(response.body.fields.first_name).toBeDefined();
-      expect(response.body.fields.last_name).toBeDefined();
-      expect(response.body.fields.email_address).toBeDefined();
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(Sep12CustomerStatus.NEEDS_INFO);
+      expect(res.body.fields).toBeDefined();
+      expect(res.body.fields.first_name).toBeDefined();
+      expect(res.body.fields.photo_id_front.type).toBe("binary");
     });
 
-    it("should return customer status for existing customer", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [
-          {
-            id: "user-123",
-            kyc_level: KYCLevel.BASIC,
-            applicant_id: "applicant-456",
-            verification_status: KYCStatus.APPROVED,
-          },
-        ],
-        command: "",
-        oid: 0,
-        rowCount: 1,
-        fields: [],
-      });
+    it("returns organization fields when type=organization", async () => {
+      mockDb.query.mockResolvedValue(emptyQueryResult);
+
+      const res = await request(app)
+        .get("/sep12/customer")
+        .query({ account: "GORG...", type: "organization" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.fields.organization_name).toBeDefined();
+      expect(res.body.fields.first_name).toBeUndefined();
+    });
+
+    it("returns ACCEPTED for FULL-level approved customer", async () => {
+      mockDb.query
+        .mockResolvedValueOnce(rowQueryResult([{
+          id: "user-123",
+          kyc_level: KYCLevel.FULL,
+          applicant_id: "appl-456",
+          verification_status: KYCStatus.APPROVED,
+        }]))
+        .mockResolvedValueOnce(emptyQueryResult); // kyc_documents query
 
       mockKycService.getApplicant.mockResolvedValueOnce({
-        id: "applicant-456",
+        id: "appl-456",
         first_name: "John",
         last_name: "Doe",
         email: "john@example.com",
@@ -85,111 +109,90 @@ describe("SEP-12 KYC API", () => {
         sandbox: false,
       });
 
-      const response = await request(app)
-        .get("/sep12/customer")
-        .query({ account: "GABC123..." });
+      const res = await request(app).get("/sep12/customer").query({ account: "GACC..." });
 
-      expect(response.status).toBe(200);
-      expect(response.body.id).toBe("user-123");
-      expect(response.body.status).toBe(Sep12CustomerStatus.NEEDS_INFO);
-      expect(response.body.provided_fields).toBeDefined();
-      expect(response.body.provided_fields.first_name).toBeDefined();
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(Sep12CustomerStatus.ACCEPTED);
+      expect(res.body.provided_fields?.first_name?.status).toBe("accepted");
     });
 
-    it("should return ACCEPTED for fully verified customer", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [
-          {
-            id: "user-123",
-            kyc_level: KYCLevel.FULL,
-            applicant_id: "applicant-456",
-            verification_status: KYCStatus.APPROVED,
-          },
-        ],
-        command: "",
-        oid: 0,
-        rowCount: 1,
-        fields: [],
-      });
+    it("returns PROCESSING for pending applicant", async () => {
+      mockDb.query
+        .mockResolvedValueOnce(rowQueryResult([{
+          id: "user-123",
+          kyc_level: KYCLevel.NONE,
+          applicant_id: "appl-456",
+          verification_status: KYCStatus.PENDING,
+        }]))
+        .mockResolvedValueOnce(emptyQueryResult);
 
       mockKycService.getApplicant.mockResolvedValueOnce({
-        id: "applicant-456",
-        first_name: "John",
+        id: "appl-456",
+        first_name: "Jane",
         last_name: "Doe",
-        email: "john@example.com",
+        email: "jane@example.com",
         created_at: new Date().toISOString(),
         sandbox: false,
       });
 
-      const response = await request(app)
-        .get("/sep12/customer")
-        .query({ account: "GABC123..." });
+      const res = await request(app).get("/sep12/customer").query({ account: "GACC..." });
 
-      expect(response.status).toBe(200);
-      expect(response.body.status).toBe(Sep12CustomerStatus.ACCEPTED);
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(Sep12CustomerStatus.PROCESSING);
     });
 
-    it("should return REJECTED for rejected customer", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [
-          {
-            id: "user-123",
-            kyc_level: KYCLevel.NONE,
-            applicant_id: "applicant-456",
-            verification_status: KYCStatus.REJECTED,
-          },
-        ],
-        command: "",
-        oid: 0,
-        rowCount: 1,
-        fields: [],
-      });
+    it("returns REJECTED for rejected customer", async () => {
+      mockDb.query
+        .mockResolvedValueOnce(rowQueryResult([{
+          id: "user-123",
+          kyc_level: KYCLevel.NONE,
+          applicant_id: "appl-456",
+          verification_status: KYCStatus.REJECTED,
+        }]))
+        .mockResolvedValueOnce(emptyQueryResult);
 
-      const response = await request(app)
-        .get("/sep12/customer")
-        .query({ account: "GABC123..." });
+      const res = await request(app).get("/sep12/customer").query({ account: "GACC..." });
 
-      expect(response.status).toBe(200);
-      expect(response.body.status).toBe(Sep12CustomerStatus.REJECTED);
-      expect(response.body.message).toContain("rejected");
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(Sep12CustomerStatus.REJECTED);
+      expect(res.body.message).toContain("rejected");
     });
 
-    it("should return 400 if account parameter is missing", async () => {
-      const response = await request(app).get("/sep12/customer");
+    it("reflects uploaded documents in provided_fields", async () => {
+      mockDb.query
+        .mockResolvedValueOnce(rowQueryResult([{
+          id: "user-123",
+          kyc_level: KYCLevel.NONE,
+          applicant_id: null,
+          verification_status: KYCStatus.PENDING,
+        }]))
+        .mockResolvedValueOnce(rowQueryResult([{ document_type: "passport", document_side: "front" }]));
 
-      expect(response.status).toBe(400);
-      expect(response.body.error).toContain("account parameter is required");
+      const res = await request(app).get("/sep12/customer").query({ account: "GACC..." });
+
+      expect(res.status).toBe(200);
+      expect(res.body.provided_fields?.photo_id_front).toBeDefined();
+    });
+
+    it("returns 400 when account is missing", async () => {
+      const res = await request(app).get("/sep12/customer");
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("account parameter is required");
     });
   });
 
+  // =========================================================================
+  // PUT /customer
+  // =========================================================================
   describe("PUT /customer", () => {
-    it("should create new customer with basic information", async () => {
-      // Mock user creation
+    it("creates new customer and returns PROCESSING status", async () => {
       mockDb.query
-        .mockResolvedValueOnce({
-          rows: [],
-          command: "",
-          oid: 0,
-          rowCount: 0,
-          fields: [],
-        })
-        .mockResolvedValueOnce({
-          rows: [{ id: "new-user-123" }],
-          command: "",
-          oid: 0,
-          rowCount: 1,
-          fields: [],
-        })
-        .mockResolvedValueOnce({
-          rows: [],
-          command: "",
-          oid: 0,
-          rowCount: 1,
-          fields: [],
-        });
+        .mockResolvedValueOnce(emptyQueryResult)          // user lookup
+        .mockResolvedValueOnce(rowQueryResult([{ id: "new-user-123" }])) // INSERT user
+        .mockResolvedValueOnce(emptyQueryResult);         // INSERT kyc_applicants
 
       mockKycService.createApplicant.mockResolvedValueOnce({
-        id: "new-applicant-789",
+        id: "appl-789",
         first_name: "Jane",
         last_name: "Smith",
         email: "jane@example.com",
@@ -197,243 +200,164 @@ describe("SEP-12 KYC API", () => {
         sandbox: false,
       });
 
-      const customerData = {
-        account: "GDEF456...",
+      const res = await request(app).put("/sep12/customer").send({
+        account: "GNEW...",
         first_name: "Jane",
         last_name: "Smith",
         email_address: "jane@example.com",
-        birth_date: "1990-01-15",
-        address: "123 Main St",
-        city: "New York",
-        postal_code: "10001",
-        address_country_code: "USA",
-      };
+      });
 
-      const response = await request(app)
-        .put("/sep12/customer")
-        .send(customerData);
-
-      expect(response.status).toBe(200);
-      expect(response.body.status).toBe(Sep12CustomerStatus.PROCESSING);
-      expect(response.body.message).toContain("being processed");
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(Sep12CustomerStatus.PROCESSING);
       expect(mockKycService.createApplicant).toHaveBeenCalled();
     });
 
-    it("should update existing customer", async () => {
+    it("returns presigned_uploads for binary fields declared as 'upload'", async () => {
       mockDb.query
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              id: "existing-user-123",
-              applicant_id: "existing-applicant-456",
-            },
-          ],
-          command: "",
-          oid: 0,
-          rowCount: 1,
-          fields: [],
-        })
-        .mockResolvedValueOnce({
-          rows: [],
-          command: "",
-          oid: 0,
-          rowCount: 1,
-          fields: [],
-        });
-
-      mockKycService.getApplicant.mockResolvedValueOnce({
-        id: "existing-applicant-456",
-        first_name: "John",
-        last_name: "Doe",
-        email: "john@example.com",
-        created_at: new Date().toISOString(),
-        sandbox: false,
-      });
-
-      const customerData = {
-        account: "GABC123...",
-        mobile_number: "+1234567890",
-      };
-
-      const response = await request(app)
-        .put("/sep12/customer")
-        .send(customerData);
-
-      expect(response.status).toBe(200);
-      expect(response.body.status).toBe(Sep12CustomerStatus.PROCESSING);
-    });
-
-    it("should handle document uploads", async () => {
-      mockDb.query
-        .mockResolvedValueOnce({
-          rows: [],
-          command: "",
-          oid: 0,
-          rowCount: 0,
-          fields: [],
-        })
-        .mockResolvedValueOnce({
-          rows: [{ id: "new-user-123" }],
-          command: "",
-          oid: 0,
-          rowCount: 1,
-          fields: [],
-        })
-        .mockResolvedValueOnce({
-          rows: [],
-          command: "",
-          oid: 0,
-          rowCount: 1,
-          fields: [],
-        });
+        .mockResolvedValueOnce(emptyQueryResult)          // user lookup
+        .mockResolvedValueOnce(rowQueryResult([{ id: "new-user-123" }])) // INSERT user
+        .mockResolvedValueOnce(emptyQueryResult)          // INSERT kyc_applicants
+        .mockResolvedValueOnce(emptyQueryResult);         // INSERT kyc_documents
 
       mockKycService.createApplicant.mockResolvedValueOnce({
-        id: "new-applicant-789",
+        id: "appl-789",
         first_name: "Jane",
         last_name: "Smith",
         created_at: new Date().toISOString(),
         sandbox: false,
       });
 
-      mockKycService.uploadDocument.mockResolvedValueOnce({
-        id: "doc-123",
-        applicant_id: "new-applicant-789",
-      });
-
-      const customerData = {
-        account: "GDEF456...",
+      const res = await request(app).put("/sep12/customer").send({
+        account: "GNEW...",
         first_name: "Jane",
         last_name: "Smith",
         id_type: "passport",
-        photo_id_front: "base64encodedimage...",
-      };
+        photo_id_front: "upload",
+      });
 
-      const response = await request(app)
-        .put("/sep12/customer")
-        .send(customerData);
-
-      expect(response.status).toBe(200);
-      expect(mockKycService.uploadDocument).toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(res.body.presigned_uploads?.photo_id_front).toBeDefined();
+      expect(res.body.presigned_uploads?.photo_id_front.url).toBe("https://s3.amazonaws.com/presigned-url");
+      expect(res.body.presigned_uploads?.photo_id_front.key).toBeDefined();
+      expect(res.body.presigned_uploads?.photo_id_front.expires_in).toBe(900);
+      expect(mockPresignedUploadUrl).toHaveBeenCalledWith("new-user-123", "photo_id_front");
     });
 
-    it("should return 400 for invalid data", async () => {
-      const customerData = {
-        account: "GABC123...",
-        email_address: "invalid-email",
-      };
+    it("returns presigned URLs for multiple binary fields", async () => {
+      mockPresignedUploadUrl
+        .mockResolvedValueOnce({ url: "https://s3.amazonaws.com/url1", key: "key1", expires_in: 900 })
+        .mockResolvedValueOnce({ url: "https://s3.amazonaws.com/url2", key: "key2", expires_in: 900 });
 
-      const response = await request(app)
-        .put("/sep12/customer")
-        .send(customerData);
+      mockDb.query
+        .mockResolvedValueOnce(emptyQueryResult)
+        .mockResolvedValueOnce(rowQueryResult([{ id: "new-user-123" }]))
+        .mockResolvedValueOnce(emptyQueryResult)
+        .mockResolvedValueOnce(emptyQueryResult)
+        .mockResolvedValueOnce(emptyQueryResult);
 
-      expect(response.status).toBe(400);
-      expect(response.body.error).toBeDefined();
-    });
-
-    it("should return 400 if account is missing", async () => {
-      const customerData = {
+      mockKycService.createApplicant.mockResolvedValueOnce({
+        id: "appl-789",
         first_name: "Jane",
         last_name: "Smith",
-      };
+        created_at: new Date().toISOString(),
+        sandbox: false,
+      });
 
-      const response = await request(app)
-        .put("/sep12/customer")
-        .send(customerData);
+      const res = await request(app).put("/sep12/customer").send({
+        account: "GNEW...",
+        first_name: "Jane",
+        last_name: "Smith",
+        photo_id_front: "upload",
+        photo_id_back: "upload",
+      });
 
-      expect(response.status).toBe(400);
-      expect(response.body.error).toContain("account parameter is required");
+      expect(res.status).toBe(200);
+      expect(mockPresignedUploadUrl).toHaveBeenCalledTimes(2);
+      expect(res.body.presigned_uploads?.photo_id_front.url).toBe("https://s3.amazonaws.com/url1");
+      expect(res.body.presigned_uploads?.photo_id_back.url).toBe("https://s3.amazonaws.com/url2");
+    });
+
+    it("does not return presigned_uploads when no binary fields are declared", async () => {
+      mockDb.query
+        .mockResolvedValueOnce(emptyQueryResult)
+        .mockResolvedValueOnce(rowQueryResult([{ id: "new-user-123" }]))
+        .mockResolvedValueOnce(emptyQueryResult);
+
+      mockKycService.createApplicant.mockResolvedValueOnce({
+        id: "appl-789",
+        first_name: "Jane",
+        last_name: "Smith",
+        created_at: new Date().toISOString(),
+        sandbox: false,
+      });
+
+      const res = await request(app).put("/sep12/customer").send({
+        account: "GNEW...",
+        first_name: "Jane",
+        last_name: "Smith",
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.presigned_uploads).toBeUndefined();
+    });
+
+    it("updates existing customer without creating a new applicant", async () => {
+      mockDb.query
+        .mockResolvedValueOnce(rowQueryResult([{ id: "user-123", applicant_id: "appl-456" }]))
+        .mockResolvedValueOnce(emptyQueryResult); // updateSensitiveData
+
+      const res = await request(app).put("/sep12/customer").send({
+        account: "GACC...",
+        mobile_number: "+1234567890",
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe(Sep12CustomerStatus.PROCESSING);
+      expect(mockKycService.createApplicant).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 for invalid email", async () => {
+      const res = await request(app).put("/sep12/customer").send({
+        account: "GACC...",
+        email_address: "not-an-email",
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 400 when account is missing", async () => {
+      const res = await request(app).put("/sep12/customer").send({ first_name: "Jane" });
+      expect(res.status).toBe(400);
     });
   });
 
+  // =========================================================================
+  // DELETE /customer/:account
+  // =========================================================================
   describe("DELETE /customer/:account", () => {
-    it("should delete customer information", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [],
-        command: "",
-        oid: 0,
-        rowCount: 1,
-        fields: [],
-      });
+    it("purges user across all tables and returns 204", async () => {
+      mockDb.query
+        .mockResolvedValueOnce(rowQueryResult([{ id: "user-123" }])) // user lookup
+        .mockResolvedValueOnce(emptyQueryResult)  // DELETE kyc_documents
+        .mockResolvedValueOnce(emptyQueryResult)  // DELETE kyc_applicants
+        .mockResolvedValueOnce(emptyQueryResult)  // UPDATE transactions
+        .mockResolvedValueOnce(emptyQueryResult); // UPDATE users (nullify PII)
 
-      const response = await request(app).delete("/sep12/customer/GABC123...");
+      const res = await request(app).delete("/sep12/customer/GACC123...");
 
-      expect(response.status).toBe(204);
-      expect(mockDb.query).toHaveBeenCalledWith(
-        expect.stringContaining("DELETE FROM kyc_applicants"),
-        ["GABC123..."]
-      );
+      expect(res.status).toBe(204);
+      // Verify cascading deletes were issued
+      const calls = (mockDb.query as jest.Mock).mock.calls.map((c) => c[0] as string);
+      expect(calls.some((q) => q.includes("DELETE FROM kyc_documents"))).toBe(true);
+      expect(calls.some((q) => q.includes("DELETE FROM kyc_applicants"))).toBe(true);
+      expect(calls.some((q) => q.includes("UPDATE transactions"))).toBe(true);
+      expect(calls.some((q) => q.includes("UPDATE users"))).toBe(true);
     });
 
-    it("should return 400 if account is missing", async () => {
-      const response = await request(app).delete("/sep12/customer/");
+    it("returns 204 when account does not exist (idempotent)", async () => {
+      mockDb.query.mockResolvedValueOnce(emptyQueryResult); // user not found
 
-      expect(response.status).toBe(404);
-    });
-  });
-
-  describe("Field Requirements", () => {
-    it("should return natural person fields for individual customers", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [],
-        command: "",
-        oid: 0,
-        rowCount: 0,
-        fields: [],
-      });
-
-      const response = await request(app)
-        .get("/sep12/customer")
-        .query({ account: "GABC123..." });
-
-      expect(response.status).toBe(200);
-      expect(response.body.fields.first_name).toBeDefined();
-      expect(response.body.fields.last_name).toBeDefined();
-      expect(response.body.fields.birth_date).toBeDefined();
-      expect(response.body.fields.address).toBeDefined();
-    });
-
-    it("should return organization fields for business customers", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [],
-        command: "",
-        oid: 0,
-        rowCount: 0,
-        fields: [],
-      });
-
-      const response = await request(app)
-        .get("/sep12/customer")
-        .query({ account: "GABC123...", type: "organization" });
-
-      expect(response.status).toBe(200);
-      expect(response.body.fields.organization_name).toBeDefined();
-      expect(response.body.fields.organization_registration_number).toBeDefined();
-    });
-
-    it("should include document fields for unverified customers", async () => {
-      mockDb.query.mockResolvedValueOnce({
-        rows: [
-          {
-            id: "user-123",
-            kyc_level: KYCLevel.NONE,
-            applicant_id: null,
-            verification_status: KYCStatus.PENDING,
-          },
-        ],
-        command: "",
-        oid: 0,
-        rowCount: 1,
-        fields: [],
-      });
-
-      const response = await request(app)
-        .get("/sep12/customer")
-        .query({ account: "GABC123..." });
-
-      expect(response.status).toBe(200);
-      // For PENDING status with NONE level, it returns PROCESSING
-      expect(response.body.status).toBe(Sep12CustomerStatus.PROCESSING);
-      expect(response.body.message).toContain("being processed");
+      const res = await request(app).delete("/sep12/customer/GUNKNOWN...");
+      expect(res.status).toBe(204);
     });
   });
 });

@@ -1,0 +1,46 @@
+<h1 style="margin:0 0 16px;font-size:24px;font-weight:bold;color:#111827;">Payment Confirmed</h1>
+<p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.6;">
+  Your payment has been successfully processed.
+</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px;border:1px solid #e5e7eb;border-radius:6px;border-collapse:separate;">
+  <tr style="background-color:#f9fafb;">
+    <td style="padding:12px 20px;font-size:13px;font-weight:bold;color:#6b7280;border-bottom:1px solid #e5e7eb;">TRANSACTION SUMMARY</td>
+  </tr>
+  <tr>
+    <td style="padding:16px 20px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+          <td style="padding:6px 0;font-size:14px;color:#6b7280;">Reference</td>
+          <td style="padding:6px 0;font-size:14px;color:#111827;text-align:right;font-family:monospace;">{{referenceNumber}}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;font-size:14px;color:#6b7280;">Amount</td>
+          <td style="padding:6px 0;font-size:18px;font-weight:bold;color:#059669;text-align:right;">{{amount}} {{currency}}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;font-size:14px;color:#6b7280;">Type</td>
+          <td style="padding:6px 0;font-size:14px;color:#111827;text-align:right;">{{type}}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;font-size:14px;color:#6b7280;">Provider</td>
+          <td style="padding:6px 0;font-size:14px;color:#111827;text-align:right;">{{provider}}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0;font-size:14px;color:#6b7280;">Date</td>
+          <td style="padding:6px 0;font-size:14px;color:#111827;text-align:right;">{{completedAt}}</td>
+        </tr>
+        {{#if stellarHash}}
+        <tr>
+          <td style="padding:6px 0;font-size:14px;color:#6b7280;">Stellar Tx</td>
+          <td style="padding:6px 0;font-size:12px;color:#1a56db;text-align:right;font-family:monospace;">
+            <a href="https://stellar.expert/explorer/public/tx/{{stellarHash}}" style="color:#1a56db;">{{stellarHash}}</a>
+          </td>
+        </tr>
+        {{/if}}
+      </table>
+    </td>
+  </tr>
+</table>
+<p style="margin:0;font-size:13px;color:#9ca3af;">
+  Keep this email as your payment receipt. If you did not authorise this transaction, contact support immediately.
+</p>

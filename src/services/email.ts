@@ -3,6 +3,7 @@ import { Transaction } from "../models/transaction";
 import { DailySnapshot } from "../models/snapshot";
 import { GrowthMetrics } from "./snapshotService";
 import { resolveLocale, translate } from "../utils/i18n";
+import { renderTemplate } from "./emailRenderer";
 
 export interface LockoutEmailOptions {
   minutesRemaining: number;
@@ -74,33 +75,38 @@ export class EmailService {
   ): Promise<void> {
     const resolvedLocale = resolveLocale(locale);
     const transactionHash = transaction.transactionHash;
-    await this.sendEmail({
-      to: email,
-      templateId: this.resolveTemplateId(
-        "SENDGRID_RECEIPT_TEMPLATE_ID",
-        resolvedLocale,
-      ),
-      dynamicTemplateData: {
-        amount: transaction.amount,
-        type: transaction.type,
-        typeLocalized: translate(
-          `email.transaction_type.${transaction.type}`,
-          resolvedLocale,
-        ),
-        referenceNumber: transaction.referenceNumber,
-        provider: transaction.provider.toUpperCase(),
-        phoneNumber: transaction.phoneNumber,
-        stellarAddress: transaction.stellarAddress,
-        transactionHash,
-        stellarExpertUrl: transactionHash
-          ? `https://stellar.expert/explorer/public/tx/${transactionHash}`
-          : undefined,
-        merchantDisplayName: merchantDisplayName ?? undefined,
-        createdAt: new Date(transaction.createdAt).toLocaleString(resolvedLocale),
-        locale: resolvedLocale,
-        year: new Date().getFullYear(),
-      },
-    });
+    const templateId = this.resolveTemplateId("SENDGRID_RECEIPT_TEMPLATE_ID", resolvedLocale);
+
+    const context = {
+      amount: transaction.amount,
+      type: transaction.type,
+      typeLocalized: translate(`email.transaction_type.${transaction.type}`, resolvedLocale),
+      referenceNumber: transaction.referenceNumber,
+      provider: transaction.provider.toUpperCase(),
+      phoneNumber: transaction.phoneNumber,
+      stellarAddress: transaction.stellarAddress,
+      transactionHash,
+      stellarExpertUrl: transactionHash
+        ? `https://stellar.expert/explorer/public/tx/${transactionHash}`
+        : undefined,
+      merchantDisplayName: merchantDisplayName ?? undefined,
+      createdAt: new Date(transaction.createdAt).toLocaleString(resolvedLocale),
+      locale: resolvedLocale,
+      year: new Date().getFullYear(),
+    };
+
+    if (templateId) {
+      await this.sendEmail({ to: email, templateId, dynamicTemplateData: context });
+    } else {
+      const { html, text } = renderTemplate("transaction-receipt", context as any);
+      await sgMail.send({
+        from: process.env.EMAIL_FROM || '"ProxyPay" <no-reply@proxypay.io>',
+        to: email,
+        subject: `Transaction Receipt — ${transaction.referenceNumber}`,
+        html,
+        text,
+      }).catch((err) => console.error("[Email] Receipt send failed:", err));
+    }
   }
 
   async sendAccountLockoutNotification(
@@ -135,36 +141,19 @@ export class EmailService {
           },
         });
       } else {
-        // Inline HTML fallback — no template required in SendGrid.
-        const unlockTime = unlocksAt.toLocaleString(resolvedLocale);
-        const ipNote = ipAddress
-          ? `<p style="color:#666;font-size:13px;">Request originated from IP: ${ipAddress}</p>`
-          : "";
-
+        // Render from local Handlebars template
+        const { html, text } = renderTemplate("account-lockout", {
+          minutesRemaining,
+          unlocksAtLocalized: unlocksAt.toLocaleString(resolvedLocale),
+          ipAddress: ipAddress ?? null,
+          singleMinute: minutesRemaining === 1,
+        } as any);
         await sgMail.send({
           from,
           to: email,
           subject: "Your account has been temporarily locked",
-          html: `
-            <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
-              <h2 style="color:#c0392b">Account Temporarily Locked</h2>
-              <p>We detected multiple failed login attempts on your Mobile Money account.</p>
-              <p>For your security, your account has been <strong>temporarily locked for ${minutesRemaining} minute${minutesRemaining === 1 ? "" : "s"}</strong>.</p>
-              <p>You will be able to log in again after:<br>
-                <strong>${unlockTime}</strong>
-              </p>
-              ${ipNote}
-              <p>If this wasn't you, please contact our support team immediately.</p>
-              <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
-              <p style="color:#999;font-size:12px">
-                &copy; ${new Date().getFullYear()} Mobile Money. This is an automated security notification.
-              </p>
-            </div>
-          `,
-          text:
-            `Your Mobile Money account has been temporarily locked due to multiple failed login attempts.\n\n` +
-            `You can try again in ${minutesRemaining} minute${minutesRemaining === 1 ? "" : "s"} (after ${unlockTime}).\n\n` +
-            `If this wasn't you, please contact support immediately.`,
+          html,
+          text,
         });
       }
     } catch (error) {
@@ -377,6 +366,90 @@ export class EmailService {
       });
     }
   }
+  async sendRegistrationConfirmation(
+    email: string,
+    data: { firstName: string; email: string; registeredAt: string; verifyUrl: string },
+  ): Promise<void> {
+    const { html, text } = renderTemplate("registration-confirmation", data as any);
+    await sgMail.send({
+      from: process.env.EMAIL_FROM || '"ProxyPay" <no-reply@proxypay.io>',
+      to: email,
+      subject: "Welcome to ProxyPay — please verify your email",
+      html,
+      text,
+    }).catch((err) => console.error("[Email] Registration confirmation failed:", err));
+  }
+
+  async sendKycStatusChange(
+    email: string,
+    data: {
+      firstName: string;
+      statusLabel: string;
+      statusBg: string;
+      statusBorder: string;
+      statusColor: string;
+      message?: string;
+      nextSteps?: string;
+      actionUrl?: string;
+      actionLabel?: string;
+    },
+  ): Promise<void> {
+    const { html, text } = renderTemplate("kyc-status-change", data as any);
+    await sgMail.send({
+      from: process.env.EMAIL_FROM || '"ProxyPay" <no-reply@proxypay.io>',
+      to: email,
+      subject: `KYC Update: ${data.statusLabel}`,
+      html,
+      text,
+    }).catch((err) => console.error("[Email] KYC status change failed:", err));
+  }
+
+  async sendPaymentConfirmed(
+    email: string,
+    data: {
+      referenceNumber: string;
+      amount: string;
+      currency: string;
+      type: string;
+      provider: string;
+      completedAt: string;
+      stellarHash?: string;
+    },
+  ): Promise<void> {
+    const { html, text } = renderTemplate("payment-confirmed", data as any);
+    await sgMail.send({
+      from: process.env.EMAIL_FROM || '"ProxyPay" <no-reply@proxypay.io>',
+      to: email,
+      subject: `Payment Confirmed — ${data.referenceNumber}`,
+      html,
+      text,
+    }).catch((err) => console.error("[Email] Payment confirmed failed:", err));
+  }
+
+  async sendApiKeyExpiryWarning(
+    email: string,
+    data: {
+      firstName: string;
+      keyName: string;
+      keyId: string;
+      expiresAt: string;
+      daysRemaining: number;
+      dashboardUrl: string;
+    },
+  ): Promise<void> {
+    const { html, text } = renderTemplate("api-key-expiry", {
+      ...data,
+      singleDay: data.daysRemaining === 1,
+    } as any);
+    await sgMail.send({
+      from: process.env.EMAIL_FROM || '"ProxyPay" <no-reply@proxypay.io>',
+      to: email,
+      subject: `Action required: API key "${data.keyName}" expires in ${data.daysRemaining} day${data.daysRemaining === 1 ? "" : "s"}`,
+      html,
+      text,
+    }).catch((err) => console.error("[Email] API key expiry warning failed:", err));
+  }
+
 }
 
 export const emailService = new EmailService();

@@ -1,19 +1,14 @@
 import { Router, Request, Response } from "express";
 import { Pool } from "pg";
 import { sep12RateLimiter } from "../middleware/rateLimit";
-import { upload } from "../middleware/upload";
 import { z } from "zod";
 import KYCService, { KYCLevel, KYCStatus, DocumentType } from "../services/kyc";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
-import {UserModel} from "../models/users";
-
-/**
- * SEP-12: KYC API
- * * This implements the Stellar Ecosystem Proposal 12 (SEP-12) standard for
- * customer information collection and KYC verification.
- * * Specification: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0012.md
- */
+import { UserModel } from "../models/users";
+import { getPresignedUploadUrl } from "../services/s3Upload";
+import { getS3Client, s3Config } from "../config/s3";
+import { DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 
 // ============================================================================
 // Types and Interfaces
@@ -26,50 +21,11 @@ export enum Sep12CustomerStatus {
   REJECTED = "REJECTED",
 }
 
-export interface Sep12CustomerFields {
-  // Natural person fields
-  first_name?: string;
-  last_name?: string;
-  email_address?: string;
-  mobile_number?: string;
-  birth_date?: string;
-  birth_place?: string;
-  birth_country?: string;
-  
-  // Address fields
-  address?: string;
-  address_country_code?: string;
-  state_or_province?: string;
-  city?: string;
-  postal_code?: string;
-  
-  // ID document fields
-  id_type?: string;
-  id_country_code?: string;
-  id_issue_date?: string;
-  id_expiration_date?: string;
-  id_number?: string;
-  
-  // Photo ID
-  photo_id_front?: string; // Base64 or URL
-  photo_id_back?: string;
-  photo_proof_residence?: string;
-  
-  // Organization fields (for businesses)
-  organization_name?: string;
-  organization_registration_number?: string;
-  organization_registration_date?: string;
-  organization_registered_address?: string;
-  
-  // Additional fields
-  tax_id?: string;
-  tax_id_name?: string;
-  occupation?: string;
-  employer_name?: string;
-  employer_address?: string;
-}
+/** Binary field names that require presigned S3 upload URLs */
+const BINARY_FIELDS = ["photo_id_front", "photo_id_back", "photo_proof_residence"] as const;
+type BinaryField = typeof BINARY_FIELDS[number];
 
-export interface Sep12ProvidedField {
+export interface Sep12FieldSpec {
   type: string;
   description: string;
   choices?: string[];
@@ -79,9 +35,45 @@ export interface Sep12ProvidedField {
 export interface Sep12CustomerResponse {
   id: string;
   status: Sep12CustomerStatus;
-  fields?: Record<string, Sep12ProvidedField>;
-  provided_fields?: Record<string, Sep12ProvidedField>;
+  fields?: Record<string, Sep12FieldSpec>;
+  provided_fields?: Record<string, Sep12FieldSpec & { status?: string }>;
+  /** Presigned S3 PUT URLs for binary fields returned by PUT /customer */
+  presigned_uploads?: Record<BinaryField, { url: string; key: string; expires_in: number }>;
   message?: string;
+}
+
+// ============================================================================
+// SEP-12 Field Spec
+// ============================================================================
+
+const NATURAL_PERSON_FIELDS: Record<string, Sep12FieldSpec> = {
+  first_name:           { type: "string",  description: "First or given name" },
+  last_name:            { type: "string",  description: "Last or family name" },
+  email_address:        { type: "string",  description: "Email address" },
+  mobile_number:        { type: "string",  description: "Mobile phone number with country code", optional: true },
+  birth_date:           { type: "date",    description: "Date of birth (YYYY-MM-DD)" },
+  address:              { type: "string",  description: "Full street address" },
+  city:                 { type: "string",  description: "City of residence" },
+  postal_code:          { type: "string",  description: "Postal or ZIP code" },
+  address_country_code: { type: "string",  description: "ISO 3166-1 alpha-3 country code" },
+  id_type:              { type: "string",  description: "Type of ID document", choices: ["passport", "drivers_license", "national_id", "residence_permit"] },
+  id_number:            { type: "string",  description: "ID document number" },
+  id_country_code:      { type: "string",  description: "Country that issued the ID" },
+  photo_id_front:       { type: "binary",  description: "Image of front of ID document" },
+  photo_id_back:        { type: "binary",  description: "Image of back of ID document", optional: true },
+};
+
+const ORGANIZATION_FIELDS: Record<string, Sep12FieldSpec> = {
+  organization_name:                { type: "string", description: "Legal name of organization" },
+  organization_registration_number: { type: "string", description: "Business registration number" },
+  organization_registered_address:  { type: "string", description: "Registered business address" },
+  address_country_code:             { type: "string", description: "ISO 3166-1 alpha-3 country code" },
+};
+
+function getRequiredFields(type?: string, kycLevel?: KYCLevel): Record<string, Sep12FieldSpec> {
+  if (type === "organization") return ORGANIZATION_FIELDS;
+  if (kycLevel === KYCLevel.FULL) return {};
+  return NATURAL_PERSON_FIELDS;
 }
 
 // ============================================================================
@@ -89,52 +81,37 @@ export interface Sep12CustomerResponse {
 // ============================================================================
 
 const PutCustomerSchema = z.object({
-  account: z.string().optional(),
-  memo: z.string().optional(),
-  memo_type: z.enum(["id", "hash", "text"]).optional(),
-  type: z.string().optional(),
-  
-  // Natural person fields
-  first_name: z.string().optional(),
-  last_name: z.string().optional(),
+  account:       z.string().min(1),
+  memo:          z.string().optional(),
+  memo_type:     z.enum(["id", "hash", "text"]).optional(),
+  type:          z.string().optional(),
+  first_name:    z.string().optional(),
+  last_name:     z.string().optional(),
   email_address: z.string().email().optional(),
   mobile_number: z.string().optional(),
-  birth_date: z.string().optional(),
-  birth_place: z.string().optional(),
-  birth_country: z.string().optional(),
-  
-  // Address
-  address: z.string().optional(),
+  birth_date:    z.string().optional(),
+  address:       z.string().optional(),
   address_country_code: z.string().length(3).optional(),
-  state_or_province: z.string().optional(),
-  city: z.string().optional(),
-  postal_code: z.string().optional(),
-  
-  // ID document
-  id_type: z.string().optional(),
-  id_country_code: z.string().length(3).optional(),
-  id_issue_date: z.string().optional(),
-  id_expiration_date: z.string().optional(),
-  id_number: z.string().optional(),
-  
-  // Photos (base64 or URLs)
-  photo_id_front: z.string().optional(),
-  photo_id_back: z.string().optional(),
-  photo_proof_residence: z.string().optional(),
-  
-  // Organization
-  organization_name: z.string().optional(),
+  state_or_province:    z.string().optional(),
+  city:                 z.string().optional(),
+  postal_code:          z.string().optional(),
+  id_type:              z.string().optional(),
+  id_country_code:      z.string().length(3).optional(),
+  id_issue_date:        z.string().optional(),
+  id_expiration_date:   z.string().optional(),
+  id_number:            z.string().optional(),
+  tax_id:               z.string().optional(),
+  occupation:           z.string().optional(),
+  employer_name:        z.string().optional(),
+  organization_name:                { ...z.string().optional()._def, ...{} } && z.string().optional(),
   organization_registration_number: z.string().optional(),
-  organization_registration_date: z.string().optional(),
-  organization_registered_address: z.string().optional(),
-  
-  // Additional
-  tax_id: z.string().optional(),
-  tax_id_name: z.string().optional(),
-  occupation: z.string().optional(),
-  employer_name: z.string().optional(),
-  employer_address: z.string().optional(),
-}).catchall(z.any()); // Catch all unmapped dynamic fields
+  organization_registration_date:   z.string().optional(),
+  organization_registered_address:  z.string().optional(),
+  // Binary fields: clients declare intent to upload; presigned URLs are returned
+  photo_id_front:        z.literal("upload").optional(),
+  photo_id_back:         z.literal("upload").optional(),
+  photo_proof_residence: z.literal("upload").optional(),
+}).catchall(z.any());
 
 // ============================================================================
 // SEP-12 Service
@@ -151,439 +128,247 @@ export class Sep12Service {
     this.userModel = new UserModel();
   }
 
-  /**
-   * Map internal KYC status to SEP-12 status
-   */
-  private mapKYCStatusToSep12(kycStatus: KYCStatus, kycLevel: KYCLevel): Sep12CustomerStatus {
-    if (kycStatus === KYCStatus.REJECTED) {
-      return Sep12CustomerStatus.REJECTED;
+  private mapKYCStatusToSep12(status: KYCStatus, level: KYCLevel): Sep12CustomerStatus {
+    if (status === KYCStatus.REJECTED) return Sep12CustomerStatus.REJECTED;
+    if (status === KYCStatus.PENDING || status === KYCStatus.REVIEW) return Sep12CustomerStatus.PROCESSING;
+    if (status === KYCStatus.APPROVED) {
+      return level === KYCLevel.FULL ? Sep12CustomerStatus.ACCEPTED : Sep12CustomerStatus.NEEDS_INFO;
     }
-    
-    if (kycStatus === KYCStatus.PENDING || kycStatus === KYCStatus.REVIEW) {
-      return Sep12CustomerStatus.PROCESSING;
-    }
-    
-    if (kycStatus === KYCStatus.APPROVED) {
-      // Check if we need more info based on KYC level
-      if (kycLevel === KYCLevel.NONE || kycLevel === KYCLevel.BASIC) {
-        return Sep12CustomerStatus.NEEDS_INFO;
-      }
-      return Sep12CustomerStatus.ACCEPTED;
-    }
-    
     return Sep12CustomerStatus.NEEDS_INFO;
   }
 
-  /**
-   * Get required fields based on customer type and current status
-   */
-  private getRequiredFields(type?: string, kycLevel?: KYCLevel): Record<string, Sep12ProvidedField> {
-    const naturalPersonFields: Record<string, Sep12ProvidedField> = {
-      first_name: {
-        type: "string",
-        description: "First or given name",
-        optional: false,
-      },
-      last_name: {
-        type: "string",
-        description: "Last or family name",
-        optional: false,
-      },
-      email_address: {
-        type: "string",
-        description: "Email address",
-        optional: false,
-      },
-      mobile_number: {
-        type: "string",
-        description: "Mobile phone number with country code",
-        optional: true,
-      },
-      birth_date: {
-        type: "date",
-        description: "Date of birth (YYYY-MM-DD)",
-        optional: false,
-      },
-      address: {
-        type: "string",
-        description: "Full street address",
-        optional: false,
-      },
-      city: {
-        type: "string",
-        description: "City of residence",
-        optional: false,
-      },
-      postal_code: {
-        type: "string",
-        description: "Postal or ZIP code",
-        optional: false,
-      },
-      address_country_code: {
-        type: "string",
-        description: "ISO 3166-1 alpha-3 country code",
-        optional: false,
-      },
+  async getCustomer(account: string, type?: string): Promise<Sep12CustomerResponse> {
+    const result = await this.db.query(
+      `SELECT u.id, u.kyc_level, ka.applicant_id, ka.verification_status
+       FROM users u
+       LEFT JOIN kyc_applicants ka ON u.id = ka.user_id
+       WHERE u.stellar_address = $1
+       ORDER BY ka.updated_at DESC NULLS LAST
+       LIMIT 1`,
+      [account],
+    );
+
+    if (result.rows.length === 0) {
+      return {
+        id: "",
+        status: Sep12CustomerStatus.NEEDS_INFO,
+        fields: getRequiredFields(type),
+        message: "Customer information required",
+      };
+    }
+
+    const row = result.rows[0];
+    const kycLevel = row.kyc_level as KYCLevel;
+    const kycStatus = (row.verification_status as KYCStatus) ?? KYCStatus.PENDING;
+    const sep12Status = this.mapKYCStatusToSep12(kycStatus, kycLevel);
+
+    // Build provided_fields from what we have on the applicant
+    const providedFields: Record<string, Sep12FieldSpec & { status?: string }> = {};
+    if (row.applicant_id) {
+      try {
+        const applicant = await this.kycService.getApplicant(row.applicant_id);
+        const fieldStatus = sep12Status === Sep12CustomerStatus.ACCEPTED ? "accepted" : "processing";
+        if (applicant.first_name) providedFields.first_name = { type: "string", description: "First name", status: fieldStatus };
+        if (applicant.last_name)  providedFields.last_name  = { type: "string", description: "Last name",  status: fieldStatus };
+        if (applicant.email)      providedFields.email_address = { type: "string", description: "Email address", status: fieldStatus };
+        if (applicant.address)    providedFields.address = { type: "string", description: "Street address", status: fieldStatus };
+      } catch {
+        // Ignore — applicant fetch is best-effort
+      }
+    }
+
+    // Check which binary documents have been uploaded
+    const docResult = await this.db.query(
+      `SELECT document_type, document_side FROM kyc_documents WHERE user_id = $1`,
+      [row.id],
+    );
+    for (const doc of docResult.rows) {
+      const fieldKey = doc.document_side === "front" ? "photo_id_front"
+        : doc.document_side === "back" ? "photo_id_back"
+        : "photo_proof_residence";
+      providedFields[fieldKey] = { type: "binary", description: "Uploaded document", status: "processing" };
+    }
+
+    const response: Sep12CustomerResponse = {
+      id: row.id,
+      status: sep12Status,
+      provided_fields: Object.keys(providedFields).length > 0 ? providedFields : undefined,
     };
 
-    // Add document fields for higher KYC levels
-    if (!kycLevel || kycLevel === KYCLevel.NONE || kycLevel === KYCLevel.BASIC) {
-      naturalPersonFields.id_type = {
-        type: "string",
-        description: "Type of ID document",
-        choices: ["passport", "drivers_license", "national_id", "residence_permit"],
-        optional: false,
-      };
-      naturalPersonFields.id_number = {
-        type: "string",
-        description: "ID document number",
-        optional: false,
-      };
-      naturalPersonFields.id_country_code = {
-        type: "string",
-        description: "Country that issued the ID",
-        optional: false,
-      };
-      naturalPersonFields.photo_id_front = {
-        type: "binary",
-        description: "Image of front of ID document",
-        optional: false,
-      };
-      naturalPersonFields.photo_id_back = {
-        type: "binary",
-        description: "Image of back of ID document",
-        optional: true,
-      };
+    if (sep12Status === Sep12CustomerStatus.NEEDS_INFO) {
+      response.fields = getRequiredFields(type, kycLevel);
+      response.message = "Additional information required for verification";
+    } else if (sep12Status === Sep12CustomerStatus.REJECTED) {
+      response.message = "Customer verification was rejected";
+    } else if (sep12Status === Sep12CustomerStatus.PROCESSING) {
+      response.message = "Customer information is being processed";
     }
 
-    // Organization fields
-    if (type === "organization") {
-      return {
-        organization_name: {
-          type: "string",
-          description: "Legal name of organization",
-          optional: false,
-        },
-        organization_registration_number: {
-          type: "string",
-          description: "Business registration number",
-          optional: false,
-        },
-        organization_registered_address: {
-          type: "string",
-          description: "Registered business address",
-          optional: false,
-        },
-        address_country_code: {
-          type: "string",
-          description: "ISO 3166-1 alpha-3 country code",
-          optional: false,
-        },
-      };
-    }
-
-    return naturalPersonFields;
+    return response;
   }
 
-  /**
-   * Get customer information
-   */
-  async getCustomer(
-    account?: string,
-    memo?: string,
-    memoType?: string,
-    type?: string
-  ): Promise<Sep12CustomerResponse> {
-    try {
-      // Find customer by Stellar account and memo
-      const customerQuery = `
-        SELECT u.id, u.kyc_level, ka.applicant_id, ka.verification_status
-        FROM users u
-        LEFT JOIN kyc_applicants ka ON u.id = ka.user_id
-        WHERE u.stellar_address = $1
-        ORDER BY ka.updated_at DESC
-        LIMIT 1
-      `;
-      
-      const result = await this.db.query(customerQuery, [account]);
-      
-      if (result.rows.length === 0) {
-        // Customer not found - return required fields
-        return {
-          id: "",
-          status: Sep12CustomerStatus.NEEDS_INFO,
-          fields: this.getRequiredFields(type),
-          message: "Customer information required",
-        };
-      }
+  async putCustomer(data: z.infer<typeof PutCustomerSchema>): Promise<Sep12CustomerResponse> {
+    const validated = PutCustomerSchema.parse(data);
+    const { account, type, first_name, last_name, email_address, mobile_number, birth_date,
+      address, address_country_code, state_or_province, city, postal_code,
+      id_type, id_country_code, id_number, photo_id_front, photo_id_back, photo_proof_residence,
+      organization_name, organization_registration_number, organization_registered_address,
+    } = validated;
 
-      const customer = result.rows[0];
-      const kycLevel = customer.kyc_level as KYCLevel;
-      const kycStatus = customer.verification_status as KYCStatus || KYCStatus.PENDING;
-      
-      const sep12Status = this.mapKYCStatusToSep12(kycStatus, kycLevel);
-      
-      // Get provided fields from KYC applicant
-      const providedFields: Record<string, Sep12ProvidedField> = {};
-      
-      if (customer.applicant_id) {
-        try {
-          const applicant = await this.kycService.getApplicant(customer.applicant_id);
-          
-          if (applicant.first_name) {
-            providedFields.first_name = {
-              type: "string",
-              description: "First name",
-            };
-          }
-          if (applicant.last_name) {
-            providedFields.last_name = {
-              type: "string",
-              description: "Last name",
-            };
-          }
-          if (applicant.email) {
-            providedFields.email_address = {
-              type: "string",
-              description: "Email address",
-            };
-          }
-          if (applicant.address) {
-            providedFields.address = {
-              type: "string",
-              description: "Street address",
-            };
-          }
-        } catch (error) {
-          console.error("Error fetching applicant:", error);
-        }
-      }
+    // Find or create user
+    let userId: string;
+    let applicantId: string | null = null;
 
-      const response: Sep12CustomerResponse = {
-        id: customer.id,
-        status: sep12Status,
-        provided_fields: providedFields,
-      };
+    const userResult = await this.db.query(
+      `SELECT u.id, ka.applicant_id
+       FROM users u
+       LEFT JOIN kyc_applicants ka ON u.id = ka.user_id
+       WHERE u.stellar_address = $1
+       ORDER BY ka.updated_at DESC NULLS LAST
+       LIMIT 1`,
+      [account],
+    );
 
-      // Add required fields if more info is needed
-      if (sep12Status === Sep12CustomerStatus.NEEDS_INFO) {
-        response.fields = this.getRequiredFields(type, kycLevel);
-        response.message = "Additional information required for verification";
-      }
-
-      if (sep12Status === Sep12CustomerStatus.REJECTED) {
-        response.message = "Customer verification was rejected";
-      }
-
-      if (sep12Status === Sep12CustomerStatus.PROCESSING) {
-        response.message = "Customer information is being processed";
-      }
-
-      return response;
-    } catch (error) {
-      console.error("Error getting customer:", error);
-      throw new Error(`Failed to get customer: ${error instanceof Error ? error.message : "Unknown error"}`);
+    if (userResult.rows.length > 0) {
+      userId = userResult.rows[0].id;
+      applicantId = userResult.rows[0].applicant_id ?? null;
+    } else {
+      const newUser = await this.db.query(
+        `INSERT INTO users (stellar_address, kyc_level, phone_number)
+         VALUES ($1, $2, $3) RETURNING id`,
+        [account, KYCLevel.NONE, mobile_number ?? ""],
+      );
+      userId = newUser.rows[0].id;
     }
-  }
 
-  /**
-   * Create or update customer information
-   */
-  async putCustomer(
-    data: z.infer<typeof PutCustomerSchema>
-  ): Promise<Sep12CustomerResponse> {
-    try {
-      const validatedData = PutCustomerSchema.parse(data);
-      
-      const {
-        account, memo, memo_type, type,
-        first_name, last_name, email_address, mobile_number, birth_date,
-        birth_place, birth_country, address, address_country_code,
-        state_or_province, city, postal_code, id_type, id_country_code,
-        id_issue_date, id_expiration_date, id_number, photo_id_front,
-        photo_id_back, photo_proof_residence, organization_name,
-        organization_registration_number, organization_registration_date,
-        organization_registered_address, tax_id, tax_id_name, occupation,
-        employer_name, employer_address,
-        ...customFields
-      } = validatedData;
-
-      // Find or create user by Stellar account
-      let userId: string;
-      let applicantId: string | null = null;
-      
-      if (account) {
-        const userQuery = `
-          SELECT u.id, ka.applicant_id
-          FROM users u
-          LEFT JOIN kyc_applicants ka ON u.id = ka.user_id
-          WHERE u.stellar_address = $1
-          ORDER BY ka.updated_at DESC
-          LIMIT 1
-        `;
-        
-        const userResult = await this.db.query(userQuery, [account]);
-        
-        if (userResult.rows.length > 0) {
-          userId = userResult.rows[0].id;
-          applicantId = userResult.rows[0].applicant_id;
-        } else {
-          // Create new user
-          const createUserQuery = `
-            INSERT INTO users (stellar_address, kyc_level, phone_number)
-            VALUES ($1, $2, $3)
-            RETURNING id
-          `;
-          
-          const newUserResult = await this.db.query(createUserQuery, [
-            account,
-            KYCLevel.NONE,
-            mobile_number || "pending",
-          ]);
-          
-          userId = newUserResult.rows[0].id;
-        }
-      } else {
-        throw new Error("account parameter is required");
-      }
-
-      // Create or update KYC applicant
-      const applicantData = {
-        first_name: first_name || "",
-        last_name: last_name || "",
+    // Create or fetch KYC applicant
+    if (!applicantId && (first_name || last_name)) {
+      const applicant = await this.kycService.createApplicant({
+        first_name: first_name ?? "",
+        last_name: last_name ?? "",
         email: email_address,
         dob: birth_date,
         phone_number: mobile_number,
-        address: address ? {
-          street: address,
-          town: city || "",
-          postcode: postal_code || "",
-          country: address_country_code || "USA",
-          state: state_or_province,
-        } : undefined,
-        custom_fields: Object.keys(customFields).length > 0 ? customFields : undefined,
-      };
-
-      let applicant;
-      
-      if (applicantId) {
-        // Update existing applicant
-        applicant = await this.kycService.getApplicant(applicantId);
-      } else {
-        // Create new applicant
-        applicant = await this.kycService.createApplicant(applicantData);
-        applicantId = applicant.id;
-        
-        // Link applicant to user
-        const linkQuery = `
-          INSERT INTO kyc_applicants (user_id, applicant_id, provider, verification_status, kyc_level)
-          VALUES ($1, $2, 'entrust', 'pending', 'none')
-          ON CONFLICT (user_id, applicant_id) DO UPDATE
-          SET updated_at = CURRENT_TIMESTAMP
-        `;
-        
-        await this.db.query(linkQuery, [userId, applicantId]);
-      }
-
-      // Save sensitive fields in users table in encrypted form
-      await this.userModel.updateSensitiveData(userId, {
-        firstName: first_name,
-        lastName: last_name,
-        address: address,
-        dateOfBirth: birth_date,
-        idNumber: id_number,
+        address: address ? { street: address, town: city ?? "", postcode: postal_code ?? "", country: address_country_code ?? "USA", state: state_or_province } : undefined,
       });
+      applicantId = applicant.id;
 
-      // Handle document uploads if provided
-      if (photo_id_front) {
-        const docType = this.mapIdTypeToDocumentType(id_type);
-        
-        await this.kycService.uploadDocument({
-          applicant_id: applicantId,
-          type: docType,
-          side: "front",
-          filename: `id_front_${Date.now()}.jpg`,
-          data: photo_id_front,
-        });
-      }
-
-      if (photo_id_back) {
-        const docType = this.mapIdTypeToDocumentType(id_type);
-        
-        await this.kycService.uploadDocument({
-          applicant_id: applicantId,
-          type: docType,
-          side: "back",
-          filename: `id_back_${Date.now()}.jpg`,
-          data: photo_id_back,
-        });
-      }
-
-      // Process dynamic custom fields/documents attached
-      for (const [key, value] of Object.entries(customFields)) {
-        if (typeof value === 'string' && value.length > 500) {
-          const docType = this.mapIdTypeToDocumentType(id_type);
-          await this.kycService.uploadDocument({
-            applicant_id: applicantId,
-            type: docType, // Or map to a generic "other" document type
-            side: "front",
-            filename: `${key}_${Date.now()}.png`,
-            data: value,
-          });
-        }
-      }
-
-      // Return customer status
-      return {
-        id: userId,
-        status: Sep12CustomerStatus.PROCESSING,
-        message: "Customer information received and is being processed",
-      };
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        throw new Error(`Validation error: ${error.message}`);
-      }
-      console.error("Error putting customer:", error);
-      throw new Error(`Failed to update customer: ${error instanceof Error ? error.message : "Unknown error"}`);
+      await this.db.query(
+        `INSERT INTO kyc_applicants (user_id, applicant_id, provider, verification_status, kyc_level)
+         VALUES ($1, $2, 'entrust', 'pending', 'none')
+         ON CONFLICT (user_id, applicant_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`,
+        [userId, applicantId],
+      );
     }
+
+    // Persist non-binary PII fields
+    await this.userModel.updateSensitiveData(userId, {
+      firstName:   first_name,
+      lastName:    last_name,
+      address:     address,
+      dateOfBirth: birth_date,
+      idNumber:    id_number,
+    });
+
+    // Generate presigned S3 PUT URLs for any declared binary fields
+    const presignedUploads: Partial<Record<BinaryField, { url: string; key: string; expires_in: number }>> = {};
+    const binaryIntents: Array<{ field: BinaryField; side: string }> = [
+      { field: "photo_id_front",        side: "front" },
+      { field: "photo_id_back",         side: "back" },
+      { field: "photo_proof_residence", side: "front" },
+    ];
+
+    for (const { field, side } of binaryIntents) {
+      if (validated[field] === "upload") {
+        const presigned = await getPresignedUploadUrl(userId, field);
+        presignedUploads[field] = presigned;
+
+        // Pre-register the document slot so status tracking works
+        await this.db.query(
+          `INSERT INTO kyc_documents
+             (user_id, applicant_id, document_type, document_side, s3_key, file_url, original_filename, file_size, mime_type)
+           VALUES ($1, $2, $3, $4, $5, '', $6, 0, 'image/jpeg')
+           ON CONFLICT DO NOTHING`,
+          [userId, applicantId ?? "", this.mapIdType(id_type ?? (field === "photo_proof_residence" ? "national_id" : id_type)), side, presigned.key, field],
+        );
+      }
+    }
+
+    return {
+      id: userId,
+      status: Sep12CustomerStatus.PROCESSING,
+      presigned_uploads: Object.keys(presignedUploads).length > 0
+        ? presignedUploads as Record<BinaryField, { url: string; key: string; expires_in: number }>
+        : undefined,
+      message: "Customer information received. Upload binary documents using the presigned URLs.",
+    };
   }
 
-  /**
-   * Delete customer information
-   */
+  /** Full GDPR delete — removes all customer data across every table */
   async deleteCustomer(account: string): Promise<void> {
+    const userResult = await this.db.query(
+      `SELECT id FROM users WHERE stellar_address = $1`,
+      [account],
+    );
+    if (userResult.rows.length === 0) return;
+
+    const userId: string = userResult.rows[0].id;
+
+    // 1. Delete S3 objects for this user
+    await this.deleteS3Documents(userId);
+
+    // 2. Cascade delete all PII-bearing rows (FK order)
+    await this.db.query(`DELETE FROM kyc_documents   WHERE user_id = $1`, [userId]);
+    await this.db.query(`DELETE FROM kyc_applicants  WHERE user_id = $1`, [userId]);
+    await this.db.query(
+      `UPDATE transactions
+       SET phone_number = NULL, stellar_address = NULL
+       WHERE user_id = $1`,
+      [userId],
+    );
+    await this.db.query(
+      `UPDATE users
+       SET first_name = NULL, last_name = NULL, email = NULL,
+           phone_number = NULL, date_of_birth = NULL, id_number = NULL,
+           address = NULL, stellar_address = NULL
+       WHERE id = $1`,
+      [userId],
+    );
+  }
+
+  private async deleteS3Documents(userId: string): Promise<void> {
+    if (!s3Config.bucket) return;
     try {
-      const deleteQuery = `
-        DELETE FROM kyc_applicants
-        WHERE user_id IN (
-          SELECT id FROM users WHERE stellar_address = $1
-        )
-      `;
-      
-      await this.db.query(deleteQuery, [account]);
-    } catch (error) {
-      console.error("Error deleting customer:", error);
-      throw new Error(`Failed to delete customer: ${error instanceof Error ? error.message : "Unknown error"}`);
+      const s3 = getS3Client();
+      const prefix = `kyc-documents/`;
+      // List objects belonging to this user (they're keyed with userId in path)
+      const listed = await s3.send(new ListObjectsV2Command({
+        Bucket: s3Config.bucket,
+        Prefix: `${prefix}`,
+      }));
+
+      const userKeys = (listed.Contents ?? [])
+        .filter(obj => obj.Key?.includes(`/${userId}/`))
+        .map(obj => ({ Key: obj.Key! }));
+
+      if (userKeys.length > 0) {
+        await s3.send(new DeleteObjectsCommand({
+          Bucket: s3Config.bucket,
+          Delete: { Objects: userKeys },
+        }));
+      }
+    } catch {
+      // S3 deletion is best-effort; DB purge still proceeds
     }
   }
 
-  /**
-   * Map SEP-12 ID type to internal document type
-   */
-  private mapIdTypeToDocumentType(idType?: string): DocumentType {
+  private mapIdType(idType?: string): string {
     switch (idType?.toLowerCase()) {
-      case "passport":
-        return DocumentType.PASSPORT;
-      case "drivers_license":
-      case "driving_license":
-        return DocumentType.DRIVING_LICENSE;
-      case "national_id":
-      case "national_identity_card":
-        return DocumentType.NATIONAL_IDENTITY_CARD;
-      case "residence_permit":
-        return DocumentType.RESIDENCE_PERMIT;
-      default:
-        return DocumentType.NATIONAL_IDENTITY_CARD;
+      case "passport":        return DocumentType.PASSPORT;
+      case "drivers_license": return DocumentType.DRIVING_LICENSE;
+      case "national_id":     return DocumentType.NATIONAL_IDENTITY_CARD;
+      case "residence_permit":return DocumentType.RESIDENCE_PERMIT;
+      default:                return DocumentType.NATIONAL_IDENTITY_CARD;
     }
   }
 }
@@ -594,89 +379,56 @@ export class Sep12Service {
 
 export const createSep12Router = (db: Pool): Router => {
   const router = Router();
-  const sep12Service = new Sep12Service(db);
-
-  // Rate limiter for SEP-12 endpoints
-  const sep12Limiter = sep12RateLimiter;
+  const service = new Sep12Service(db);
 
   /**
    * GET /customer
-   * * Retrieve customer information and KYC status
+   * Returns KYC status and field schema per SEP-12.
    */
-  router.get("/customer", sep12Limiter, async (req: Request, res: Response) => {
-    try {
-      const { account, memo, memo_type, type } = req.query;
-
-      if (!account) {
-        throw createError(ERROR_CODES.INVALID_INPUT, "account parameter is required", {
-          error: "account parameter is required",
-        });
-      }
-
-      const customer = await sep12Service.getCustomer(
-        account as string,
-        memo as string,
-        memo_type as string,
-        type as string
-      );
-
-      res.json(customer);
-    } catch (error: any) {
-      console.error("[SEP-12] Error getting customer:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, error.message || "Failed to get customer information", {
-        error: error.message || "Failed to get customer information",
+  router.get("/customer", sep12RateLimiter, async (req: Request, res: Response) => {
+    const { account, type } = req.query;
+    if (!account) {
+      throw createError(ERROR_CODES.INVALID_INPUT, "account parameter is required", {
+        error: "account parameter is required",
       });
     }
+    const customer = await service.getCustomer(account as string, type as string | undefined);
+    res.json(customer);
   });
 
   /**
    * PUT /customer
-   * * Create or update customer information
+   * Accepts SEP-12 fields. Binary fields declared as "upload" receive presigned S3 PUT URLs.
    */
-  router.put("/customer", sep12Limiter, upload.any(), async (req: Request, res: Response) => {
+  router.put("/customer", sep12RateLimiter, async (req: Request, res: Response) => {
     try {
-      const customerData = { ...req.body };
-      
-      // Support multipart upload: parse custom documents and map as base64 fields so KYC validation parses them
-      if (req.files && Array.isArray(req.files)) {
-        req.files.forEach((file: any) => {
-          customerData[file.fieldname] = file.buffer.toString("base64");
+      const customer = await service.putCustomer(req.body);
+      res.json(customer);
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        throw createError(ERROR_CODES.INVALID_INPUT, err.errors[0]?.message ?? "Validation error", {
+          error: err.errors[0]?.message ?? "Validation error",
         });
       }
-
-      const customer = await sep12Service.putCustomer(customerData);
-      res.json(customer);
-    } catch (error: any) {
-      console.error("[SEP-12] Error putting customer:", error);
-      throw createError(ERROR_CODES.INVALID_INPUT, error.message || "Failed to update customer information", {
-        error: error.message || "Failed to update customer information",
+      throw createError(ERROR_CODES.INVALID_INPUT, err.message ?? "Failed to update customer", {
+        error: err.message ?? "Failed to update customer",
       });
     }
   });
 
   /**
    * DELETE /customer/:account
-   * * Delete customer information (GDPR compliance)
+   * Fully purges all customer KYC data (GDPR right-to-erasure).
    */
-  router.delete("/customer/:account", sep12Limiter, async (req: Request, res: Response) => {
-    try {
-      const { account } = req.params;
-
-      if (!account) {
-        throw createError(ERROR_CODES.INVALID_INPUT, "account parameter is required", {
-          error: "account parameter is required",
-        });
-      }
-
-      await sep12Service.deleteCustomer(account);
-      
-      res.status(204).send();
-    } catch (error: any) {
-      console.error("[SEP-12] Error deleting customer:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, error.message || "Failed to delete customer information", {
-        error: error.message || "Failed to delete customer information",
+  router.delete("/customer/:account", sep12RateLimiter, async (req: Request, res: Response) => {
+    const { account } = req.params;
+    if (!account) {
+      throw createError(ERROR_CODES.INVALID_INPUT, "account parameter is required", {
+        error: "account parameter is required",
       });
     }
+    await service.deleteCustomer(account);
+    res.status(204).send();
   });
 
   return router;

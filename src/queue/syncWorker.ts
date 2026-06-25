@@ -1,6 +1,7 @@
 import { Worker, Job } from "bullmq";
 import { queueOptions } from "./config";
 import { SyncJobData, SyncJobResult, SYNC_QUEUE_NAME } from "./syncQueue";
+import { runWithJobSpan } from "./trace";
 import {
   AccountingService,
   RateLimitError,
@@ -18,6 +19,7 @@ export const accountingService = new AccountingService();
 export async function processSyncJob(
   job: Job<SyncJobData, SyncJobResult>,
 ): Promise<SyncJobResult> {
+  return runWithJobSpan(job.data, `bullmq.process ${SYNC_QUEUE_NAME}`, async () => {
   const { syncId, transactionId, platform, payload } = job.data;
 
   console.log(
@@ -66,6 +68,7 @@ export async function processSyncJob(
       throw error;
     }
   }
+  }); // end runWithJobSpan
 }
 
 // Instantiate the BullMQ Worker

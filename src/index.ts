@@ -1,7 +1,9 @@
+// Tracing must be initialized before any other imports so that
+// auto-instrumentation patches modules as they are first loaded.
+import "./tracer";
+
 // Initialize centralized configuration first
 import "./config/init";
-
-import "./tracer";
 import path from "path";
 import express, { NextFunction, Request, Response } from "express";
 import { IncomingMessage, Server } from "http";

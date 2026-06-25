@@ -1,16 +1,11 @@
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { resolveToBaseAddress } from "../stellar/muxed";
+import { validateCountries, UnsupportedCountryError } from "../services/countryService";
+import { ERROR_CODES } from "../constants/errorCodes";
 
-/**
- * Validate Stellar address format (G-address or M-address).
- * Both formats are accepted, but M-addresses must be valid muxed accounts.
- */
 function validateStellarAddress(address: string): boolean {
-  if (!address || typeof address !== "string") {
-    return false;
-  }
-  
+  if (!address || typeof address !== "string") return false;
   try {
     resolveToBaseAddress(address);
     return true;
@@ -18,6 +13,11 @@ function validateStellarAddress(address: string): boolean {
     return false;
   }
 }
+
+/** ISO 3166-1 alpha-2: exactly two uppercase letters */
+const countryCode = z
+  .string()
+  .regex(/^[A-Z]{2}$/, { message: "Country code must be ISO 3166-1 alpha-2 (e.g. CM, KE)" });
 
 const transactionSchema = z.object({
   amount: z.number().positive({ message: "Amount must be a positive number" }),
@@ -31,31 +31,38 @@ const transactionSchema = z.object({
     .string()
     .refine(validateStellarAddress, { message: "Invalid Stellar address format (must be valid G-address or M-address)" }),
   userId: z.string().nonempty({ message: "userId is required" }),
+  senderCountry: countryCode,
+  recipientCountry: countryCode,
 });
 
-export const validateTransaction = (
+export const validateTransaction = async (
   req: Request,
   res: Response,
   next: NextFunction,
 ) => {
-  try {
-    transactionSchema.parse(req.body);
-    next();
-  } catch (err: unknown) {
-    // Check if the error is actually a Zod validation error
-    if (err instanceof z.ZodError) {
-      console.log("Validation error:", err.issues);
-
-      return res.status(400).json({
-        error: "Validation failed",
-        details: err.issues,
-      });
-    }
-
-    // Fallback for non-Zod errors
-    console.error("Unexpected validation error:", err);
-    return res.status(500).json({
-      error: "An internal server error occurred during validation",
+  // 1. Schema validation
+  const parsed = transactionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: parsed.error.issues,
     });
   }
+
+  // 2. Country allowlist check
+  const { senderCountry, recipientCountry } = parsed.data;
+  try {
+    await validateCountries(senderCountry, recipientCountry);
+  } catch (err) {
+    if (err instanceof UnsupportedCountryError) {
+      return res.status(400).json({
+        error: err.message,
+        code: ERROR_CODES.ERR_UNSUPPORTED_COUNTRY,
+        country: err.countryCode,
+      });
+    }
+    return res.status(500).json({ error: "An internal server error occurred during validation" });
+  }
+
+  next();
 };

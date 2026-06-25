@@ -49,6 +49,7 @@ import { providerSettingsService } from "../services/providerSettingsService";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { setCountryStatus } from "../services/countryService";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -3196,6 +3197,32 @@ router.get(
       console.error("[Queue] Stats fetch failed:", error);
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
     }
+  },
+);
+
+/**
+ * PATCH /admin/countries/:code/status
+ * Enable or disable a country for payment processing.
+ * Body: { "enabled": true | false }
+ */
+router.patch(
+  "/countries/:code/status",
+  async (req: Request, res: Response) => {
+    const code = req.params.code?.toUpperCase();
+    const { enabled } = req.body as { enabled?: unknown };
+
+    if (!/^[A-Z]{2}$/.test(code)) {
+      return res.status(400).json({ error: "Country code must be ISO 3166-1 alpha-2" });
+    }
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "'enabled' must be a boolean" });
+    }
+
+    const updated = await setCountryStatus(code, enabled);
+    if (!updated) {
+      return res.status(404).json({ error: `Country '${code}' not found` });
+    }
+    return res.json(updated);
   },
 );
 

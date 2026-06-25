@@ -8,6 +8,7 @@ import { IncomingMessage, Server } from "http";
 import compression from "compression";
 import dotenv from "dotenv";
 import helmet from "helmet";
+import { applySecurityMiddleware } from "./config/express";
 import * as Sentry from "@sentry/node";
 import { register } from "prom-client";
 import spdy from "spdy";
@@ -123,10 +124,13 @@ if (process.env.SENTRY_DSN) {
 
 // import rateLimitMiddleware from "./middleware/rateLimit"; // TODO: Commented out because the module has no default export and I don't know each middleware was .
 
+// Security headers: helmet (HSTS, CSP, X-Content-Type-Options, X-Frame-Options,
+// Referrer-Policy, hidePoweredBy) + CORS + Permissions-Policy — must be first.
+applySecurityMiddleware(app);
+
 app.use(sentryBreadcrumbMiddleware);
 
 app.use(metricsMiddleware);
-app.use(helmet());
 
 // Compression middleware
 if (process.env.COMPRESSION_ENABLED !== "false") {

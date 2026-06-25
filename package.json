@@ -32,6 +32,7 @@
     "migrate:create": "tsx src/scripts/migrate.ts create",
     "migrate:status": "tsx src/scripts/migrate.ts status",
     "seed": "tsx src/scripts/seed.ts",
+    "db:seed": "tsx src/scripts/seed.ts",
     "reconcile:ledger": "tsx src/scripts/reconcile-ledger.ts",
     "backup:create": "tsx src/scripts/backup.ts",
     "backup:verify": "tsx src/scripts/verify-backups.ts",

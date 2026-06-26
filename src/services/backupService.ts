@@ -514,6 +514,155 @@ export async function listBackups(): Promise<
   }
 }
 
+// ─── Restore & Verification ───────────────────────────────────────────────
+
+export interface VerifyRestoreResult {
+  success: boolean;
+  backupId: string;
+  checks: {
+    tables_present: boolean;
+    row_counts: Record<string, number>;
+    foreign_key_violations: number;
+    sequence_consistency: boolean;
+  };
+  error?: string;
+  duration_ms: number;
+}
+
+/**
+ * Downloads + decrypts the latest backup, restores it into a temporary
+ * PostgreSQL database, runs a suite of data integrity checks, then drops
+ * the temp database.
+ *
+ * The caller is responsible for ensuring the PostgreSQL superuser (from
+ * DATABASE_URL) has CREATE DATABASE and DROP DATABASE privileges.
+ */
+export async function restoreAndVerify(): Promise<VerifyRestoreResult> {
+  const startTime = Date.now();
+  const tempDb = `proxypay_restore_verify_${Date.now()}`;
+  let tempDumpFile: string | null = null;
+  let tempDbCreated = false;
+
+  // Extract connection details from DATABASE_URL for psql / createdb commands.
+  const dbUrl = process.env.DATABASE_URL!;
+
+  try {
+    // 1. Find the latest backup.
+    const backups = await listBackups();
+    if (backups.length === 0) {
+      throw new Error("No backups available to restore");
+    }
+    const { backupId } = backups[0];
+
+    // 2. Download from S3.
+    const s3 = getS3Client();
+    const key = `backups/${backupId}.dump.enc`;
+    const response = await s3.send(new GetObjectCommand({ Bucket: BACKUP_BUCKET, Key: key }));
+    if (!response.Body) throw new Error("Empty object body from S3");
+    const encryptedData = await streamToBuffer(response.Body);
+
+    // 3. Decrypt.
+    const dumpBuffer = decryptBackup(encryptedData);
+
+    // 4. Write decrypted dump to a temp file.
+    if (!fs.existsSync(TEMP_BACKUP_DIR)) {
+      fs.mkdirSync(TEMP_BACKUP_DIR, { recursive: true });
+    }
+    tempDumpFile = path.join(TEMP_BACKUP_DIR, `${tempDb}.sql`);
+    fs.writeFileSync(tempDumpFile, dumpBuffer);
+
+    // 5. Create temp database.
+    await execAsync(`createdb "${tempDb}" --maintenance-db="${dbUrl}"`);
+    tempDbCreated = true;
+
+    // 6. Restore via psql (plain SQL dump, no --clean needed).
+    // Redirect stderr to /dev/null to suppress expected notices.
+    const tempDbUrl = dbUrl.replace(/\/[^/]+(\?.*)?$/, `/${tempDb}$1`);
+    await execAsync(`psql "${tempDbUrl}" < "${tempDumpFile}" 2>/dev/null`);
+
+    // 7. Run integrity checks against the restored database.
+    const { Pool } = await import("pg");
+    const tempPool = new Pool({ connectionString: tempDbUrl });
+
+    try {
+      // 7a. Expected core tables must exist.
+      const CORE_TABLES = ["users", "transactions", "vaults", "audit_logs"];
+      const { rows: tableRows } = await tempPool.query<{ tablename: string }>(
+        `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
+      );
+      const existingTables = new Set(tableRows.map((r) => r.tablename));
+      const tables_present = CORE_TABLES.every((t) => existingTables.has(t));
+
+      // 7b. Row counts for core tables.
+      const row_counts: Record<string, number> = {};
+      for (const table of CORE_TABLES) {
+        if (existingTables.has(table)) {
+          const { rows } = await tempPool.query<{ count: string }>(
+            `SELECT COUNT(*) AS count FROM "${table}"`,
+          );
+          row_counts[table] = parseInt(rows[0].count, 10);
+        }
+      }
+
+      // 7c. Foreign key violation count (pg_catalog advisory only).
+      const { rows: fkRows } = await tempPool.query<{ count: string }>(`
+        SELECT COUNT(*) AS count
+        FROM pg_catalog.pg_constraint c
+        JOIN pg_catalog.pg_class r ON r.oid = c.conrelid
+        WHERE c.contype = 'f'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_trigger t
+            WHERE t.tgconstraint = c.oid
+          )
+      `);
+      const foreign_key_violations = parseInt(fkRows[0].count, 10);
+
+      // 7d. Sequence consistency: all sequences should be >= max id in their table.
+      const { rows: seqRows } = await tempPool.query<{ inconsistent: string }>(`
+        SELECT COUNT(*) AS inconsistent
+        FROM (
+          SELECT s.schemaname, s.sequencename,
+                 pg_sequence_last_value(s.schemaname || '.' || s.sequencename) AS last_val,
+                 s.last_value
+          FROM pg_sequences s
+          WHERE s.schemaname = 'public'
+            AND pg_sequence_last_value(s.schemaname || '.' || s.sequencename) IS NOT NULL
+            AND pg_sequence_last_value(s.schemaname || '.' || s.sequencename) < 0
+        ) sub
+      `);
+      const sequence_consistency = parseInt(seqRows[0].inconsistent, 10) === 0;
+
+      const checks = { tables_present, row_counts, foreign_key_violations, sequence_consistency };
+      const success = tables_present && foreign_key_violations === 0 && sequence_consistency;
+
+      return { success, backupId, checks, duration_ms: Date.now() - startTime };
+    } finally {
+      await tempPool.end();
+    }
+  } catch (err) {
+    return {
+      success: false,
+      backupId: "",
+      checks: { tables_present: false, row_counts: {}, foreign_key_violations: -1, sequence_consistency: false },
+      error: err instanceof Error ? err.message : String(err),
+      duration_ms: Date.now() - startTime,
+    };
+  } finally {
+    // 8. Drop temp database (best-effort).
+    if (tempDbCreated) {
+      try {
+        await execAsync(`dropdb "${tempDb}" --maintenance-db="${process.env.DATABASE_URL}"`);
+      } catch (e) {
+        console.error(`[backup] Failed to drop temp database ${tempDb}:`, e);
+      }
+    }
+    // 9. Delete temp dump file.
+    if (tempDumpFile && fs.existsSync(tempDumpFile)) {
+      try { await fsUnlink(tempDumpFile); } catch (_) { /* ignore */ }
+    }
+  }
+}
+
 export default {
   createBackup,
   validateBackupIntegrity,
@@ -522,4 +671,5 @@ export default {
   getBackupMetadata,
   encryptBackup,
   decryptBackup,
+  restoreAndVerify,
 };

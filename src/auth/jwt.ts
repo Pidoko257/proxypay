@@ -145,6 +145,32 @@ export async function verifyRefreshToken(token: string): Promise<RefreshTokenPay
   return decoded;
 }
 
+export interface TempTokenPayload {
+  userId: string;
+  purpose: "2fa";
+  iat?: number;
+  exp?: number;
+}
+
+/**
+ * Issues a short-lived (5 min) temporary token after password verification,
+ * exchangeable for a full JWT only after successful TOTP verification.
+ */
+export function generateTempToken(userId: string): string {
+  return jwt.sign({ userId, purpose: "2fa" } as TempTokenPayload, getJwtSecret(), {
+    expiresIn: "5m",
+  });
+}
+
+/**
+ * Verifies a temp token and asserts its purpose is "2fa".
+ */
+export function verifyTempToken(token: string): TempTokenPayload {
+  const decoded = jwt.verify(token, getJwtSecret()) as TempTokenPayload;
+  if (decoded.purpose !== "2fa") throw new Error("Invalid token purpose");
+  return decoded;
+}
+
 /**
  * Checks if a token is expired without throwing an error
  * @param token - JWT token to check

@@ -146,8 +146,8 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "database-backup-verify",
-    // Daily at 3:00 AM
-    schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
+    // Weekly on Sunday at 4:00 AM — full restore + integrity check
+    schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 4 * * 0",
     handler: runDatabaseBackupVerifyJob,
   },
 ];

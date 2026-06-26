@@ -397,6 +397,36 @@ export async function getUserPermissions(userId: string): Promise<string[]> {
   return result.rows.map((row) => row.permission_name);
 }
 
+export interface TwoFAFields {
+  two_factor_secret?: string | null;
+  two_factor_enabled?: boolean;
+  two_factor_verified?: boolean;
+  backup_codes?: string[] | null;
+}
+
+/**
+ * Persist TOTP-related fields for a user.
+ */
+export async function update2FAFields(userId: string, fields: TwoFAFields): Promise<void> {
+  const { encrypt: enc } = await import("../utils/encryption");
+  await pool.query(
+    `UPDATE users
+     SET two_factor_secret  = COALESCE($1, two_factor_secret),
+         two_factor_enabled  = COALESCE($2, two_factor_enabled),
+         two_factor_verified = COALESCE($3, two_factor_verified),
+         backup_codes        = COALESCE($4, backup_codes),
+         updated_at          = CURRENT_TIMESTAMP
+     WHERE id = $5`,
+    [
+      fields.two_factor_secret !== undefined ? enc(fields.two_factor_secret) : null,
+      fields.two_factor_enabled ?? null,
+      fields.two_factor_verified ?? null,
+      fields.backup_codes !== undefined ? JSON.stringify(fields.backup_codes) : null,
+      userId,
+    ],
+  );
+}
+
 export async function invalidateUserOnPasswordChange(userId: string): Promise<void> {
   const userModel = new UserModel();
   

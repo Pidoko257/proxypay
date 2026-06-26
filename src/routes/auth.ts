@@ -6,6 +6,8 @@ import {
   JWTPayload,
   generateRefreshToken,
   verifyRefreshToken,
+  generateTempToken,
+  verifyTempToken,
 } from "../auth/jwt";
 import { createSSORouter } from "../auth/sso";
 import { createOIDCRouter, initializeOIDCProviders } from "../auth/oidc";
@@ -16,11 +18,13 @@ import {
   authenticateUser,
   createUser,
   getUserPermissions,
+  getUserById,
   getUserByPhoneNumber,
   User,
 } from "../services/userService";
 import { getLockoutStatus, recordFailedAttempt } from "../auth/lockout";
 import { verifyTOTPToken, verifyBackupCode, is2FAEnabled } from "../auth/2fa";
+import { setupTOTP, verifyTOTPSetup, verifyTOTPLogin } from "../services/twoFactorService";
 import { evaluateAdminLoginAnomaly } from "../services/loginAnomaly";
 import { validateRequest } from "../middleware/validation";
 import { hashPassword } from "../utils/password";
@@ -223,6 +227,12 @@ authRoutes.post(
         email: user.phone_number,
         role: user.role_name || "user",
       };
+
+      // ── 2FA gate ──────────────────────────────────────────────────────────────
+      if (is2FAEnabled(user)) {
+        const tempToken = generateTempToken(user.id);
+        return res.json({ token: tempToken, requires2fa: true });
+      }
 
       const token = generateToken(payload);
       const refreshToken = await generateRefreshToken(user.id);
@@ -456,3 +466,119 @@ authRoutes.get(
     }
   },
 );
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TOTP 2FA routes
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/auth/2fa/setup
+ *
+ * Generates a TOTP secret for the authenticated user.
+ * Returns the otpauth:// URI (for QR code rendering) and one-time backup codes.
+ * Requires a full JWT (user must be logged in before enabling 2FA).
+ */
+authRoutes.post(
+  "/2fa/setup",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const { userId } = req.jwtUser as JWTPayload;
+    try {
+      const result = await setupTOTP(userId);
+      res.json({ otpauthUri: result.otpauthUri, backupCodes: result.backupCodes });
+    } catch (error) {
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        error instanceof Error ? error.message : "2FA setup failed",
+        { error: "2FA setup failed" },
+      );
+    }
+  },
+);
+
+/**
+ * POST /api/auth/2fa/verify-setup
+ *
+ * Confirms 2FA enrollment by validating the first TOTP code the user provides.
+ * Must be called while the user has a valid full JWT session.
+ */
+authRoutes.post(
+  "/2fa/verify-setup",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const { userId } = req.jwtUser as JWTPayload;
+    const { token } = req.body as { token?: string };
+
+    if (!token) {
+      throw createError(ERROR_CODES.MISSING_FIELD, "TOTP token is required", {
+        error: "Missing token",
+      });
+    }
+
+    try {
+      await verifyTOTPSetup(userId, token);
+      res.json({ message: "2FA enabled successfully" });
+    } catch (error) {
+      throw createError(
+        ERROR_CODES.UNAUTHORIZED,
+        error instanceof Error ? error.message : "Invalid TOTP token",
+        { error: "2FA verification failed" },
+      );
+    }
+  },
+);
+
+/**
+ * POST /api/auth/2fa/verify
+ *
+ * Accepts a TOTP code or backup code plus the temporary token issued after
+ * password verification.  On success, issues a full JWT + refresh token.
+ */
+authRoutes.post("/2fa/verify", async (req: Request, res: Response) => {
+  const { tempToken, code } = req.body as { tempToken?: string; code?: string };
+
+  if (!tempToken || !code) {
+    throw createError(
+      ERROR_CODES.MISSING_FIELD,
+      "tempToken and code are required",
+      { error: "Missing fields" },
+    );
+  }
+
+  let userId: string;
+  try {
+    ({ userId } = verifyTempToken(tempToken));
+  } catch {
+    throw createError(ERROR_CODES.UNAUTHORIZED, "Invalid or expired temp token", {
+      error: "Temp token invalid",
+    });
+  }
+
+  try {
+    await verifyTOTPLogin(userId, code);
+  } catch (error) {
+    throw createError(
+      ERROR_CODES.UNAUTHORIZED,
+      error instanceof Error ? error.message : "Invalid 2FA code",
+      { error: "2FA verification failed" },
+    );
+  }
+
+  const user = await getUserById(userId);
+  const payload = {
+    userId,
+    email: user?.phone_number ?? "",
+    role: user?.role_name ?? "user",
+  };
+
+  const token = generateToken(payload);
+  const refreshToken = await generateRefreshToken(userId);
+  const permissions = await getUserPermissions(userId);
+
+  res.json({
+    message: "Login successful",
+    token,
+    refreshToken,
+    user: { userId, email: payload.email, role: payload.role, permissions },
+  });
+});

@@ -276,6 +276,80 @@ export class DisputeModel {
     };
   }
 
+  /** Find all disputes for a transaction (any status). */
+  async findByTransactionId(transactionId: string): Promise<Dispute[]> {
+    const result = await queryRead<Dispute>(
+      `SELECT
+         id,
+         transaction_id  AS "transactionId",
+         reason,
+         status,
+         assigned_to     AS "assignedTo",
+         resolution,
+         reported_by     AS "reportedBy",
+         priority,
+         category,
+         sla_due_date    AS "slaDueDate",
+         sla_warning_sent AS "slaWarningSent",
+         internal_notes  AS "internalNotes",
+         created_at      AS "createdAt",
+         updated_at      AS "updatedAt"
+       FROM disputes
+       WHERE transaction_id = $1
+       ORDER BY created_at DESC`,
+      [transactionId],
+    );
+    return result.rows.map((row) => ({
+      ...row,
+      reason: decrypt(row.reason) || "",
+      resolution: decrypt(row.resolution) ?? null,
+    }));
+  }
+
+  /** List disputes with optional status filter and pagination. */
+  async findAll(opts: { status?: DisputeStatus; limit?: number; offset?: number } = {}): Promise<Dispute[]> {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    let idx = 1;
+
+    if (opts.status) {
+      conditions.push(`status = $${idx++}`);
+      params.push(opts.status);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    params.push(opts.limit ?? 20);
+    params.push(opts.offset ?? 0);
+
+    const result = await queryRead<Dispute>(
+      `SELECT
+         id,
+         transaction_id  AS "transactionId",
+         reason,
+         status,
+         assigned_to     AS "assignedTo",
+         resolution,
+         reported_by     AS "reportedBy",
+         priority,
+         category,
+         sla_due_date    AS "slaDueDate",
+         sla_warning_sent AS "slaWarningSent",
+         internal_notes  AS "internalNotes",
+         created_at      AS "createdAt",
+         updated_at      AS "updatedAt"
+       FROM disputes
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      params,
+    );
+    return result.rows.map((row) => ({
+      ...row,
+      reason: decrypt(row.reason) || "",
+      resolution: decrypt(row.resolution) ?? null,
+    }));
+  }
+
   /** Find active (open/investigating) dispute for a transaction. */
   async findActiveByTransactionId(
     transactionId: string,

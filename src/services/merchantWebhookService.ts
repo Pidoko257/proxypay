@@ -5,6 +5,7 @@ import {
   WebhookDeliveryLog,
 } from "../models/merchantWebhook";
 import { SAMPLE_WEBHOOK_PAYLOAD } from "../routes/webhooks";
+import { addWebhookDeliveryJob } from "../queue/webhookDeliveryQueue";
 
 const model = new MerchantWebhookModel();
 
@@ -132,21 +133,14 @@ export class MerchantWebhookService {
     const webhooks = await model.findByUserId(userId);
     const active = webhooks.filter((w) => w.isActive && w.events.includes(eventType));
 
-    await Promise.allSettled(
-      active.map(async (webhook) => {
-        const result = await deliver(webhook.url, webhook.secret, payload, this.fetchImpl);
-        await model.insertDeliveryLog({
+    await Promise.all(
+      active.map((webhook) =>
+        addWebhookDeliveryJob({
           webhookId: webhook.id,
           eventType,
           payload,
-          status: result.status,
-          httpStatus: result.httpStatus,
-          responseBody: result.responseBody,
-          errorMessage: result.errorMessage,
-          durationMs: result.durationMs,
-          isTest: false,
-        });
-      }),
+        }),
+      ),
     );
   }
 }

@@ -27,6 +27,21 @@ export interface WebhookDeliveryLog {
   createdAt: Date;
 }
 
+export interface WebhookDeliveryAttempt {
+  id: string;
+  webhookId: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+  status: "delivered" | "failed";
+  httpStatus?: number;
+  responseBody?: string;
+  errorMessage?: string;
+  durationMs?: number;
+  attemptNumber: number;
+  jobId?: string;
+  createdAt: Date;
+}
+
 export interface CreateWebhookInput {
   userId: string;
   url: string;
@@ -86,6 +101,23 @@ function mapLogRow(row: any): WebhookDeliveryLog {
     errorMessage: row.error_message ?? undefined,
     durationMs: row.duration_ms ?? undefined,
     isTest: row.is_test,
+    createdAt: new Date(row.created_at),
+  };
+}
+
+function mapAttemptRow(row: any): WebhookDeliveryAttempt {
+  return {
+    id: row.id,
+    webhookId: row.webhook_id,
+    eventType: row.event_type,
+    payload: row.payload,
+    status: row.status,
+    httpStatus: row.http_status ?? undefined,
+    responseBody: row.response_body ?? undefined,
+    errorMessage: row.error_message ?? undefined,
+    durationMs: row.duration_ms ?? undefined,
+    attemptNumber: row.attempt_number,
+    jobId: row.job_id ?? undefined,
     createdAt: new Date(row.created_at),
   };
 }
@@ -220,5 +252,29 @@ export class MerchantWebhookModel {
       logs: logsRes.rows.map(mapLogRow),
       total: parseInt(countRes.rows[0].count, 10),
     };
+  }
+
+  async insertDeliveryAttempt(
+    attempt: Omit<WebhookDeliveryAttempt, "id" | "createdAt">,
+  ): Promise<WebhookDeliveryAttempt> {
+    const res = await queryWrite(
+      `INSERT INTO webhook_delivery_attempts
+         (webhook_id, event_type, payload, status, http_status, response_body, error_message, duration_ms, attempt_number, job_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *`,
+      [
+        attempt.webhookId,
+        attempt.eventType,
+        JSON.stringify(attempt.payload),
+        attempt.status,
+        attempt.httpStatus ?? null,
+        attempt.responseBody ?? null,
+        attempt.errorMessage ?? null,
+        attempt.durationMs ?? null,
+        attempt.attemptNumber,
+        attempt.jobId ?? null,
+      ],
+    );
+    return mapAttemptRow(res.rows[0]);
   }
 }

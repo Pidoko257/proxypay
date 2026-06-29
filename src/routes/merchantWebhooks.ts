@@ -26,6 +26,17 @@ const webhookService = new MerchantWebhookService();
 // All routes require authentication
 router.use(requireAuth);
 
+// ── Available topics ───────────────────────────────────────────────────────
+
+/**
+ * GET /api/merchant/webhooks/topics
+ * Returns all supported event types and wildcard topics for topic filtering.
+ */
+router.get("/topics", (_req: Request, res: Response) => {
+  const topics = webhookService.listTopics();
+  return res.json(topics);
+});
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function getUserId(req: Request): string | null {

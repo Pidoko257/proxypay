@@ -7,7 +7,7 @@ import { getNetworkPassphrase } from "../config/stellar";
 // ── Validation Schema ────────────────────────────────────────────────────────
 
 const federationQuerySchema = z.object({
-  q: z.string().min(1, "q is required"),
+  q: z.string({ required_error: "q is required" }).min(1, "q is required"),
   type: z.enum(["name", "id", "txid", "forward"], {
     message: "type must be one of: name, id, txid, forward",
   }),
@@ -36,6 +36,9 @@ export class FederationService {
     if (!parsed) return null;
 
     const domain = (process.env.STELLAR_FEDERATION_DOMAIN || "proxypay.com").toLowerCase().trim();
+
+    // Only serve lookups for our own domain
+    if (parsed.domain.toLowerCase().trim() !== domain) {
       return null;
     }
 
@@ -127,7 +130,13 @@ export function createFederationRouter(db: Pool): Router {
   router.get("/", async (req: Request, res: Response) => {
     const parsed = federationQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      return res.status(400).json({ detail: parsed.error.issues[0].message });
+      // Provide a friendly message for the most common validation errors
+      const firstIssue = parsed.error.issues[0];
+      let message = firstIssue.message;
+      if (firstIssue.path[0] === "q") {
+        message = "q is required";
+      }
+      return res.status(400).json({ detail: message });
     }
 
     const { q, type } = parsed.data;

@@ -104,9 +104,19 @@ router.post("/webhook", async (req: RawBodyRequest, res: Response) => {
     // Fall back to memo-based lookup if no match by hash
     if (transactions.length === 0 && payload.memo) {
       const memoValue = parseMemoValue(payload.memo);
-      const tx = await transactionModel.findByReferenceNumber(memoValue);
-      transactions = tx ? [tx] : [];
 
+      // For text memos, try reference number lookup first (it's the primary key)
+      if (payload.memo.type === "text") {
+        const byRef = await transactionModel.findByReferenceNumber(memoValue);
+        // findByReferenceNumber may return an array or a single transaction
+        if (Array.isArray(byRef)) {
+          transactions = byRef;
+        } else if (byRef) {
+          transactions = [byRef];
+        }
+      }
+
+      // If still no match, fall back to metadata lookup (covers id/hash memo types)
       if (transactions.length === 0) {
         transactions = await transactionModel.findByMetadata({
           memo: memoValue,
@@ -141,7 +151,6 @@ router.post("/webhook", async (req: RawBodyRequest, res: Response) => {
 
       await transactionModel.patchMetadata(transaction.id, {
         stellar_ledger: payload.ledger,
-        stellar_hash: payload.transaction_hash,
         webhook_processed_at: new Date().toISOString(),
       });
 

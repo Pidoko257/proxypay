@@ -43,22 +43,61 @@ export interface UpdateWebhookInput {
   isActive?: boolean;
 }
 
-const ALLOWED_EVENTS = new Set([
+/**
+ * All supported topic / event names. Webhooks can subscribe to individual
+ * events or use wildcard topics like "transaction.*" to receive all events
+ * in that namespace.
+ */
+export const ALLOWED_EVENTS = new Set([
   "transaction.completed",
   "transaction.failed",
   "transaction.pending",
   "transaction.cancelled",
 ]);
 
-const MAX_WEBHOOKS_PER_USER = 10;
+/** All wildcard topic prefixes and their matching events. */
+export const WILDCARD_TOPICS: Record<string, string[]> = {
+  "transaction.*": [
+    "transaction.completed",
+    "transaction.failed",
+    "transaction.pending",
+    "transaction.cancelled",
+  ],
+};
 
+/**
+ * Return true when a webhook's subscribed topics include the given eventType,
+ * including wildcard resolution (e.g. "transaction.*" matches all transaction events).
+ */
+export function webhookMatchesTopic(
+  subscribedTopics: string[],
+  eventType: string,
+): boolean {
+  for (const topic of subscribedTopics) {
+    // Exact match
+    if (topic === eventType) return true;
+    // Wildcard match: "transaction.*" ➜ any "transaction.X"
+    if (topic.endsWith(".*")) {
+      const prefix = topic.slice(0, -2);
+      if (eventType.startsWith(`${prefix}.`)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Validate that every entry in the events array is either a known event name
+ * or a registered wildcard topic.
+ */
 function validateEvents(events: string[]): void {
   for (const e of events) {
-    if (!ALLOWED_EVENTS.has(e)) {
+    if (!ALLOWED_EVENTS.has(e) && !Object.prototype.hasOwnProperty.call(WILDCARD_TOPICS, e)) {
       throw new Error(`Unknown event type: "${e}"`);
     }
   }
 }
+
+const MAX_WEBHOOKS_PER_USER = 10;
 
 function mapRow(row: any): MerchantWebhook {
   return {
@@ -91,6 +130,25 @@ function mapLogRow(row: any): WebhookDeliveryLog {
 }
 
 export class MerchantWebhookModel {
+  /** Return all known event types and wildcard topics. */
+  listAvailableTopics(): {
+    events: string[];
+    wildcards: string[];
+    description: Record<string, string>;
+  } {
+    return {
+      events: Array.from(ALLOWED_EVENTS),
+      wildcards: Object.keys(WILDCARD_TOPICS),
+      description: {
+        "transaction.completed": "Fired when a transaction reaches the completed state",
+        "transaction.failed":    "Fired when a transaction reaches the failed state",
+        "transaction.pending":   "Fired when a transaction is created / enters pending state",
+        "transaction.cancelled": "Fired when a transaction is cancelled",
+        "transaction.*":         "Wildcard — subscribes to all transaction.* events",
+      },
+    };
+  }
+
   async create(input: CreateWebhookInput): Promise<MerchantWebhook> {
     const events = input.events ?? ["transaction.completed", "transaction.failed"];
     validateEvents(events);
@@ -130,6 +188,20 @@ export class MerchantWebhookModel {
       [userId],
     );
     return res.rows.map(mapRow);
+  }
+
+  /**
+   * Find all active webhooks for a user whose event subscriptions match the
+   * given eventType (including wildcard topic resolution).
+   */
+  async findActiveByUserIdAndTopic(
+    userId: string,
+    eventType: string,
+  ): Promise<MerchantWebhook[]> {
+    const webhooks = await this.findByUserId(userId);
+    return webhooks.filter(
+      (w) => w.isActive && webhookMatchesTopic(w.events, eventType),
+    );
   }
 
   async update(id: string, userId: string, input: UpdateWebhookInput): Promise<MerchantWebhook | null> {
@@ -221,4 +293,7 @@ export class MerchantWebhookModel {
       total: parseInt(countRes.rows[0].count, 10),
     };
   }
+
+  /** Alias kept for backwards compatibility. */
+  readonly validateEvents = validateEvents;
 }

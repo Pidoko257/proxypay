@@ -88,6 +88,14 @@ export class MerchantWebhookService {
   constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
   /**
+   * Return the list of available event topics, including wildcard topics.
+   * Useful for the UI and documentation.
+   */
+  listTopics() {
+    return model.listAvailableTopics();
+  }
+
+  /**
    * Send a test delivery using the canonical sample payload.
    * Records the attempt in webhook_delivery_logs with is_test=true.
    */
@@ -121,7 +129,9 @@ export class MerchantWebhookService {
   }
 
   /**
-   * Deliver a real event to all active webhooks for a user that subscribe to the event.
+   * Deliver a real event to all active webhooks for a user whose topic
+   * subscriptions match the given eventType (including wildcard matching).
+   *
    * Called by the transaction worker after status changes.
    */
   async dispatchEvent(
@@ -129,11 +139,11 @@ export class MerchantWebhookService {
     eventType: string,
     payload: Record<string, unknown>,
   ): Promise<void> {
-    const webhooks = await model.findByUserId(userId);
-    const active = webhooks.filter((w) => w.isActive && w.events.includes(eventType));
+    // Use the topic-aware query so wildcard subscriptions are resolved correctly
+    const matchingWebhooks = await model.findActiveByUserIdAndTopic(userId, eventType);
 
     await Promise.allSettled(
-      active.map(async (webhook) => {
+      matchingWebhooks.map(async (webhook) => {
         const result = await deliver(webhook.url, webhook.secret, payload, this.fetchImpl);
         await model.insertDeliveryLog({
           webhookId: webhook.id,

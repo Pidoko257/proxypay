@@ -307,7 +307,14 @@ accountMergeWorker.on("failed", (job, error) => {
   );
 
   if (job) {
-    capturePersistentFailure(job).catch((err) =>
+    capturePersistentFailure({
+      originalJobId: job.id,
+      queueName: ACCOUNT_MERGE_QUEUE_NAME,
+      jobName: job.name,
+      jobData: job.data as unknown as Record<string, unknown>,
+      failureReason: error.message,
+      attemptsMade: job.attemptsMade,
+    }).catch((err) =>
       console.error("[DLQ] Error capturing failure:", err),
     );
   }

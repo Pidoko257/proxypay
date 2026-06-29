@@ -134,7 +134,10 @@ router.post("/", async (req: Request, res: Response) => {
   const webhookSecret = process.env.WEBHOOK_SECRET;
   if (!webhookSecret) {
     console.error("[webhook] WEBHOOK_SECRET not configured");
-    return res.status(500).json({ error: "Webhook processing not configured" });
+    return res.status(500).json({
+      error: "Webhook processing not configured",
+      setup_url: `${req.protocol}://${req.get("host")}/api/webhooks/schema`,
+    });
   }
   const signature = req.headers["x-webhook-signature"] as string | undefined;
   const rawPayload = JSON.stringify(req.body);

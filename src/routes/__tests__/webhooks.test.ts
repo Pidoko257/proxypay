@@ -1,5 +1,28 @@
 import request from "supertest";
 import express from "express";
+
+// ─── Mock TransactionModel before importing the router ───────────────────────
+const mockFindById = jest.fn();
+const mockUpdateStatus = jest.fn();
+
+jest.mock("../../models/transaction", () => ({
+  TransactionModel: jest.fn().mockImplementation(() => ({
+    findById: mockFindById,
+    updateStatus: mockUpdateStatus,
+  })),
+  TransactionStatus: {
+    Pending: "pending",
+    Completed: "completed",
+    Failed: "failed",
+    Cancelled: "cancelled",
+  },
+}));
+
+// ─── Mock ingestRateLimiter so Redis is not required ─────────────────────────
+jest.mock("../../middleware/ingestRateLimit", () => ({
+  ingestRateLimiter: (_req: any, _res: any, next: any) => next(),
+}));
+
 import webhookRoutes from "../webhooks";
 import { SAMPLE_WEBHOOK_PAYLOAD } from "../webhooks";
 
@@ -10,9 +33,15 @@ describe("Webhooks Routes", () => {
     app = express();
     app.use(express.json());
     app.use("/api/webhooks", webhookRoutes);
-    
+
     // Set test environment variables
     process.env.WEBHOOK_SECRET = "test-webhook-secret";
+
+    // Reset mocks
+    jest.clearAllMocks();
+    // Default: findById returns null (transaction not found)
+    mockFindById.mockResolvedValue(null);
+    mockUpdateStatus.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -182,6 +211,19 @@ describe("Webhooks Routes", () => {
     });
 
     it("should accept valid webhook payload", async () => {
+      // Mock transaction found so the handler returns 200
+      mockFindById.mockResolvedValueOnce({
+        id: "test_txn_123",
+        status: "pending",
+        referenceNumber: "REF-TEST-001",
+        type: "deposit",
+        amount: "100.00",
+        phoneNumber: "+1234567890",
+        provider: "mpesa",
+        stellarAddress: "GD5DJQDQKEZBDQZBH4ENLN5JTQAVLHKUL2QHYK3LTJY2J5N2Z5Q5K7",
+        createdAt: new Date("2026-03-27T11:45:00.000Z"),
+      });
+
       const payload = {
         event_id: "evt_test123",
         event_type: "transaction.completed",
@@ -217,6 +259,19 @@ describe("Webhooks Routes", () => {
     });
 
     it("should handle valid webhook with optional fields", async () => {
+      // Mock transaction found so the handler returns 200
+      mockFindById.mockResolvedValueOnce({
+        id: "test_txn_456",
+        status: "pending",
+        referenceNumber: "REF-TEST-002",
+        type: "withdraw",
+        amount: "50.00",
+        phoneNumber: "+0987654321",
+        provider: "airtel",
+        stellarAddress: "GD5DJQDQKEZBDQZBH4ENLN5JTQAVLHKUL2QHYK3LTJY2J5N2Z5Q5K7",
+        createdAt: new Date("2026-03-27T11:40:00.000Z"),
+      });
+
       const payload = {
         event_id: "evt_test456",
         event_type: "transaction.failed",

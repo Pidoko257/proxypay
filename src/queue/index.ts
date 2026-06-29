@@ -7,6 +7,8 @@ import { connection } from "./config";
 import { startProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
 import { scheduleProviderBalanceAlertJob } from "./providerBalanceAlertQueue";
 import { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker } from "./accountingTokenRefreshWorker";
+import { webhookDeliveryQueue, closeWebhookDeliveryQueue } from "./webhookDeliveryQueue";
+import { startWebhookDeliveryWorker, closeWebhookDeliveryWorker } from "./webhookDeliveryWorker";
 
 export async function shutdownQueue(): Promise<void> {
   await Promise.all([
@@ -14,6 +16,8 @@ export async function shutdownQueue(): Promise<void> {
     closeSyncWorker().catch(() => undefined),
     transactionQueue.close().catch(() => undefined),
     syncQueue.close().catch(() => undefined),
+    closeWebhookDeliveryQueue().catch(() => undefined),
+    closeWebhookDeliveryWorker().catch(() => undefined),
   ]);
 }
 
@@ -84,6 +88,16 @@ export {
   startAccountingTokenRefreshWorker,
   closeAccountingTokenRefreshWorker,
 };
+
+export {
+  webhookDeliveryQueue,
+  addWebhookDeliveryJob,
+  closeWebhookDeliveryQueue,
+  WEBHOOK_BACKOFF_DELAYS_MS,
+  WEBHOOK_MAX_ATTEMPTS,
+} from "./webhookDeliveryQueue";
+export type { WebhookDeliveryJobData } from "./webhookDeliveryQueue";
+export { startWebhookDeliveryWorker, closeWebhookDeliveryWorker };
 
 // Trace-ID propagation utilities
 export { withTraceId, traceIdFromJob, childLoggerWithTrace, TRACE_ID_KEY } from "./trace";

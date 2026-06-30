@@ -49,6 +49,16 @@ export class RefreshTokenFamilyModel {
     return result.rows[0];
   }
 
+  async revokeByToken(token: string) {
+    const result = await queryWrite(
+      `UPDATE refresh_token_families
+          SET is_revoked = TRUE, revoked_at = NOW()
+        WHERE token = $1`,
+      [token],
+    );
+    return result.rowCount;
+  }
+
   async revokeFamily(familyId: string, userId: string, tokenId: string) {
     const client = await pool.connect();
 

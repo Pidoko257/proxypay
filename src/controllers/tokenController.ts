@@ -8,7 +8,7 @@ const refreshTokenLabel = (lbl: string) => {
 
 const refreshTokenFamilyModel = new RefreshTokenFamilyModel();
 export const tokenController = {
-  // List all active refresh tokens for current user
+  // List all active refresh tokens for the current user
   findAll: async (req: Request, res: Response) => {
     const userId = (req as any).jwtUser.userId;
     const { family_id } = req.params;
@@ -29,7 +29,7 @@ export const tokenController = {
       res.status(500).json({ success: false, error: err.message });
     }
   },
-  // Revoke specific token
+  // Revoke a specific refresh token
   revoke: async (req: Request, res: Response) => {
     const { token_id, family_id } = req.params;
     const userId = (req as any).jwtUser.userId;
@@ -53,7 +53,7 @@ export const tokenController = {
       res.status(500).json({ success: false, error: err.message });
     }
   },
-  // Revoke all active tokens
+  // Revoke all active refresh tokens
   revokeAll: async (req: Request, res: Response) => {
     const userId = (req as any).jwtUser.userId;
     const { family_id } = req.params;
@@ -80,7 +80,7 @@ export const tokenController = {
       res.status(500).json({ success: false, error: err.message });
     }
   },
-  // Purged expired tokens
+  // Purge expired refresh tokens
   purgeExpired: async (req: Request, res: Response) => {
     try {
       const { data } = await refreshTokenFamilyModel.purgeExpired();

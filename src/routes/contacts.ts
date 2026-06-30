@@ -1,88 +1,18 @@
 import { Router, Request, Response } from "express";
-import { z } from "zod";
 import { ContactModel } from "../models/contact";
 import { authenticateToken } from "../middleware/auth";
+import { validate } from "../middleware/validation";
+import {
+  CreateContactBodySchema,
+  UpdateContactBodySchema,
+  ContactIdParamsSchema,
+} from "../middleware/schemas/contacts";
 import { TimeoutPresets, haltOnTimedout } from "../middleware/timeout";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 
 const PHONE_REGEX = /^\+\d{7,15}$/;
 const STELLAR_ADDRESS_REGEX = /^G[A-Z2-7]{55}$/;
-
-const createContactSchema = z
-  .object({
-    destinationType: z.enum(["phone", "stellar"]),
-    destinationValue: z.string().trim().min(1),
-    nickname: z.string().trim().min(1).max(100),
-  })
-  .superRefine((value, ctx) => {
-    if (
-      value.destinationType === "phone" &&
-      !PHONE_REGEX.test(value.destinationValue)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["destinationValue"],
-        message: "Must be a valid E.164 phone number (e.g. +237670000000)",
-      });
-    }
-
-    if (
-      value.destinationType === "stellar" &&
-      !STELLAR_ADDRESS_REGEX.test(value.destinationValue)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["destinationValue"],
-        message:
-          "Must be a valid Stellar public key (56 characters, starting with G)",
-      });
-    }
-  });
-
-const updateContactSchema = z
-  .object({
-    destinationType: z.enum(["phone", "stellar"]).optional(),
-    destinationValue: z.string().trim().min(1).optional(),
-    nickname: z.string().trim().min(1).max(100).optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (
-      value.destinationType !== undefined &&
-      value.destinationValue !== undefined
-    ) {
-      if (
-        value.destinationType === "phone" &&
-        !PHONE_REGEX.test(value.destinationValue)
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["destinationValue"],
-          message: "Must be a valid E.164 phone number (e.g. +237670000000)",
-        });
-      }
-
-      if (
-        value.destinationType === "stellar" &&
-        !STELLAR_ADDRESS_REGEX.test(value.destinationValue)
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["destinationValue"],
-          message:
-            "Must be a valid Stellar public key (56 characters, starting with G)",
-        });
-      }
-    }
-
-    if (Object.keys(value).length === 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: [],
-        message: "At least one field must be provided",
-      });
-    }
-  });
 
 function getUserId(req: Request): string | null {
   return req.jwtUser?.userId ?? null;
@@ -105,6 +35,7 @@ contactsRoutes.post(
   "/",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ body: CreateContactBodySchema }),
   async (req: Request, res: Response) => {
     const userId = getUserId(req);
     if (!userId) {
@@ -113,19 +44,12 @@ contactsRoutes.post(
       });
     }
 
-    const parsed = createContactSchema.safeParse(req.body);
-    if (!parsed.success) {
-      throw createError(ERROR_CODES.INVALID_INPUT, "Validation error", {
-        error: "Validation error",
-      });
-    }
-
     try {
       const contact = await contactModel.create({
         userId,
-        destinationType: parsed.data.destinationType,
-        destinationValue: parsed.data.destinationValue,
-        nickname: parsed.data.nickname,
+        destinationType: req.body.destinationType,
+        destinationValue: req.body.destinationValue,
+        nickname: req.body.nickname,
       });
 
       return res.status(201).json(contact);
@@ -188,6 +112,7 @@ contactsRoutes.get(
   "/:id",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ params: ContactIdParamsSchema }),
   async (req: Request, res: Response) => {
     const userId = getUserId(req);
     if (!userId) {
@@ -218,18 +143,12 @@ contactsRoutes.patch(
   "/:id",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ body: UpdateContactBodySchema, params: ContactIdParamsSchema }),
   async (req: Request, res: Response) => {
     const userId = getUserId(req);
     if (!userId) {
       throw createError(ERROR_CODES.FORBIDDEN, "User not authenticated", {
         error: "User not authenticated",
-      });
-    }
-
-    const parsed = updateContactSchema.safeParse(req.body);
-    if (!parsed.success) {
-      throw createError(ERROR_CODES.INVALID_INPUT, "Validation error", {
-        error: "Validation error",
       });
     }
 
@@ -245,9 +164,9 @@ contactsRoutes.patch(
       }
 
       const nextDestinationType =
-        parsed.data.destinationType ?? existing.destinationType;
+        req.body.destinationType ?? existing.destinationType;
       const nextDestinationValue =
-        parsed.data.destinationValue ?? existing.destinationValue;
+        req.body.destinationValue ?? existing.destinationValue;
 
       if (
         nextDestinationType === "phone" &&
@@ -285,9 +204,9 @@ contactsRoutes.patch(
         req.params.id,
         userId,
         {
-          destinationType: parsed.data.destinationType,
-          destinationValue: parsed.data.destinationValue,
-          nickname: parsed.data.nickname,
+          destinationType: req.body.destinationType,
+          destinationValue: req.body.destinationValue,
+          nickname: req.body.nickname,
         },
       );
 
@@ -325,6 +244,7 @@ contactsRoutes.delete(
   "/:id",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ params: ContactIdParamsSchema }),
   async (req: Request, res: Response) => {
     const userId = getUserId(req);
     if (!userId) {

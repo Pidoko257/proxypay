@@ -15,6 +15,15 @@ import {
   withdrawHandler,
 } from "../controllers/transactionController";
 import { validateTransaction } from "../middleware/validateTransaction";
+import { validate } from "../middleware/validation";
+import {
+  UpdateNotesBodySchema,
+  MetadataBodySchema,
+  DeleteMetadataKeysBodySchema,
+  SearchMetadataBodySchema,
+  PaginationQuerySchema,
+  TransactionIdParamsSchema,
+} from "../middleware/schemas/transactions";
 import { normalizeProvider } from "../middleware/normalizeProvider";
 import { validateNetworkMiddleware } from "../middleware/validateNetworkMiddleware";
 import { TimeoutPresets, haltOnTimedout } from "../middleware/timeout";
@@ -198,6 +207,7 @@ transactionRoutes.get(
   "/",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ query: PaginationQuerySchema }),
   getTransactionHistoryHandler,
 );
 
@@ -272,6 +282,7 @@ transactionRoutes.patch(
   "/:id/notes",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ body: UpdateNotesBodySchema, params: TransactionIdParamsSchema }),
   updateNotesHandler,
 );
 
@@ -280,6 +291,7 @@ transactionRoutes.put(
   "/:id/metadata",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ body: MetadataBodySchema, params: TransactionIdParamsSchema }),
   updateMetadataHandler,
 );
 
@@ -288,6 +300,7 @@ transactionRoutes.patch(
   "/:id/metadata",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ body: MetadataBodySchema, params: TransactionIdParamsSchema }),
   patchMetadataHandler,
 );
 
@@ -296,6 +309,7 @@ transactionRoutes.delete(
   "/:id/metadata",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ body: DeleteMetadataKeysBodySchema, params: TransactionIdParamsSchema }),
   deleteMetadataKeysHandler,
 );
 
@@ -304,5 +318,6 @@ transactionRoutes.post(
   "/search/metadata",
   TimeoutPresets.quick,
   haltOnTimedout,
+  validate({ body: SearchMetadataBodySchema }),
   searchByMetadataHandler,
 );

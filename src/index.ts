@@ -568,6 +568,10 @@ async function initializeRuntime(): Promise<void> {
     await providerSettingsService.getAllSettings();
     console.log("Provider settings cache initialized");
 
+    const { updateFeeStatsCache } = await import("./services/stellarFeeStatsCache.js");
+    await updateFeeStatsCache();
+    console.log("Stellar fee stats cache initialized");
+
     const {
       startProviderBalanceAlertWorker,
       scheduleProviderBalanceAlertJob,

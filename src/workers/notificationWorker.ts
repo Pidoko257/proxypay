@@ -2,17 +2,7 @@ import IORedis from "ioredis";
 import { SubscriptionChannels } from "../graphql/subscriptions";
 import { notificationRouter } from "../services/notificationRouter";
 import { TransactionModel } from "../models/transaction";
-
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-
-const redisOptions: any = {
-  retryStrategy: (times: number) => Math.min(100 + times * 200, 3000),
-  enableOfflineQueue: false,
-  maxRetriesPerRequest: 1,
-  lazyConnect: false,
-};
-
-let subscriber: IORedis | null = null;
+import { sharedIORedisSubscriber } from "../config/redis";
 
 /**
  * Notification worker — subscribes to transaction update channels in Redis
@@ -27,20 +17,18 @@ export async function startNotificationWorker(): Promise<void> {
     return;
   }
 
-  subscriber = new IORedis(REDIS_URL, redisOptions);
-
-  subscriber.on("connect", () => console.log("NotificationWorker: Redis connected"));
-  subscriber.on("error", (err) =>
-    console.error("NotificationWorker: Redis error:", err),
-  );
-
-  await subscriber.connect();
+  try {
+    await sharedIORedisSubscriber.connect();
+  } catch (err) {
+    console.warn("NotificationWorker: Redis connection failed", err);
+    return;
+  }
 
   // Subscribe to broadcast updates and per-transaction channels (pattern)
-  await subscriber.subscribe(SubscriptionChannels.TRANSACTION_UPDATED);
-  await subscriber.psubscribe("TRANSACTION_UPDATED:*");
+  await sharedIORedisSubscriber.subscribe(SubscriptionChannels.TRANSACTION_UPDATED);
+  await sharedIORedisSubscriber.psubscribe("TRANSACTION_UPDATED:*");
 
-  subscriber.on("message", async (_channel: string, rawMessage: string) => {
+  sharedIORedisSubscriber.on("message", async (_channel: string, rawMessage: string) => {
     try {
       const payload = JSON.parse(rawMessage) as {
         id?: string;
@@ -67,7 +55,7 @@ export async function startNotificationWorker(): Promise<void> {
   });
 
   // pmessage handles pattern subscriptions (TRANSACTION_UPDATED:<id>)
-  subscriber.on(
+  sharedIORedisSubscriber.on(
     "pmessage",
     async (_pattern: string, _channel: string, rawMessage: string) => {
       try {
@@ -101,11 +89,8 @@ export async function startNotificationWorker(): Promise<void> {
 
 export async function stopNotificationWorker(): Promise<void> {
   try {
-    if (!subscriber) return;
-    await subscriber.unsubscribe(SubscriptionChannels.TRANSACTION_UPDATED);
-    await subscriber.punsubscribe("TRANSACTION_UPDATED:*");
-    await subscriber.quit();
-    subscriber = null;
+    await sharedIORedisSubscriber.unsubscribe(SubscriptionChannels.TRANSACTION_UPDATED);
+    await sharedIORedisSubscriber.punsubscribe("TRANSACTION_UPDATED:*");
     console.log("NotificationWorker: stopped");
   } catch (err) {
     console.warn("NotificationWorker: stop error:", err);

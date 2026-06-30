@@ -1,4 +1,4 @@
-import { createClient, RedisClientType } from "redis";
+import { redisClient } from "../../../config/redis";
 import { healthCheckResponseTimeSeconds } from "../../../utils/metrics";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -89,28 +89,6 @@ function log(
 const CACHE_KEY = "mobilemoney:health";
 const CACHE_TTL_SECONDS = 5 * 60; // 5 minutes
 
-/** Lazily initialised Redis client — reuses the project's REDIS_URL. */
-let redisClient: RedisClientType | null = null;
-
-async function getRedisClient(): Promise<RedisClientType | null> {
-  if (redisClient) return redisClient;
-  if (!process.env.REDIS_URL) return null;
-
-  try {
-    const client = createClient({
-      url: process.env.REDIS_URL,
-    }) as RedisClientType;
-    await client.connect();
-    redisClient = client;
-    return redisClient;
-  } catch (err) {
-    log("warn", "Redis unavailable — using in-process cache", {
-      reason: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
 /** In-process fallback (single-node only; fine for dev / small deployments). */
 export const _inProcessCache: {
   result: MobileMoneyHealthResult | null;
@@ -118,17 +96,22 @@ export const _inProcessCache: {
 } = { result: null, expiresAt: 0 };
 
 async function getCached(): Promise<MobileMoneyHealthResult | null> {
-  const client = await getRedisClient();
-  if (client) {
-    try {
-      const raw = await client.get(CACHE_KEY);
-      if (typeof raw === "string") {
-        return JSON.parse(raw) as MobileMoneyHealthResult;
-      }
-    } catch {
-      /* Redis read error → fall through to in-process */
+  if (!redisClient.isOpen) {
+    if (_inProcessCache.result && Date.now() < _inProcessCache.expiresAt) {
+      return _inProcessCache.result;
     }
+    return null;
   }
+
+  try {
+    const raw = await redisClient.get(CACHE_KEY);
+    if (typeof raw === "string") {
+      return JSON.parse(raw) as MobileMoneyHealthResult;
+    }
+  } catch {
+    /* Redis read error → fall through to in-process */
+  }
+
   if (_inProcessCache.result && Date.now() < _inProcessCache.expiresAt) {
     return _inProcessCache.result;
   }
@@ -136,12 +119,9 @@ async function getCached(): Promise<MobileMoneyHealthResult | null> {
 }
 
 async function setCached(result: MobileMoneyHealthResult): Promise<void> {
-  const client = await getRedisClient();
-  if (client) {
+  if (redisClient.isOpen) {
     try {
-      await client.set(CACHE_KEY, JSON.stringify(result), {
-        EX: CACHE_TTL_SECONDS,
-      });
+      await redisClient.setEx(CACHE_KEY, CACHE_TTL_SECONDS, JSON.stringify(result));
       return;
     } catch {
       /* Redis write error → fall through */

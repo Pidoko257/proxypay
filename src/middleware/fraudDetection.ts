@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { fraudService, FraudTransactionInput, FraudResult } from '../services/fraud';
+import { fraudVelocityService } from '../services/fraudVelocity';
 import { Transaction, TransactionStatus } from '../models/transaction';
 import { TransactionModel } from '../models/transaction';
 
@@ -32,6 +33,19 @@ export class FraudDetectionMiddleware {
 
       // Run fraud detection
       const fraudResult = await fraudService.processTransaction(transactionData);
+
+      // Run velocity-based rule checks (Issue #109)
+      const velocityResult = await fraudVelocityService.checkVelocityRules({
+        transactionId: transactionData.id,
+        userId: transactionData.userId ?? null,
+        apiKey: (req as any).apiKey ?? null,
+        amount: transactionData.amount,
+        destinationPhone: transactionData.phoneNumber,
+        timestamp: transactionData.timestamp,
+      });
+
+      // Merge velocity violations into the fraud result for downstream consumers
+      (req as any).velocityViolations = velocityResult.violations;
 
       // Store fraud result in request for later use
       (req as any).fraudResult = fraudResult;

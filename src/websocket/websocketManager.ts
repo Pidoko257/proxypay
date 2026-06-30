@@ -1,7 +1,8 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { IncomingMessage, Server } from "http";
-import { createClient, RedisClientType } from "redis";
+import type { RedisClientType } from "redis";
 import { verifyToken } from "../auth/jwt";
+import { sharedIORedisPublisher, sharedIORedisSubscriber } from "../config/redis";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,8 +50,7 @@ export class WebSocketManager {
   // Map of transactionId -> Set of client IDs subscribed to that transaction
   private subscriptions: Map<string, Set<string>> = new Map();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private redisSub: RedisClientType | null = null;
-  private redisPub: RedisClientType | null = null;
+  private redisReadyHandler: (() => void) | null = null;
   public redisReady: Promise<void>;
 
   private readonly REDIS_CHANNEL = "transaction.updates";
@@ -367,18 +367,10 @@ export class WebSocketManager {
   private async setupRedis(): Promise<void> {
     if (!process.env.REDIS_URL) return;
 
-    this.redisPub = createClient({
-      url: process.env.REDIS_URL,
-    }) as RedisClientType;
+    await sharedIORedisPublisher.connect();
+    await sharedIORedisSubscriber.connect();
 
-    this.redisSub = createClient({
-      url: process.env.REDIS_URL,
-    }) as RedisClientType;
-
-    await this.redisPub.connect();
-    await this.redisSub.connect();
-
-    await this.redisSub.subscribe(this.REDIS_CHANNEL, (rawMessage: string) => {
+    await sharedIORedisSubscriber.subscribe(this.REDIS_CHANNEL, (rawMessage: string) => {
       try {
         const { transactionId, userId, message } = JSON.parse(rawMessage) as {
           transactionId: string;
@@ -409,9 +401,7 @@ export class WebSocketManager {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
     }
-    await this.redisSub?.unsubscribe();
-    await this.redisSub?.disconnect();
-    await this.redisPub?.disconnect();
+    await sharedIORedisSubscriber.unsubscribe(this.REDIS_CHANNEL);
     this.wss.close();
 
     if (WebSocketManager.activeInstance === this) {

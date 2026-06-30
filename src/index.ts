@@ -43,6 +43,7 @@ import { createError, errorHandler } from "./middleware/errorHandler";
 import {
   connectRedis,
   disconnectRedis,
+  connectBullMQRedis,
   redisClient,
   createRedisStore,
   SESSION_TTL_SECONDS,
@@ -89,6 +90,7 @@ import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { contentNegotiation } from "./middleware/contentNegotiation";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -176,6 +178,8 @@ app.use(requestId);
 app.use(readReplicaRoutingMiddleware);
 app.use(i18nMiddleware);
 app.use(dbConnectionLeakDetector);
+// Content negotiation: enforce Accept: application/json and set Content-Type (#97)
+app.use(contentNegotiation);
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (isShuttingDown) {
@@ -560,6 +564,9 @@ async function initializeRuntime(): Promise<void> {
   try {
     await connectRedis();
     console.log("Redis initialized");
+
+    await connectBullMQRedis();
+    console.log("BullMQ Redis connection initialized");
 
     await layeredCache.init();
     console.log("Layered cache (L1/L2) initialized");

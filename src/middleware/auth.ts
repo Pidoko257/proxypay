@@ -7,6 +7,8 @@ import { getAdminSep10Service } from "../stellar/adminSep10";
 import { evaluateGeoLoginAccess } from "../auth/geo";
 import { queryRead } from "../config/database";
 import { ScopeGroup } from "../auth/apikeys";
+import { securityAnomalyService, SecurityEventSeverity } from "../services/securityAnomalyService";
+import { getCurrentRequestIp } from "../services/logger";
 
 type RequestUser = {
   id: string;
@@ -170,11 +172,6 @@ export const requireAuth = async (
   });
 };
 
-/**
- * JWT Authentication middleware that verifies JWT tokens
- * and attaches user information to the request object
- * Includes IP geofencing validation for operational regions
- */
 export async function authenticateToken(
   req: Request,
   res: Response,
@@ -205,6 +202,42 @@ export async function authenticateToken(
         message: geoAccess.reason || "Access from this region is not permitted",
       });
       return;
+    }
+
+    // Account Activity Anomaly Detection
+    if (decoded.userId) {
+      const ipAddress = getCurrentRequestIp(req);
+      const countryCode = await securityAnomalyService.getCountryFromIp(
+        typeof ipAddress === "string" ? ipAddress : ""
+      );
+
+      // Check for new country login anomaly
+      const countryAnomaly = await securityAnomalyService.detectCountryAnomaly(
+        decoded.userId,
+        typeof ipAddress === "string" ? ipAddress : "",
+        countryCode || "",
+        req.get("user-agent")
+      );
+
+      if (countryAnomaly.isAnomaly && countryAnomaly.requiresBlock) {
+        res.status(403).json({
+          error: "Access denied",
+          message: "Login from this location requires approval. Check your email.",
+        });
+        return;
+      }
+
+      // Check for new IP login anomaly
+      const loginAnomaly = await securityAnomalyService.detectLoginAnomaly(
+        decoded.userId,
+        typeof ipAddress === "string" ? ipAddress : "",
+        req.get("user-agent")
+      );
+
+      if (loginAnomaly.isAnomaly) {
+        // Non-blocking notification for new IPs
+        console.log(`[Security] New IP login detected for user ${decoded.userId}`);
+      }
     }
 
     req.jwtUser = decoded;

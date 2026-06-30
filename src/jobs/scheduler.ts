@@ -27,6 +27,7 @@ import {
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+import { runAnomalyDetectionJob } from "./anomalyDetectionJob";
 
 interface JobConfig {
   name: string;
@@ -37,9 +38,13 @@ interface JobConfig {
 const JOBS: JobConfig[] = [
   {
     name: "sanction-sync",
-    // Daily at 1:00 AM - syncs internal sanction list with global lists
     schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
     handler: runSanctionSyncJob,
+  },
+  {
+    name: "anomaly-detection",
+    schedule: process.env.ANOMALY_DETECTION_CRON || "*/15 * * * *",
+    handler: runAnomalyDetectionJob,
   },
   {
     name: "cleanup",

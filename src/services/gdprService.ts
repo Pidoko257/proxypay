@@ -253,10 +253,10 @@ export class GDPRService {
         Bucket: s3Config.bucket,
         Prefix: prefix,
         ContinuationToken: continuationToken,
-      });
+      }) as ListObjectsV2Command;
       const result = await s3.send(listCmd);
       const objects =
-        result.Contents?.filter((obj) =>
+        (result.Contents as Array<{ Key?: string }> | undefined)?.filter((obj: { Key?: string }) =>
           obj.Key?.includes(`/${userId}/`),
         ) ?? [];
       for (const obj of objects) {
@@ -268,7 +268,7 @@ export class GDPRService {
           await s3.send(delCmd);
         }
       }
-      continuationToken = result.NextContinuationToken;
+      continuationToken = (result as { NextContinuationToken?: string }).NextContinuationToken;
     } while (continuationToken);
   }
 }

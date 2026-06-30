@@ -47,9 +47,9 @@ export class AssetIssuanceService {
     return {
       assetCode,
       issuerPublicKey: issuerKeypair.publicKey(),
-      issuerSecretKeyEncrypted: encrypt(issuerKeypair.secret()),
+      issuerSecretKeyEncrypted: encrypt(issuerKeypair.secret()) ?? "",
       distributionPublicKey: distributionKeypair.publicKey(),
-      distributionSecretKeyEncrypted: encrypt(distributionKeypair.secret()),
+      distributionSecretKeyEncrypted: encrypt(distributionKeypair.secret()) ?? "",
     };
   }
 

@@ -6,6 +6,7 @@ import { getConfiguredPaymentAsset } from "../services/stellar/assetService";
 import  rateLimit from "express-rate-limit";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { validateQuoteToken, QuoteData } from "./sep38";
 
 const router = Router();
 const transactionModel = new TransactionModel();
@@ -179,6 +180,7 @@ router.get("/info", sep31ReadLimiter, async (req: Request, res: Response) => {
  * Creates a new cross-border payment transaction.
  * Validates amount, asset, sender/receiver fields, and returns
  * the Stellar account + memo for the sender to make payment.
+ * Optionally accepts a quote_token for rate-negotiated transactions.
  */
 router.post("/transactions", sep31WriteLimiter, async (req: Request, res: Response) => {
   const {
@@ -189,17 +191,40 @@ router.post("/transactions", sep31WriteLimiter, async (req: Request, res: Respon
     receiver_id,
     fields,
     lang,
+    quote_token,
   } = req.body;
 
+  let validatedQuote: QuoteData | null = null;
+  let useQuotedAmount = false;
+  let quotedAmount = "";
+
+  // Validate quote token if provided
+  if (quote_token) {
+    validatedQuote = await validateQuoteToken(quote_token);
+    if (!validatedQuote) {
+      throw createError(ERROR_CODES.QUOTE_EXPIRED, "Quote expired or invalid", {
+        error: "quote_expired",
+        message: "The quote token is expired or invalid",
+      });
+    }
+    // Use quoted amounts if no explicit amounts provided
+    if (!amount && validatedQuote.sellAmount) {
+      useQuotedAmount = true;
+      quotedAmount = validatedQuote.sellAmount;
+    }
+  }
+
   // --- Input Validation ---
-  if (!amount || !asset_code) {
+  const finalAmount = amount || quotedAmount;
+  
+  if (!finalAmount || !asset_code) {
     throw createError(ERROR_CODES.INVALID_INPUT, "Missing required fields: amount, asset_code", {
       error: "invalid_request",
       message: "Missing required fields: amount, asset_code",
     });
   }
 
-  const parsedAmount = parseFloat(amount);
+  const parsedAmount = parseFloat(finalAmount);
   if (isNaN(parsedAmount) || parsedAmount <= 0) {
     throw createError(ERROR_CODES.INVALID_INPUT, "Amount must be a positive number", {
       error: "invalid_request",
@@ -268,7 +293,7 @@ router.post("/transactions", sep31WriteLimiter, async (req: Request, res: Respon
     const amountOut = parsedAmount; // Amount delivered to receiver (before payout fees)
 
     // Build sender/receiver payload mapping
-    const metadata = {
+    const metadata: Record<string, any> = {
       sep31: {
         status: Sep31Status.PendingSender,
         sender_id: finalSenderId,
@@ -288,6 +313,12 @@ router.post("/transactions", sep31WriteLimiter, async (req: Request, res: Respon
       },
     };
 
+    // Store quote reference if provided
+    if (validatedQuote) {
+      metadata.sep31.quote_id = validatedQuote.id;
+      metadata.sep31.quote_price = validatedQuote.price;
+    }
+
     const newTransaction = await transactionModel.create({
       type: "deposit",
       amount: total.toString(),
@@ -299,7 +330,7 @@ router.post("/transactions", sep31WriteLimiter, async (req: Request, res: Respon
       notes: `SEP-31 cross-border payment from ${finalSenderId} to ${finalReceiverId}`,
     });
 
-    return res.status(201).json({
+    const response: Record<string, any> = {
       id: newTransaction.id,
       status: Sep31Status.PendingSender,
       status_eta: SEP31_CONFIG.statusEta,
@@ -312,7 +343,14 @@ router.post("/transactions", sep31WriteLimiter, async (req: Request, res: Respon
       amount_out_asset: getAssetString(),
       amount_fee: fee.toString(),
       amount_fee_asset: getAssetString(),
-    });
+    };
+
+    // Include quote_id in response if used
+    if (validatedQuote) {
+      response.quote_id = validatedQuote.id;
+    }
+
+    return res.status(201).json(response);
   } catch (error: any) {
     console.error("SEP-31 POST /transactions error:", error);
     throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");

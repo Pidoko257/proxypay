@@ -289,7 +289,7 @@ async function cacheGet(key: string): Promise<FeeStrategy[] | null> {
   try {
     const raw = await redisClient.get(`${CACHE_PREFIX}${key}`);
     if (!raw) return null;
-    const str = typeof raw === "string" ? raw : raw.toString();
+    const str = typeof raw === "string" ? raw : String(raw);
     return JSON.parse(str) as FeeStrategy[];
   } catch {
     return null;

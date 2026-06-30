@@ -95,10 +95,10 @@ const extractLegacyDetails = (err: AppError): Record<string, unknown> => {
  */
 export const createError = (
   code: string,
-  message?: string,
+  message?: string | null,
   details?: Record<string, unknown>,
 ): AppError => {
-  const error: AppError = new Error(message);
+  const error: AppError = new Error(message ?? undefined);
   error.code = code;
   error.statusCode = getHttpStatus(code);
   error.details = details;

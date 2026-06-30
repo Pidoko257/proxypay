@@ -832,6 +832,26 @@ export class TransactionModel {
     return mapTransactionRow(result.rows[0]);
   }
 
+  async findByIds(
+    ids: string[],
+    userId?: string,
+  ): Promise<{ id: string; status: TransactionStatus }[]> {
+    const capped = ids.slice(0, 100);
+    let q = `SELECT id, status FROM transactions WHERE id = ANY($1)`;
+    const params: any[] = [capped];
+
+    if (userId) {
+      q += ` AND user_id = $2`;
+      params.push(userId);
+    }
+
+    const res = await queryRead(q, params);
+    return res.rows.map((row) => ({
+      id: String(row.id),
+      status: row.status as TransactionStatus,
+    }));
+  }
+
   async findByStatusAndProvider(
     status: TransactionStatus,
     provider: string,

@@ -9,6 +9,7 @@ import {
   updateNotesHandler,
   searchTransactionsHandler,
   listTransactionsHandler,
+  statusBatchHandler,
   updateMetadataHandler,
   patchMetadataHandler,
   deleteMetadataKeysHandler,
@@ -67,6 +68,16 @@ transactionRoutesV1.get(
   validateTransactionFilters,
   setApiVersion("v1"),
   listTransactionsHandler,
+);
+
+// Batch status query
+transactionRoutesV1.post(
+  "/status-batch",
+  requireAuth,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  setApiVersion("v1"),
+  statusBatchHandler,
 );
 
 // Get specific transaction

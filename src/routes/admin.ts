@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import * as StellarSdk from "stellar-sdk";
+import { getApiKeyAnalytics } from "../services/apiKeyAnalyticsService";
 import { generateToken } from "../auth/jwt";
 import {
   updateAdminNotesHandler,
@@ -227,6 +228,34 @@ const paginate = <T>(data: T[], page: number, limit: number) => {
  * METRICS
  * =========================
  */
+
+// GET /api/admin/api-keys/:id/analytics
+router.get(
+  "/api-keys/:id/analytics",
+  requireAdmin,
+  logAdminAction("GET_API_KEY_ANALYTICS"),
+  async (req: Request, res: Response) => {
+    try {
+      const apiKeyId = req.params.id;
+      
+      // Parse optional date range from query params
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : undefined;
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : undefined;
+
+      const analytics = await getApiKeyAnalytics(apiKeyId, startDate, endDate);
+      res.json(analytics);
+    } catch (err) {
+      console.error("Error fetching API key analytics:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to retrieve API key analytics",
+        {
+          message: err instanceof Error ? err.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
 
 // GET /api/admin/metrics/transactions/resolution
 router.get(

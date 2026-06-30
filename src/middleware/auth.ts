@@ -90,7 +90,7 @@ export const requireAuth = async (
     // 1. Look up from the database first (scoped keys)
     try {
       const result = await queryRead(
-        `SELECT permissions, is_active, expires_at
+        `SELECT id, permissions, is_active, expires_at
            FROM api_keys
           WHERE key = $1
           LIMIT 1`,
@@ -108,6 +108,7 @@ export const requireAuth = async (
 
         (req as AuthRequest).user = { id: "api-key-user", role: "admin" };
         (req as any).apiKeyPermissions = row.permissions;
+        (req as any).apiKeyId = row.id; // Store api key id for logging
         return next();
       }
     } catch (err) {

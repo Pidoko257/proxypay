@@ -57,6 +57,7 @@ import {
 import { requireAuth } from "./middleware/auth";
 import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
+import { requestLoggerMiddleware } from "./middleware/requestLogger";
 import { readReplicaRoutingMiddleware } from "./middleware/readReplicaRouting";
 import { dbConnectionLeakDetector } from "./middleware/dbConnectionLeakDetector";
 import { i18nMiddleware } from "./utils/i18n";
@@ -173,6 +174,7 @@ app.use(
 // app.use(rateLimitMiddleware);
 app.use(responseTime);
 app.use(requestId);
+app.use(requestLoggerMiddleware);
 app.use(readReplicaRoutingMiddleware);
 app.use(i18nMiddleware);
 app.use(dbConnectionLeakDetector);

@@ -24,6 +24,8 @@
     "INTERNAL_ERROR": "Internal server error",
     "SERVICE_UNAVAILABLE": "Service temporarily unavailable",
     "DATABASE_ERROR": "Database operation failed",
+    "TRUSTLINE_MISSING": "Recipient account is missing a required Stellar trustline for the payment asset",
+    "ERR_MISSING_TRUSTLINE": "Recipient account is missing a Stellar trustline for the payment asset. Use the Change Trust XDR in the response to establish it.",
     "DEFAULT": "An error occurred"
   },
   "sms": {

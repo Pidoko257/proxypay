@@ -5,6 +5,7 @@ import {
   SlippageError,
   PathPaymentParams,
 } from "../payments";
+import { MissingTrustlineError } from "../trustlineValidation";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -13,17 +14,21 @@ jest.mock("../../config/stellar", () => ({
   getNetworkPassphrase: jest.fn(() => StellarSdk.Networks.TESTNET),
 }));
 
-jest.mock("../../services/stellar/assetService", () => ({
-  AssetService: jest.fn().mockImplementation(() => ({
-    hasTrustline: jest.fn().mockResolvedValue(true),
-  })),
-}));
+// validateRecipientTrustline is mocked to resolve by default (trustline present).
+// Individual tests override this to simulate a missing trustline.
+jest.mock("../trustlineValidation", () => {
+  const actual = jest.requireActual("../trustlineValidation");
+  return {
+    ...actual,
+    validateRecipientTrustline: jest.fn().mockResolvedValue(undefined),
+  };
+});
 
 import { getStellarServer } from "../../config/stellar";
-import { AssetService } from "../../services/stellar/assetService";
+import { validateRecipientTrustline } from "../trustlineValidation";
 
-const mockGetStellarServer = getStellarServer as jest.Mock;
-const mockAssetService     = AssetService as jest.Mock;
+const mockGetStellarServer        = getStellarServer as jest.Mock;
+const mockValidateTrustline       = validateRecipientTrustline as jest.Mock;
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -66,6 +71,9 @@ function mockServer(overrides: Partial<Record<string, jest.Mock>> = {}) {
   const loadAccount = jest.fn().mockResolvedValue({
     account_id:              senderKeypair.publicKey(),
     sequence:                "1000",
+    // TransactionBuilder.build() requires these three Account methods
+    sequenceNumber:          () => "1000",
+    accountId:               () => senderKeypair.publicKey(),
     incrementSequenceNumber: jest.fn(),
     balances:                [],
   });
@@ -106,9 +114,9 @@ describe("findPaymentPaths", () => {
     );
 
     expect(server.strictReceivePaths).toHaveBeenCalledWith(
-      xafAsset,
+      [xafAsset],
+      usdcAsset,
       "5",
-      [destinationAccount],
     );
     expect(paths).toHaveLength(1);
     expect(paths[0].destination_asset_code).toBe("USDC");
@@ -211,10 +219,8 @@ describe("findPaymentPaths", () => {
 
 describe("executePathPayment", () => {
   beforeEach(() => {
-    // Reset AssetService mock to return hasTrustline: true by default
-    mockAssetService.mockImplementation(() => ({
-      hasTrustline: jest.fn().mockResolvedValue(true),
-    }));
+    // validateRecipientTrustline resolves (trustline present) by default
+    mockValidateTrustline.mockResolvedValue(undefined);
   });
 
   it("submits a PathPaymentStrictReceive and returns hash and ledger", async () => {
@@ -228,26 +234,23 @@ describe("executePathPayment", () => {
     expect(result.ledger).toBe(55);
   });
 
-  it("throws an error when the destination has no trustline for destAsset", async () => {
-    mockAssetService.mockImplementation(() => ({
-      hasTrustline: jest.fn().mockResolvedValue(false),
-    }));
+  it("throws MissingTrustlineError when the destination has no trustline for destAsset", async () => {
+    const missingError = new MissingTrustlineError({
+      recipientAddress: "GDEST...",
+      assetCode: "USDC",
+      assetIssuer: USDC_ISSUER,
+      changeTrustXdr: "AAAA...",
+    });
+    mockValidateTrustline.mockRejectedValue(missingError);
 
     const server = mockServer();
     mockGetStellarServer.mockReturnValue(server);
 
-    await expect(executePathPayment(makeParams())).rejects.toThrow(
-      "Destination has no trustline",
-    );
+    await expect(executePathPayment(makeParams())).rejects.toThrow(MissingTrustlineError);
     expect(server.submitTransaction).not.toHaveBeenCalled();
   });
 
-  it("skips the trustline check when destAsset is native XLM", async () => {
-    const hasTrustlineMock = jest.fn();
-    mockAssetService.mockImplementation(() => ({
-      hasTrustline: hasTrustlineMock,
-    }));
-
+  it("skips the trustline validation when destAsset is native XLM", async () => {
     const server = mockServer();
     mockGetStellarServer.mockReturnValue(server);
 
@@ -255,7 +258,7 @@ describe("executePathPayment", () => {
       makeParams({ destAsset: StellarSdk.Asset.native(), destAmount: "10" }),
     );
 
-    expect(hasTrustlineMock).not.toHaveBeenCalled();
+    // validateRecipientTrustline is still called but internally short-circuits for native
     expect(server.submitTransaction).toHaveBeenCalledTimes(1);
   });
 

@@ -88,7 +88,7 @@ export class VodacomProvider {
     this.sessionToken = sessionID;
     this.sessionTokenExpiry = Date.now() + 19 * 60 * 1000;
 
-    return this.sessionToken;
+    return this.sessionToken ?? "";
   }
 
   async requestPayment(

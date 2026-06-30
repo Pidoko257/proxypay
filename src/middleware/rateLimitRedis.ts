@@ -41,7 +41,7 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
   try {
     await limiter.consume(key);
     next();
-  } catch (rejRes) {
+  } catch (rejRes: any) {
     const retrySecs = Math.round(rejRes.msBeforeNext / 1000) || 1;
     res.set("Retry-After", String(retrySecs));
     res.status(429).json({

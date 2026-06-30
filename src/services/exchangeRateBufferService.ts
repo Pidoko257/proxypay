@@ -86,7 +86,7 @@ async function cacheGet(key: string): Promise<ExchangeRateBuffer | null> {
     if (!redisClient?.isOpen) return null;
     const raw = await redisClient.get(`${CACHE_PREFIX}${key}`);
     if (!raw) return null;
-    return JSON.parse(typeof raw === "string" ? raw : raw.toString());
+    return JSON.parse(typeof raw === "string" ? raw : String(raw));
   } catch {
     return null;
   }

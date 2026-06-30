@@ -162,19 +162,19 @@ export class AdminStellarKeyModel {
        WHERE public_key = $1 AND is_active = true`,
       [publicKey]
     );
-    return result.rowCount > 0;
-  }
+return result.rowCount !== null && result.rowCount > 0;
+   }
 
-  /**
-   * Delete an admin Stellar key
-   */
-  async delete(publicKey: string): Promise<boolean> {
+   /**
+    * Delete an admin Stellar key
+    */
+   async delete(publicKey: string): Promise<boolean> {
     const result = await queryWrite(
       "DELETE FROM admin_stellar_keys WHERE public_key = $1",
       [publicKey]
     );
-    return result.rowCount > 0;
-  }
+    return result.rowCount !== null && result.rowCount > 0;
+   }
 }
 
 export const adminStellarKeyModel = new AdminStellarKeyModel();

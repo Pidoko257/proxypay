@@ -78,6 +78,7 @@ import { createAdminSep10Router } from "./stellar/adminSep10";
 import tomlRouter from "./routes/toml";
 import feeStrategiesRouter from "./routes/feeStrategies";
 import crossChainRouter from "./routes/crossChain";
+import securityRouter from "./routes/security";
 import stellarRouter from "./routes/stellar";
 import reconciliationRoutes from "./routes/reconciliation";
 import accountingReconciliationRoutes from "./routes/accountingReconciliation";
@@ -385,6 +386,7 @@ app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/statements", statementsRoutes);
 app.use("/", paymentLinkRoutes);
+app.use("/security", securityRouter);
 
 // GDPR
 app.use("/api/gdpr", privacyRoutes);

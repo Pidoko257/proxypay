@@ -131,7 +131,7 @@ export async function verifyBackupCode(
  * @returns True if 2FA is enabled
  */
 interface TwoFactorUser {
-  two_factor_secret?: string;
+  two_factor_secret?: string | null;
   two_factor_enabled?: boolean;
   two_factor_verified?: boolean;
 }

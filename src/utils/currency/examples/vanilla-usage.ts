@@ -73,18 +73,18 @@ function customFormattingExample() {
 function errorHandlingExample() {
   console.log('\n=== Error Handling ===');
   
-  try {
+try {
     // Invalid amount
     CurrencyFormatter.format(NaN, 'USD');
-  } catch (error) {
-    console.log('Invalid amount error:', error.message);
+  } catch (error: unknown) {
+    console.log('Invalid amount error:', error instanceof Error ? error.message : String(error));
   }
-  
+
   try {
     // Unsupported currency
     CurrencyFormatter.format(100, 'EUR');
-  } catch (error) {
-    console.log('Unsupported currency error:', error.message);
+  } catch (error: unknown) {
+    console.log('Unsupported currency error:', error instanceof Error ? error.message : String(error));
   }
   
   // Graceful error handling with formatWithResult
@@ -129,8 +129,8 @@ function configurationExample() {
     
     const updatedFormat = CurrencyFormatter.format(1000.999, 'USD');
     console.log('Updated USD format:', updatedFormat); // "$1000.99" (no commas, floor rounding)
-  } catch (error) {
-    console.log('Configuration update error:', error.message);
+  } catch (error: unknown) {
+    console.log('Configuration update error:', error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -175,9 +175,9 @@ function domIntegrationExample() {
       const formatted = CurrencyFormatter.format(amount, currency, { locale });
       mockElements.outputDiv.textContent = formatted;
       console.log('Formatted for display:', formatted);
-    } catch (error) {
-      mockElements.outputDiv.textContent = `Error: ${error.message}`;
-      console.log('Formatting error:', error.message);
+    } catch (error: unknown) {
+      mockElements.outputDiv.textContent = `Error: ${error instanceof Error ? error.message : String(error)}`;
+      console.log('Formatting error:', error instanceof Error ? error.message : String(error));
     }
   }
   

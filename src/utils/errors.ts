@@ -120,3 +120,6 @@ const getStatusForCode = (code: string): number => {
 };
 
 export { createError };
+
+// AuthError is an alias for AuthenticationError for API compatibility
+export { AuthenticationError as AuthError };

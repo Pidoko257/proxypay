@@ -21,6 +21,7 @@ export enum TransactionStatus {
   Dispute = "dispute",
   Reversed = "reversed",
   ClawedBack = "clawed_back",
+  ChargedBack = "charged_back",
 }
 
 export interface Transaction {

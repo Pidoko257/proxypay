@@ -7,6 +7,8 @@ import { connection } from "./config";
 import { startProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
 import { scheduleProviderBalanceAlertJob } from "./providerBalanceAlertQueue";
 import { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker } from "./accountingTokenRefreshWorker";
+import { kycExpiryQueue, closeKYCExpiryQueue, scheduleKYCExpiryJob } from "./kycExpiryQueue";
+import { startKYCExpiryWorker, closeKYCExpiryWorker } from "./kycExpiryWorker";
 
 export async function shutdownQueue(): Promise<void> {
   await Promise.all([
@@ -14,6 +16,7 @@ export async function shutdownQueue(): Promise<void> {
     closeSyncWorker().catch(() => undefined),
     transactionQueue.close().catch(() => undefined),
     syncQueue.close().catch(() => undefined),
+    closeKYCExpiryWorker().catch(() => undefined),
   ]);
 }
 
@@ -57,7 +60,16 @@ export {
 export { queueOptions } from "./config";
 export { capturePersistentFailure, queryDLQ, replayDLQEntry } from "./dlq";
 export type { DLQEntry, CaptureOptions, DLQQueryOptions } from "./dlq";
-export { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob };
+export { scheduleProviderBalanceAlertJob };
+export { startProviderBalanceAlertWorker };
+
+// KYC Expiry Queue Exports
+export {
+  kycExpiryQueue,
+  scheduleKYCExpiryJob,
+  closeKYCExpiryQueue,
+};
+export { startKYCExpiryWorker, closeKYCExpiryWorker };
 
 // Account Merge Queue Exports
 export {

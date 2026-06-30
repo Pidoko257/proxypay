@@ -22,7 +22,13 @@ import {
 import { getLockoutStatus, recordFailedAttempt } from "../auth/lockout";
 import { verifyTOTPToken, verifyBackupCode, is2FAEnabled } from "../auth/2fa";
 import { evaluateAdminLoginAnomaly } from "../services/loginAnomaly";
-import { validateRequest } from "../middleware/validation";
+import { validate } from "../middleware/validation";
+import {
+  RegisterBodySchema,
+  LoginBodySchema,
+  RefreshTokenBodySchema,
+  TokenVerifyBodySchema,
+} from "../middleware/schemas/auth";
 import { hashPassword } from "../utils/password";
 import { redisClient } from "../config/redis";
 import { TransactionModel } from "../models/transaction";
@@ -38,30 +44,16 @@ const emailService = new EmailService();
 
 export const authRoutes = Router();
 
-export const registerSchema = z.object({
-  phone_number: z.string().min(1, "phone_number is required"),
-  password: z
-    .string()
-    .min(12, "Password must be at least 12 characters")
-    .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
-    .regex(/[a-z]/, "Password must contain at least one lowercase letter")
-    .regex(/[0-9]/, "Password must contain at least one number")
-    .regex(
-      /[^A-Za-z0-9]/,
-      "Password must contain at least one special character",
-    ),
-});
-
 /**
  * POST /api/auth/register
  */
 authRoutes.post(
   "/register",
   registerRateLimiter,
-  validateRequest(registerSchema),
+  validate(RegisterBodySchema),
   async (req: Request, res: Response) => {
     const { phone_number, password } = req.body as z.infer<
-      typeof registerSchema
+      typeof RegisterBodySchema
     >;
     try {
       const passwordHash = await hashPassword(password);
@@ -325,18 +317,8 @@ authRoutes.delete(
  *
  * Verify a JWT token and return the decoded payload
  */
-authRoutes.post("/verify", (req: Request, res: Response) => {
+authRoutes.post("/verify", validate(TokenVerifyBodySchema), (req: Request, res: Response) => {
   const { token } = req.body;
-
-  if (!token) {
-    throw createError(
-      ERROR_CODES.MISSING_FIELD,
-      "Token is required for verification",
-      {
-        error: "Missing token",
-      },
-    );
-  }
 
   try {
     const payload = verifyToken(token);

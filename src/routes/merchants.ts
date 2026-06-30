@@ -5,6 +5,8 @@ import csvParser from "csv-parser";
 import { MerchantService } from "../services/merchantService";
 import { CreateMerchantInput } from "../models/merchant";
 import { authenticateToken } from "../middleware/auth";
+import { validate } from "../middleware/validation";
+import { CreateMerchantBodySchema, MerchantIdFromIdParamsSchema } from "../middleware/schemas/merchants";
 import { checkAccountStatusStrict } from "../middleware/checkAccountStatus";
 
 interface CsvRow {
@@ -178,16 +180,20 @@ merchantRoutes.post(
   "/",
   authenticateToken,
   requireAdmin,
+  validate({ body: CreateMerchantBodySchema }),
   async (req: Request, res: Response) => {
     try {
-      const input: CreateMerchantInput = req.body;
-
-      if (!input.name || !input.email || !input.phoneNumber) {
-        return res.status(400).json({
-          error: "Missing required fields",
-          message: "Name, email, and phone_number are required",
-        });
-      }
+      const input: CreateMerchantInput = {
+        name: req.body.name,
+        email: req.body.email,
+        phoneNumber: req.body.phone_number,
+        businessName: req.body.business_name,
+        businessType: req.body.business_type,
+        taxId: req.body.tax_id,
+        address: req.body.address,
+        city: req.body.city,
+        country: req.body.country,
+      };
 
       const merchant = await merchantService.createMerchant(input);
 

@@ -83,13 +83,13 @@ describe("verifyMtnCallbackSignature", () => {
   });
 
   describe("signature header missing", () => {
-    it("throws 401 and logs anomaly when no signature header is present", async () => {
+    it("throws 403 and logs anomaly when no signature header is present", async () => {
       const req = makeReq({ headers: {} });
       const next: NextFunction = jest.fn();
 
       await expect(
         verifyMtnCallbackSignature(req, makeRes(), next),
-      ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
 
       expect(next).not.toHaveBeenCalled();
       expect(mockLogSecurityAnomaly).toHaveBeenCalledWith(
@@ -165,7 +165,7 @@ describe("verifyMtnCallbackSignature", () => {
   });
 
   describe("invalid signatures", () => {
-    it("throws 401 for a tampered payload", async () => {
+    it("throws 403 for a tampered payload", async () => {
       const rawBody = Buffer.from(PAYLOAD);
       const sig = hmacBase64("different-payload", SECRET);
       const req = makeReq({
@@ -176,7 +176,7 @@ describe("verifyMtnCallbackSignature", () => {
 
       await expect(
         verifyMtnCallbackSignature(req, makeRes(), next),
-      ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
 
       expect(next).not.toHaveBeenCalled();
       expect(mockLogSecurityAnomaly).toHaveBeenCalledWith(
@@ -184,7 +184,7 @@ describe("verifyMtnCallbackSignature", () => {
       );
     });
 
-    it("throws 401 for a wrong secret", async () => {
+    it("throws 403 for a wrong secret", async () => {
       const rawBody = Buffer.from(PAYLOAD);
       const sig = hmacBase64(PAYLOAD, "wrong-secret");
       const req = makeReq({
@@ -195,12 +195,12 @@ describe("verifyMtnCallbackSignature", () => {
 
       await expect(
         verifyMtnCallbackSignature(req, makeRes(), next),
-      ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
 
       expect(next).not.toHaveBeenCalled();
     });
 
-    it("throws 401 for a signature with mismatched length", async () => {
+    it("throws 403 for a signature with mismatched length", async () => {
       const rawBody = Buffer.from(PAYLOAD);
       const req = makeReq({
         headers: { "x-callback-signature": "short" },
@@ -210,7 +210,7 @@ describe("verifyMtnCallbackSignature", () => {
 
       await expect(
         verifyMtnCallbackSignature(req, makeRes(), next),
-      ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
     });
 
     it("logs anomaly with headerPresent=true for invalid signature", async () => {

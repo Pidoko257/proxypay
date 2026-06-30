@@ -1043,6 +1043,45 @@ export const listTransactionsHandler = async (req: Request, res: Response) => {
   }
 };
 
+const statusBatchSchema = z.object({
+  ids: z
+    .array(z.string().uuid())
+    .min(1, "At least one transaction ID is required")
+    .max(100, "Maximum 100 transaction IDs allowed"),
+});
+
+export const statusBatchHandler = async (req: Request, res: Response) => {
+  try {
+    const userId = req.jwtUser?.userId;
+    const { ids } = statusBatchSchema.parse(req.body);
+
+    const results = await transactionModel.findByIds(ids, userId);
+
+    const resultMap: Record<string, string | null> = {};
+    const resultStatuses = new Map(
+      results.map((r) => [r.id, r.status]),
+    );
+
+    for (const id of ids) {
+      resultMap[id] = resultStatuses.get(id) ?? null;
+    }
+
+    return res.json({ statuses: resultMap });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({
+        error: "Validation error",
+        details: err.issues,
+      });
+    }
+    if (err && (err as any).code) throw err;
+    console.error("Failed to fetch batch transaction statuses:", err);
+    throw createError(ERROR_CODES.INTERNAL_ERROR, null, {
+      error: "Failed to fetch batch transaction statuses",
+    });
+  }
+};
+
 export const listAmlAlertsHandler = async (req: Request, res: Response) => {
   try {
     const { status, userId, startDate, endDate } = req.query;

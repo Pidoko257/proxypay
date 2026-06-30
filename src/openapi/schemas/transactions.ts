@@ -85,6 +85,44 @@ export const TransactionListResponseSchema = registry.register(
     .openapi('TransactionListResponse'),
 );
 
+export const StatusBatchRequestSchema = registry.register(
+  'StatusBatchRequest',
+  z
+    .object({
+      ids: z
+        .array(z.string().uuid())
+        .min(1)
+        .max(100)
+        .openapi({
+          example: [
+            'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+            'b2c3d4e5-f6a7-8901-bcde-f12345678901',
+          ],
+          description: 'Array of transaction UUIDs (1-100)',
+        }),
+    })
+    .openapi('StatusBatchRequest'),
+);
+
+export const StatusBatchResponseSchema = registry.register(
+  'StatusBatchResponse',
+  z
+    .object({
+      statuses: z.record(
+        z.string().nullable(),
+        z.string().nullable(),
+      ).openapi({
+        example: {
+          'a1b2c3d4-e5f6-7890-abcd-ef1234567890': 'completed',
+          'b2c3d4e5-f6a7-8901-bcde-f12345678901': 'pending',
+          'nonexistent-id-0000-0000-0000-000000000000': null,
+        },
+        description: 'Map of transaction ID to status (null if not found or not owned by org)',
+      }),
+    })
+    .openapi('StatusBatchResponse'),
+);
+
 export const UpdateNotesRequestSchema = registry.register(
   'UpdateNotesRequest',
   z

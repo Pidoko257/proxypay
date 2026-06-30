@@ -12,6 +12,8 @@ import {
   UpdateNotesRequestSchema,
   MetadataRequestSchema,
   DeleteMetadataKeysRequestSchema,
+  StatusBatchRequestSchema,
+  StatusBatchResponseSchema,
 } from '../schemas/transactions';
 import { ErrorResponseSchema } from '../schemas/common';
 
@@ -87,6 +89,31 @@ registry.registerPath({
       description: 'Paginated list of transactions',
       content: { 'application/json': { schema: TransactionListResponseSchema } },
     },
+    401: { description: 'Unauthorized', content: { 'application/json': { schema: ErrorResponseSchema } } },
+  },
+});
+
+// ─── Batch status query ────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: 'post',
+  path: '/api/v1/transactions/status-batch',
+  tags: [TAG],
+  summary: 'Batch query transaction statuses',
+  description: 'Accepts up to 100 transaction IDs and returns their statuses. IDs not found or not owned by the requesting organization return null.',
+  security: SECURITY,
+  request: {
+    body: {
+      content: { 'application/json': { schema: StatusBatchRequestSchema } },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: 'Map of transaction IDs to statuses',
+      content: { 'application/json': { schema: StatusBatchResponseSchema } },
+    },
+    400: { description: 'Validation error', content: { 'application/json': { schema: ErrorResponseSchema } } },
     401: { description: 'Unauthorized', content: { 'application/json': { schema: ErrorResponseSchema } } },
   },
 });

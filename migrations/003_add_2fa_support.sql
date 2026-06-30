@@ -25,12 +25,10 @@ CREATE TABLE IF NOT EXISTS backup_codes (
 CREATE INDEX IF NOT EXISTS idx_backup_codes_user_id ON backup_codes(user_id);
 CREATE INDEX IF NOT EXISTS idx_backup_codes_used ON backup_codes(used);
 
--- Add constraint to ensure only one unused backup code can be used at a time
 ALTER TABLE backup_codes 
 ADD CONSTRAINT chk_backup_codes_used_at 
 CHECK (used_at IS NULL OR used = TRUE);
 
--- Create function to update used_at timestamp
 CREATE OR REPLACE FUNCTION update_backup_codes_used_at()
 RETURNS TRIGGER AS $$
 BEGIN

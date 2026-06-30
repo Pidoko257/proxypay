@@ -49,6 +49,8 @@ import { providerSettingsService } from "../services/providerSettingsService";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { layeredCache } from "../services/layeredCache";
+import { logCacheInvalidation } from "../utils/cacheInvalidationLogger";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -3197,6 +3199,30 @@ router.get(
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
     }
   },
+);
+
+// POST /api/admin/cache/flush?key={pattern}
+router.post(
+  "/cache/flush",
+  requireAdmin,
+  logAdminAction("CACHE_FLUSH"),
+  async (req: Request, res: Response) => {
+    const pattern = typeof req.query.key === "string" ? req.query.key.trim() : "";
+    if (!pattern) {
+      throw createError(ERROR_CODES.INVALID_INPUT, "key query parameter is required", {
+        message: "key query parameter is required",
+      });
+    }
+    await layeredCache.delPattern(pattern);
+    logCacheInvalidation({
+      event: "cache_invalidated",
+      pattern,
+      trigger: "admin_flush",
+      adminId: (req as AuthRequest).user!.id,
+      timestamp: new Date().toISOString(),
+    });
+    res.json({ flushed: true, pattern });
+  }
 );
 
 export { router as adminRoutes };

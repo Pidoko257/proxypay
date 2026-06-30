@@ -86,6 +86,10 @@ export class CacheTags {
   static auditHistory(userId: string): string {
     return `user:${userId}:audit-history`;
   }
+
+  static apiKeys(userId: string): string {
+    return `user:${userId}:apikeys`;
+  }
 }
 
 /**

@@ -2,6 +2,8 @@ import axios, { AxiosInstance } from 'axios';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { AccountingService } from './accounting';
+import { layeredCache } from "./layeredCache";
+import { logCacheInvalidation } from "../utils/cacheInvalidationLogger";
 
 // KYC Provider: Entrust Identity Verification (formerly Onfido)
 // Documentation: https://documentation.identity.entrust.com/api/latest/
@@ -337,6 +339,20 @@ export class KYCService {
       `;
       
       await this.db.query(query, [kycLevel, userId]);
+
+      // Invalidate KYC status cache for this user
+      const kycCacheKey = `cache:kyc:${userId}`;
+      try {
+        await layeredCache.del(kycCacheKey);
+        logCacheInvalidation({
+          event: "cache_invalidated",
+          key: kycCacheKey,
+          trigger: "kyc_level_update",
+          timestamp: new Date().toISOString(),
+        });
+      } catch (cacheErr) {
+        console.warn(`Failed to invalidate KYC cache for user ${userId}:`, cacheErr);
+      }
       
       console.log(`Updated KYC level for user ${userId} to ${kycLevel}`);
       // If user reached a verified level, attempt to sync contact to accounting providers (Xero)

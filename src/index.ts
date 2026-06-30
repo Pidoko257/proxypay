@@ -89,6 +89,7 @@ import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { startLedgerMonitor, stopLedgerMonitor } from "./services/ledgerMonitor";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -505,6 +506,10 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
     stopHeartbeatService();
     console.log("[Shutdown] Heartbeat service stopped");
 
+    console.log("[Shutdown] Stopping ledger monitor");
+    stopLedgerMonitor();
+    console.log("[Shutdown] Ledger monitor stopped");
+
     console.log("[Shutdown] Closing PostgreSQL pool");
     await pool.end();
     console.log("[Shutdown] PostgreSQL pool closed");
@@ -542,6 +547,9 @@ async function initializeRuntime(): Promise<void> {
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
+
+  // Initialize Stellar Ledger Close Time Monitor
+  startLedgerMonitor();
 
   // Initialize System Heartbeat Metric
   startHeartbeatService();

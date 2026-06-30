@@ -23,6 +23,7 @@ import { capturePersistentFailure } from "./dlq";
 import { queryRead, queryWrite } from "../config/database";
 import subscriptionModel from "../models/subscription";
 import logger from "../utils/logger";
+import { sandboxService } from "../services/sandbox/sandboxService";
 
 const transactionModel = new TransactionModel();
 const mobileMoneyService = new MobileMoneyService();
@@ -172,8 +173,8 @@ async function sendTransactionPush(
         error,
       });
     }
-  } catch (pushError) {
-    console.error(`[${transactionId}] Push notification failed:`, pushError);
+  } catch (pushErr) {
+    console.error(`[${transactionId}] Push notification failed:`, pushErr);
   }
 }
 
@@ -222,6 +223,11 @@ async function processTransaction(
   const log = logger.child(logFields);
   log.info({ type, provider }, `[RabbitMQ] Processing transaction`);
 
+  // Fetch transaction to check if it's a sandbox transaction
+  const txRow = await transactionModel.findById(transactionId);
+  const isSandbox = txRow?.isSandbox ?? false;
+  log.info({ isSandbox }, `[Sandbox] Transaction sandbox mode: ${isSandbox}`);
+
   const maxAttempts = Math.max(
     1,
     parseInt(process.env.MAX_RETRY_ATTEMPTS || "3", 10),
@@ -251,7 +257,6 @@ async function processTransaction(
   };
 
   // Resolve sender name for sanction screening (best-effort; falls back to phone number)
-  const txRow = await transactionModel.findById(transactionId);
   const senderName =
     (txRow?.userId ? await resolveKycName(txRow.userId) : null) ?? phoneNumber;
   // Receiver is the mobile money account holder identified by their phone number
@@ -287,59 +292,33 @@ async function processTransaction(
     }
   };
 
-        const stellarResult = await withRetry(
-          () => {
-            // Use high-throughput pool service when available; falls back to single-account mode
-            const issuerSecret = process.env.STELLAR_ISSUER_SECRET?.trim();
-            if (highThroughputService.isServiceInitialized() && issuerSecret) {
-              const issuerKp = require("stellar-sdk").Keypair.fromSecret(issuerSecret);
-              return highThroughputService.submitPayment({
-                sourceAccount: issuerKp.publicKey(),
-                sourceSecret: issuerSecret,
-                destination: stellarAddress,
-                asset: "native",
-                amount: String(amount),
-              }).then(r => ({ hash: r.hash, submittedAt: new Date() }));
-            }
-            return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName);
-          },
-          retryConfig,
-        );
-
-  // Store Stellar transaction details in metadata
-  if (stellarResult.hash) {
-    const currentMetadata =
-      (await transactionModel.findById(transactionId))?.metadata || {};
-    const updatedMetadata = {
-      ...currentMetadata,
-      stellar: {
-        transactionHash: stellarResult.hash,
-        submittedAt: stellarResult.submittedAt?.toISOString(),
-        feeBumps: [],
-      },
-    };
-    await transactionModel.updateMetadata(transactionId, updatedMetadata);
-  }
-
-  await updateProgress(transactionId, 90);
   try {
     await updateProgress(transactionId, 10);
 
     if (type === "deposit") {
       await updateProgress(transactionId, 20);
 
-      const mobileMoneyResult = await withRetry(async () => {
-        const result = await mobileMoneyService.initiatePayment(
+      let mobileMoneyResult;
+      if (isSandbox) {
+        mobileMoneyResult = await sandboxService.simulateInitiatePayment(
           provider,
           phoneNumber,
           amount,
-          requestId,
         );
-        if (!result.success) {
-          throw new Error(getProviderFailureMessage(result));
-        }
-        return result;
-      }, retryConfig);
+      } else {
+        mobileMoneyResult = await withRetry(async () => {
+          const result = await mobileMoneyService.initiatePayment(
+            provider,
+            phoneNumber,
+            amount,
+            requestId,
+          );
+          if (!result.success) {
+            throw new Error(getProviderFailureMessage(result));
+          }
+          return result;
+        }, retryConfig);
+      }
 
       // Issue #515: Log provider response time in transaction metadata
       if (mobileMoneyResult.providerResponseTimeMs !== undefined) {
@@ -361,25 +340,34 @@ async function processTransaction(
       }
       await updateProgress(transactionId, 70);
 
-      await withRetry(
-        () => {
-          // Use high-throughput pool service when available; falls back to single-account mode
-          const issuerSecret = process.env.STELLAR_ISSUER_SECRET?.trim();
-          if (highThroughputService.isServiceInitialized() && issuerSecret) {
-            const issuerKp = require("stellar-sdk").Keypair.fromSecret(issuerSecret);
-            return highThroughputService.submitPayment({
-              sourceAccount: issuerKp.publicKey(),
-              sourceSecret: issuerSecret,
-              destination: stellarAddress,
-              asset: "native",
-              amount: String(amount),
-            });
-          }
-          return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName);
-        },
-        retryConfig,
-      );
+      let stellarResult;
+      if (isSandbox) {
+        stellarResult = await sandboxService.simulateStellarPayment(
+          stellarAddress,
+          amount,
+        );
+      } else {
+        stellarResult = await withRetry(
+          () => {
+            // Use high-throughput pool service when available; falls back to single-account mode
+            const issuerSecret = process.env.STELLAR_ISSUER_SECRET?.trim();
+            if (highThroughputService.isServiceInitialized() && issuerSecret) {
+              const issuerKp = require("stellar-sdk").Keypair.fromSecret(issuerSecret);
+              return highThroughputService.submitPayment({
+                sourceAccount: issuerKp.publicKey(),
+                sourceSecret: issuerSecret,
+                destination: stellarAddress,
+                asset: "native",
+                amount: String(amount),
+              }).then(r => ({ hash: r.hash, submittedAt: new Date() }));
+            }
+            return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName);
+          },
+          retryConfig,
+        );
+      }
 
+      // Store Stellar transaction details in metadata
       if (stellarResult.hash) {
         const currentMetadata =
           (await transactionModel.findById(transactionId))?.metadata || {};
@@ -430,18 +418,71 @@ async function processTransaction(
     } else {
       await updateProgress(transactionId, 20);
 
-      const mobileMoneyResult = await withRetry(async () => {
-        const result = await mobileMoneyService.sendPayout(
+      let stellarResult;
+      if (isSandbox) {
+        stellarResult = await sandboxService.simulateStellarPayment(
+          stellarAddress,
+          amount,
+        );
+      } else {
+        stellarResult = await withRetry(
+          () => {
+            // Use high-throughput pool service when available; falls back to single-account mode
+            const issuerSecret = process.env.STELLAR_ISSUER_SECRET?.trim();
+            if (highThroughputService.isServiceInitialized() && issuerSecret) {
+              const issuerKp = require("stellar-sdk").Keypair.fromSecret(issuerSecret);
+              return highThroughputService.submitPayment({
+                sourceAccount: issuerKp.publicKey(),
+                sourceSecret: issuerSecret,
+                destination: stellarAddress,
+                asset: "native",
+                amount: String(amount),
+              }).then(r => ({ hash: r.hash, submittedAt: new Date() }));
+            }
+            return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName);
+          },
+          retryConfig,
+        );
+      }
+
+      // Store Stellar transaction details in metadata
+      if (stellarResult.hash) {
+        const currentMetadata =
+          (await transactionModel.findById(transactionId))?.metadata || {};
+        const updatedMetadata = {
+          ...currentMetadata,
+          stellar: {
+            transactionHash: stellarResult.hash,
+            submittedAt: stellarResult.submittedAt?.toISOString(),
+            feeBumps: [],
+          },
+        };
+        await transactionModel.updateMetadata(transactionId, updatedMetadata);
+      }
+
+      await updateProgress(transactionId, 50);
+
+      let mobileMoneyResult;
+      if (isSandbox) {
+        mobileMoneyResult = await sandboxService.simulateSendPayout(
           provider,
           phoneNumber,
           amount,
-          requestId,
         );
-        if (!result.success) {
-          throw new Error(getProviderFailureMessage(result));
-        }
-        return result;
-      }, retryConfig);
+      } else {
+        mobileMoneyResult = await withRetry(async () => {
+          const result = await mobileMoneyService.sendPayout(
+            provider,
+            phoneNumber,
+            amount,
+            requestId,
+          );
+          if (!result.success) {
+            throw new Error(getProviderFailureMessage(result));
+          }
+          return result;
+        }, retryConfig);
+      }
 
       // Issue #515: Log provider response time in transaction metadata
       if (mobileMoneyResult.providerResponseTimeMs !== undefined) {
@@ -454,8 +495,6 @@ async function processTransaction(
             log.warn({ err }, "Failed to log provider response time"),
           );
       }
-
-      await updateProgress(transactionId, 50);
 
       if (!mobileMoneyResult.success) {
         throw new Error(getProviderFailureMessage(mobileMoneyResult));

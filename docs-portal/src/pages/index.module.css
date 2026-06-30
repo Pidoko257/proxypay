@@ -1,0 +1,22 @@
+.main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 1rem 4rem;
+}
+
+.section {
+  /* Land below both the Docusaurus navbar and the sticky scroll-spy bar
+     when navigated to via smooth scroll or a hash link. */
+  scroll-margin-top: calc(var(--ifm-navbar-height, 60px) + 4rem);
+  min-height: 80vh;
+  padding: 2rem 0;
+  border-bottom: 1px solid var(--ifm-toc-border-color, #e3e5e8);
+}
+
+.section:focus {
+  outline: none;
+}
+
+.filler {
+  color: var(--ifm-color-emphasis-700);
+}

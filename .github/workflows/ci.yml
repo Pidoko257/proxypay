@@ -293,6 +293,26 @@ jobs:
         run: ls -la dist/
         continue-on-error: false
 
+      - name: Generate OpenAPI spec
+        run: npm run generate:spec
+        continue-on-error: false
+
+      - name: Validate OpenAPI spec against OpenAPI 3.0 standard
+        run: npm run validate:spec
+        continue-on-error: false
+
+      - name: Check that generated spec matches committed spec
+        run: npm run check:spec
+        continue-on-error: false
+
+      - name: Upload OpenAPI spec as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-spec
+          path: docs/openapi.json
+          retention-days: 7
+          if-no-files-found: error
+
   # Docker build job - optional, only runs if secrets are configured
   # To enable: Add REGISTRY_USERNAME and REGISTRY_PASSWORD to repository secrets
   docker:

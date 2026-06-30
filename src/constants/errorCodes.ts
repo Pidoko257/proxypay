@@ -53,6 +53,8 @@ export const ERROR_CODES = {
   RATE_LIMIT: "RATE_LIMIT",
   /** Destination Stellar account has not established a trustline for the payment asset. */
   TRUSTLINE_MISSING: "TRUSTLINE_MISSING",
+  /** Quote has expired or is invalid. */
+  QUOTE_EXPIRED: "QUOTE_EXPIRED",
 
   // Server errors (5000+) - HTTP 500+
   INTERNAL_ERROR: "INTERNAL_ERROR",
@@ -134,7 +136,8 @@ export const getHttpStatus = (code: string): number => {
     code === ERROR_CODES.INSUFFICIENT_BALANCE ||
     code === ERROR_CODES.INSUFFICIENT_FUNDS ||
     code === ERROR_CODES.TRANSACTION_FAILED ||
-    code === ERROR_CODES.TRUSTLINE_MISSING
+    code === ERROR_CODES.TRUSTLINE_MISSING ||
+    code === ERROR_CODES.QUOTE_EXPIRED
   ) {
     return 400;
   }

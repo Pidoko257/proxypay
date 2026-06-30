@@ -94,8 +94,8 @@ export async function verifyMtnCallbackSignature(
 
   if (!signature) {
     buildFailureEvent(req, "mtn_callback_signature_missing", false);
-    throw createError(ERROR_CODES.UNAUTHORIZED, "Unauthorized callback", {
-      error: "Unauthorized callback",
+    throw createError(ERROR_CODES.FORBIDDEN, "Forbidden", {
+      error: "Forbidden",
     });
   }
 
@@ -105,16 +105,16 @@ export async function verifyMtnCallbackSignature(
   try {
     if (!verifySignature(payload, signature, callbackSecret)) {
       buildFailureEvent(req, "mtn_callback_signature_invalid", true);
-      throw createError(ERROR_CODES.UNAUTHORIZED, "Unauthorized callback", {
-        error: "Unauthorized callback",
+      throw createError(ERROR_CODES.FORBIDDEN, "Forbidden", {
+        error: "Forbidden",
       });
     }
 
     next();
   } catch (error) {
     buildFailureEvent(req, "mtn_callback_signature_error", true);
-    throw createError(ERROR_CODES.UNAUTHORIZED, "Unauthorized callback", {
-      error: "Unauthorized callback",
+    throw createError(ERROR_CODES.FORBIDDEN, "Forbidden", {
+      error: "Forbidden",
     });
   }
 }

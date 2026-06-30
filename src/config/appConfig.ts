@@ -99,6 +99,12 @@ export const configSchema = convict({
         default: 1000000,
         env: "AIRTEL_MAX_AMOUNT",
       },
+      callbackSecret: {
+        doc: "Airtel callback shared secret for verifying incoming callbacks",
+        format: String,
+        default: "",
+        env: "AIRTEL_CALLBACK_SECRET",
+      },
     },
     orange: {
       minAmount: {

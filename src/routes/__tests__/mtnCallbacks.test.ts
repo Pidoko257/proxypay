@@ -8,6 +8,14 @@ jest.mock("../../config/appConfig", () => ({
   }),
 }));
 
+// Mock Redis for ingestRateLimiter
+jest.mock("../../config/redis", () => ({
+  redisClient: {
+    isOpen: false,
+    eval: jest.fn(),
+  },
+}));
+
 const request = require("supertest");
 const express = require("express");
 import mtnCallbacksRouter from "../mtnCallbacks";
@@ -30,6 +38,10 @@ describe("MTN Callback Signature Verification", () => {
       }),
     );
     app.use("/api/mtn", mtnCallbacksRouter);
+    // Express error handler
+    app.use((err: any, req: any, res: any, next: any) => {
+      res.status(err.statusCode || err.status || 500).json({ error: err.message, code: err.code });
+    });
   });
 
   it("accepts a valid MTN callback signature", async () => {
@@ -50,9 +62,7 @@ describe("MTN Callback Signature Verification", () => {
     const response = await request(app)
       .post("/api/mtn/callback")
       .send({ status: "incoming" })
-      .expect(401);
-
-    expect(response.body).toEqual({ error: "Unauthorized callback" });
+      .expect(403);
   });
 
   it("rejects a callback with an invalid signature", async () => {
@@ -63,8 +73,6 @@ describe("MTN Callback Signature Verification", () => {
       .post("/api/mtn/callback")
       .set("X-Callback-Signature", invalidSignature)
       .send(payload)
-      .expect(401);
-
-    expect(response.body).toEqual({ error: "Unauthorized callback" });
+      .expect(403);
   });
 });

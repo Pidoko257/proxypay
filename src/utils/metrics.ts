@@ -217,3 +217,16 @@ export const systemHeartbeat = new Gauge({
   labelNames: ["service"],
   registers: [register],
 });
+
+// Stellar Ledger Close Time Metrics
+export const stellarLedgerCloseTimeSeconds = new Gauge({
+  name: "stellar_ledger_close_time_seconds",
+  help: "Rolling average ledger close time in seconds over the last 10 ledgers",
+  registers: [register],
+});
+
+export const stellarLedgerSequence = new Gauge({
+  name: "stellar_ledger_sequence",
+  help: "Latest Stellar ledger sequence number observed",
+  registers: [register],
+});

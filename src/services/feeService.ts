@@ -1,5 +1,6 @@
 import { pool } from "../config/database";
 import { layeredCache } from "./layeredCache";
+import { logCacheInvalidation } from "../utils/cacheInvalidationLogger";
 
 export interface FeeConfiguration {
   id: string;
@@ -39,7 +40,7 @@ export interface UpdateFeeConfigRequest {
 
 const CACHE_KEY_PREFIX = "fee_config:";
 const ACTIVE_CONFIG_KEY = "fee_config:active";
-const CACHE_TTL = 3600; // 1 hour
+const CACHE_TTL = 600; // 10 minutes
 
 export class FeeService {
   /**
@@ -447,6 +448,12 @@ export class FeeService {
       layeredCache.del(cacheKey),
       layeredCache.del(ACTIVE_CONFIG_KEY),
     ]);
+    logCacheInvalidation({
+      event: "cache_invalidated",
+      key: cacheKey,
+      trigger: "fee_config_change",
+      timestamp: new Date().toISOString(),
+    });
   }
 
   /**
@@ -457,6 +464,12 @@ export class FeeService {
       layeredCache.delPattern(`${CACHE_KEY_PREFIX}*`),
       layeredCache.del(ACTIVE_CONFIG_KEY),
     ]);
+    logCacheInvalidation({
+      event: "cache_invalidated",
+      pattern: `${CACHE_KEY_PREFIX}*`,
+      trigger: "fee_config_change",
+      timestamp: new Date().toISOString(),
+    });
   }
 }
 

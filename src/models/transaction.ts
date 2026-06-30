@@ -85,6 +85,7 @@ const TRANSACTION_SELECT_COLUMNS = `
   user_id AS "userId",
   idempotency_key AS "idempotencyKey",
   idempotency_expires_at AS "idempotencyExpiresAt",
+  is_sandbox AS "isSandbox",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 `;
@@ -161,6 +162,7 @@ export function mapTransactionRow(row: any): any {
     idempotencyExpiresAt: row.idempotencyExpiresAt
       ? new Date(row.idempotencyExpiresAt)
       : null,
+    isSandbox: row.isSandbox ?? false,
     createdAt: new Date(row.createdAt),
     updatedAt: row.updatedAt ? new Date(row.updatedAt) : null,
   };
@@ -228,9 +230,9 @@ export class TransactionModel {
         reference_number, provider_reference, type, amount, currency,
         original_amount, converted_amount, phone_number, provider,
         stellar_address, status, tags, notes, user_id,
-        idempotency_key, idempotency_expires_at, metadata, location_metadata
+        idempotency_key, idempotency_expires_at, metadata, location_metadata, is_sandbox
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
       ) RETURNING *`,
       [
         ref,
@@ -251,6 +253,7 @@ export class TransactionModel {
         data.idempotencyExpiresAt ?? null,
         JSON.stringify(metadata),
         data.locationMetadata ? JSON.stringify(data.locationMetadata) : null,
+        data.isSandbox ?? false,
       ],
     );
 

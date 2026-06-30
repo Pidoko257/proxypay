@@ -209,6 +209,9 @@ export interface ApiKey {
    * Omit to allow all routes (subject to scope checks).
    */
   allowedRoutes?: Array<{ method: string; pathPrefix: string }>;
+
+  /** Whether this is a sandbox API key */
+  isSandbox?: boolean;
 }
 
 // ─── Factory & Helpers ────────────────────────────────────────────────────────
@@ -227,6 +230,8 @@ export interface CreateApiKeyOptions {
   allowedTimeWindow?: TimeWindow;
   allowedIpCidrs?: string[];
   allowedRoutes?: Array<{ method: string; pathPrefix: string }>;
+  /** Whether this is a sandbox API key */
+  isSandbox?: boolean;
 }
 
 /**
@@ -256,6 +261,7 @@ export function createApiKey(
     allowedTimeWindow: options.allowedTimeWindow,
     allowedIpCidrs: options.allowedIpCidrs,
     allowedRoutes: options.allowedRoutes,
+    isSandbox: options.isSandbox,
   };
 
   user.apiKeys.push(newKey);

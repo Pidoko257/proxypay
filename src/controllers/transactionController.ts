@@ -600,6 +600,7 @@ async function processTransactionRequest(
                 ? buildIdempotencyExpiry()
                 : null,
               locationMetadata: (req as any).geoLocation ?? null,
+              isSandbox: (req as any).isSandbox ?? false,
             });
             void monitorTransactionForAML(transaction);
             void applyTravelRule(transaction);

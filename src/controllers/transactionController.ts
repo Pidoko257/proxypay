@@ -18,6 +18,7 @@ import {
 } from "../config/providers";
 import type { TransactionJobData } from "../queue/transactionQueue";
 import { amlService } from "../services/aml";
+import { amlScreeningService } from "../services/amlScreening";
 import { generateFlaggedTransactionComplianceReport } from "../services/complianceReportService";
 import { twoFactorWithdrawalService } from "../services/twoFactorWithdrawalService";
 import {
@@ -585,14 +586,36 @@ async function processTransactionRequest(
               }
             }
 
+            // ── AML Screening (synchronous, before transaction creation) ─────
+            // Evaluate every enabled AML rule against this request.  If any rule
+            // fires, the transaction is created with status=pending_review so it
+            // cannot be processed until a compliance officer approves it.
+            // screenTransaction() logs all evaluations to aml_screening_results
+            // after we have a real transaction ID (see persistTransactionId below).
+            const screeningOutcome = await amlScreeningService.screenTransaction({
+              transactionId: "pre-create", // placeholder; real ID is used after create
+              userId,
+              amount: requestAmount,
+              phoneNumber,
+              type,
+            });
+
+            const initialStatus = screeningOutcome.shouldFlag
+              ? TransactionStatus.Review
+              : TransactionStatus.Pending;
+
+            const amlTags = screeningOutcome.shouldFlag
+              ? ["aml-screened", "aml-flagged"]
+              : ["aml-screened"];
+
             const transaction = await transactionModel.create({
               type,
               amount: String(amount),
               phoneNumber,
               provider,
               stellarAddress,
-              status: TransactionStatus.Pending,
-              tags: [],
+              status: initialStatus,
+              tags: amlTags,
               notes,
               userId,
               idempotencyKey,
@@ -601,6 +624,66 @@ async function processTransactionRequest(
                 : null,
               locationMetadata: (req as any).geoLocation ?? null,
             });
+
+            // Now that we have a real transaction ID, persist the screening results.
+            // This call is fire-and-forget inside screenTransaction; re-trigger with
+            // the real ID so the DB rows are correctly linked.
+            void amlScreeningService.screenTransaction(
+              {
+                transactionId: transaction.id,
+                userId,
+                amount: requestAmount,
+                phoneNumber,
+                type,
+              },
+              transaction.id,
+            ).catch((err) => {
+              console.error(
+                `[AmlScreening] Failed to persist results for transaction ${transaction.id}:`,
+                err,
+              );
+            });
+
+            // Increment velocity counters for future screenings.
+            // Collect all unique window_seconds values from velocity rules so
+            // we only do one Redis round-trip per window.
+            void (async () => {
+              try {
+                const velocityRules = await amlScreeningService.loadRules();
+                const windows = [
+                  ...new Set(
+                    velocityRules
+                      .filter((r) => r.ruleType === "velocity_check")
+                      .map((r) => Number(r.config["window_seconds"]))
+                      .filter((w) => Number.isFinite(w) && w > 0),
+                  ),
+                ];
+                if (windows.length > 0) {
+                  await amlScreeningService.incrementVelocityCounters(phoneNumber, windows);
+                }
+              } catch (err) {
+                console.error("[AmlScreening] Failed to increment velocity counters:", err);
+              }
+            })();
+
+            if (screeningOutcome.shouldFlag) {
+              const matchedNames = screeningOutcome.matchedRules
+                .map((e) => e.rule.name)
+                .join(" | ");
+
+              void transactionModel
+                .updateAdminNotes(
+                  transaction.id,
+                  `[AML-SCREEN] Flagged by: ${matchedNames}`.slice(0, 1000),
+                )
+                .catch((err) => {
+                  console.error(
+                    "[AmlScreening] Failed to set admin notes:",
+                    err,
+                  );
+                });
+            }
+
             void monitorTransactionForAML(transaction);
             void applyTravelRule(transaction);
 

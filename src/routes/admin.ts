@@ -3199,4 +3199,32 @@ router.get(
   },
 );
 
+/**
+ * GET /api/admin/slow-queries
+ * Returns the last 50 slow query records with EXPLAIN ANALYZE plans
+ */
+router.get(
+  "/slow-queries",
+  requireAdmin,
+  logAdminAction("GET_SLOW_QUERIES"),
+  async (req: Request, res: Response) => {
+    try {
+      const result = await pool.query(
+        `SELECT id, query, params, duration_ms, plan, executed_at, created_at
+         FROM slow_query_plans
+         ORDER BY created_at DESC
+         LIMIT 50`,
+      );
+
+      res.json({
+        data: result.rows,
+        total: result.rows.length,
+      });
+    } catch (error) {
+      console.error("[SlowQueries] Failed to fetch:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch slow queries");
+    }
+  },
+);
+
 export { router as adminRoutes };

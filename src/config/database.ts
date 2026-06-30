@@ -12,7 +12,7 @@ const productionSsl =
 
 // Configuration for slow query logging
 const SLOW_QUERY_THRESHOLD_MS = parseInt(
-  process.env.SLOW_QUERY_THRESHOLD_MS || "1000",
+  process.env.SLOW_QUERY_THRESHOLD_MS || "500",
 );
 const ENABLE_SLOW_QUERY_LOGGING =
   process.env.ENABLE_SLOW_QUERY_LOGGING === "true" ||
@@ -93,6 +93,37 @@ function logSlowQuery(query: string, duration: number, params?: any[]): void {
   };
 
   console.log(JSON.stringify(logEntry));
+
+  setImmediate(() => {
+    captureExplainAnalyze(query, duration, params);
+  });
+}
+
+function captureExplainAnalyze(
+  query: string,
+  durationMs: number,
+  params?: any[],
+): void {
+  const explainQuery = `EXPLAIN (ANALYZE, COSTS, VERBOSE, FORMAT JSON) ${query}`;
+
+  originalPoolQuery(explainQuery, params)
+    .then((result: any) => {
+      const plan = result.rows[0]?.["QUERY PLAN"] || result.rows;
+      return originalPoolQuery(
+        `INSERT INTO slow_query_plans (query, params, duration_ms, plan, executed_at)
+         VALUES ($1, $2::jsonb, $3, $4::jsonb, $5)`,
+        [
+          sanitizeQuery(query),
+          params ? JSON.stringify(sanitizeParams(params)) : null,
+          Math.round(durationMs),
+          typeof plan === "string" ? JSON.stringify(plan) : JSON.stringify(plan),
+          new Date().toISOString(),
+        ],
+      );
+    })
+    .catch((err: any) => {
+      console.error("[SlowQueryPlan] Failed:", err);
+    });
 }
 
 // Enhanced Pool with query timing

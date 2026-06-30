@@ -268,8 +268,8 @@ async function processBatch(provider: string): Promise<void> {
   const durationMs = Date.now() - startTime;
 
   // Record metrics
-  const successCount = result.results.filter(r => r.success).length;
-  const failureCount = result.results.filter(r => !r.success).length;
+const successCount = result.results.filter((r: { success: boolean }) => r.success).length;
+   const failureCount = result.results.filter((r: { success: boolean }) => !r.success).length;
 
   batchPayoutTotal.inc({ provider, status: result.success ? "success" : "partial" });
   batchPayoutItemsTotal.inc({ provider, status: "success" }, successCount);

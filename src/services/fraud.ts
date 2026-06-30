@@ -361,7 +361,7 @@ export class FraudService {
     // 6. IP Geolocation Mismatch
     if (transactionInput.ipAddress && user) {
       const ipLocation = await this.getIPLocation(transactionInput.ipAddress);
-      if (ipLocation && this.isLocationMismatch(ipLocation, transactionInput.location)) {
+      if (ipLocation && this.isLocationMismatch(ipLocation, transactionInput.location ?? null)) {
         score += this.config.ipMismatchScore;
         reasons.push('IP geolocation does not match transaction location');
         heuristicsTriggered.push('ip_geolocation_mismatch');

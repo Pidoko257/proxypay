@@ -32,7 +32,7 @@ class LockManager {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.redlock = new Redlock([redisClient as any], settings);
 
-    this.redlock.on("error", (error) => {
+    this.redlock.on("error", (error: Error) => {
       console.error("Redlock error:", error);
     });
   }

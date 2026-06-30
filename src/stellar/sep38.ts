@@ -380,6 +380,6 @@ export async function validateQuoteToken(quoteToken: string): Promise<QuoteData 
   }
 }
 
-export { QuoteData, QuoteTokenPayload };
+export type { QuoteData, QuoteTokenPayload };
 
 export default router;

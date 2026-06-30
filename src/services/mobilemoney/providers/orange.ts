@@ -16,7 +16,7 @@ type OrangeResult = {
 
 type OrangeSessionState = {
   cookies: Record<string, StoredCookie>;
-  csrfToken?: string;
+  csrfToken?: string | null;
   expiresAt: number;
   authenticatedAt: number;
 };

@@ -53,7 +53,10 @@
     "sdk:build": "cd sdk && ./gradlew build",
     "sdk:generate:ts": "openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config-ts.yaml -o sdk-ts",
     "sdk:build:ts": "cd sdk-ts && npm install && npm run build",
-
+    "generate:spec": "tsx scripts/generate-openapi-spec.ts",
+    "validate:spec": "swagger-cli validate docs/openapi.json",
+    "check:spec": "npm run generate:spec && npm run validate:spec && git diff --exit-code docs/openapi.json || (echo 'ERROR: Generated OpenAPI spec differs from committed spec. Run npm run generate:spec and commit the updated docs/openapi.json' && exit 1)",
+    "upload:spec": "tsx scripts/upload-openapi-spec.ts",
     "test:load:ingestion-10k": "k6 run --vus-max 12000 -e SCENARIO=ingestion_10k tests/load/api.js",
     "test:load:spike-10k": "k6 run --vus-max 12000 -e SCENARIO=spike_10k tests/load/api.js",
     "test:load:traffic-spike": "k6 run --vus-max 6000 -e SCENARIO=traffic_spike tests/load/api.js",
@@ -157,6 +160,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@apidevtools/swagger-cli": "^4.0.4",
+    "@apidevtools/swagger-parser": "^10.1.1",
     "@aws-sdk/client-kms": "^3.1036.0",
     "@cloudflare/workers-types": "^4.20250422.0",
     "@commitlint/cli": "^19.8.1",

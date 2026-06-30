@@ -1,5 +1,5 @@
 import NodeCache from "node-cache";
-import { redisClient } from "../config/redis";
+import { redisClient, sharedIORedisSubscriber } from "../config/redis";
 
 /**
  * Layered Cache Implementation (L1: Memory, L2: Redis)
@@ -21,7 +21,6 @@ const l1 = new NodeCache({
 const INVALIDATION_CHANNEL = "cache:invalidate:l1";
 
 export class LayeredCache {
-  private subscriber: any = null;
   private isInitialized = false;
   private activeRevalidations = new Map<string, Promise<void>>();
 
@@ -33,10 +32,9 @@ export class LayeredCache {
     
     if (redisClient && redisClient.isOpen) {
       try {
-        this.subscriber = redisClient.duplicate();
-        await this.subscriber.connect();
-        
-        await this.subscriber.subscribe(INVALIDATION_CHANNEL, (key: string) => {
+        await sharedIORedisSubscriber.connect();
+
+        await sharedIORedisSubscriber.subscribe(INVALIDATION_CHANNEL, (key: string) => {
           l1.del(key);
         });
         

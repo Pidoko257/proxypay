@@ -3,6 +3,9 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { WebhookService, WebhookEvent } from "../services/webhook";
 import { ingestRateLimiter } from "../middleware/ingestRateLimit";
+import { redisClient } from "../config/redis";
+import { requireAuth } from "../middleware/auth";
+import { queryWrite } from "../config/database";
 
 const router = Router();
 const transactionModel = new TransactionModel();
@@ -175,6 +178,159 @@ router.post("/test", (req: Request, res: Response) => {
       "content-encoding": req.get("content-encoding"),
       "user-agent": req.get("user-agent"),
     },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /webhooks/events/:eventId/retry  (Issue #98)
+// ---------------------------------------------------------------------------
+// Manually enqueue an immediate re-delivery of a specific webhook event.
+// Rate limited to 10 manual retries per event per hour to prevent abuse.
+// The re-delivery attempt is logged in the webhook_delivery_attempts table.
+// Returns 404 when the event does not belong to the requesting organisation.
+// ---------------------------------------------------------------------------
+
+const RETRY_RATE_LIMIT = 10;
+const RETRY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Check and enforce the per-event retry rate limit using a Redis sliding-window
+ * counter (INCR + PEXPIRE).  Returns `true` when the request is allowed.
+ */
+async function checkRetryRateLimit(eventId: string): Promise<{
+  allowed: boolean;
+  remaining: number;
+  resetAt: number;
+}> {
+  const key = `webhook:retry:${eventId}`;
+  const now = Date.now();
+
+  try {
+    const count = await redisClient.incr(key);
+    const countNum = typeof count === "string" ? parseInt(count, 10) : count;
+    if (countNum === 1) {
+      await redisClient.pexpire(key, RETRY_WINDOW_MS);
+    }
+    const ttlMs = await redisClient.pttl(key);
+    const resetAt = ttlMs > 0 ? now + ttlMs : now + RETRY_WINDOW_MS;
+    const allowed = countNum <= RETRY_RATE_LIMIT;
+    const remaining = Math.max(0, RETRY_RATE_LIMIT - countNum);
+    return { allowed, remaining, resetAt };
+  } catch {
+    // Redis unavailable — allow the request to proceed rather than block
+    return { allowed: true, remaining: RETRY_RATE_LIMIT, resetAt: now + RETRY_WINDOW_MS };
+  }
+}
+
+/**
+ * Log a re-delivery attempt to the webhook_delivery_attempts table.
+ * The table is created by the migration for this feature; if it does not
+ * exist yet the error is caught and logged without crashing.
+ */
+async function logRetryAttempt(params: {
+  eventId: string;
+  userId: string;
+  status: "enqueued" | "failed";
+  errorMessage?: string;
+}): Promise<void> {
+  try {
+    await queryWrite(
+      `INSERT INTO webhook_delivery_attempts
+         (event_id, user_id, status, triggered_by, error_message, created_at)
+       VALUES ($1, $2, $3, 'manual', $4, NOW())`,
+      [
+        params.eventId,
+        params.userId,
+        params.status,
+        params.errorMessage ?? null,
+      ],
+    );
+  } catch (err) {
+    // Non-fatal — log but don't surface to caller
+    console.error("[webhook-retry] Failed to log attempt:", err);
+  }
+}
+
+router.post("/events/:eventId/retry", requireAuth, async (req: Request, res: Response) => {
+  const { eventId } = req.params;
+  const userId = req.jwtUser?.userId ?? (req as any).user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  // ── Rate limit check ───────────────────────────────────────────────────────
+  const { allowed, remaining, resetAt } = await checkRetryRateLimit(eventId);
+
+  res.setHeader("X-RateLimit-Limit", String(RETRY_RATE_LIMIT));
+  res.setHeader("X-RateLimit-Remaining", String(remaining));
+  res.setHeader("X-RateLimit-Reset", new Date(resetAt).toISOString());
+
+  if (!allowed) {
+    const retryAfterSeconds = Math.ceil((resetAt - Date.now()) / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    return res.status(429).json({
+      error: "Too Many Requests",
+      message: `Manual retry rate limit reached. Maximum ${RETRY_RATE_LIMIT} retries per event per hour.`,
+      retryAfter: retryAfterSeconds,
+    });
+  }
+
+  // ── Look up the event (transaction) and verify ownership ──────────────────
+  let transaction;
+  try {
+    transaction = await transactionModel.findById(eventId);
+  } catch (err) {
+    console.error("[webhook-retry] DB error looking up event:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+
+  if (!transaction) {
+    return res.status(404).json({
+      error: "Not Found",
+      message: `Event ${eventId} not found.`,
+    });
+  }
+
+  // Enforce organisation isolation: the transaction must belong to the caller.
+  if (transaction.userId !== userId) {
+    return res.status(404).json({
+      error: "Not Found",
+      message: `Event ${eventId} not found.`,
+    });
+  }
+
+  // ── Enqueue the re-delivery ────────────────────────────────────────────────
+  const webhookService = new WebhookService({
+    compress: webhookSettings.compression,
+  });
+
+  let deliveryResult;
+  try {
+    deliveryResult = await webhookService.sendTransactionEvent(
+      transaction.status === TransactionStatus.Completed
+        ? "transaction.completed"
+        : "transaction.failed",
+      transaction,
+    );
+  } catch (err) {
+    await logRetryAttempt({ eventId, userId, status: "failed", errorMessage: String(err) });
+    console.error("[webhook-retry] Delivery error:", err);
+    return res.status(500).json({ error: "Webhook delivery failed", eventId });
+  }
+
+  await logRetryAttempt({
+    eventId,
+    userId,
+    status: "enqueued",
+    errorMessage: deliveryResult.lastError ?? undefined,
+  });
+
+  return res.status(202).json({
+    message: "Webhook re-delivery enqueued",
+    eventId,
+    deliveryStatus: deliveryResult.status,
+    attempts: deliveryResult.attempts,
   });
 });
 

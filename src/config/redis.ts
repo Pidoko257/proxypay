@@ -1,4 +1,5 @@
 import { createClient } from "redis";
+import IORedis from "ioredis";
 import RedisStore from "connect-redis";
 
 export const SESSION_TTL_SECONDS = parseInt(
@@ -261,6 +262,126 @@ export async function connectRedis(): Promise<void> {
   }
 }
 
+export { redisClient };
+
+// ---------------------------------------------------------------------------
+// Dedicated BullMQ Redis connection
+// ---------------------------------------------------------------------------
+// BullMQ requires its own ioredis-compatible client that must NOT be shared
+// with regular cache/rate-limit operations.  We create a second node-redis
+// client here and expose it so all BullMQ queues and workers can import the
+// same instance instead of each spinning up their own connection.
+// ---------------------------------------------------------------------------
+const BULLMQ_REDIS_URL = process.env.REDIS_URL || DEFAULT_REDIS_URL;
+
+export const bullMQRedisConnection = createClient({
+  url: BULLMQ_REDIS_URL,
+  socket: {
+    reconnectStrategy: (retries) => {
+      if (retries > 100) {
+        console.error("BullMQ Redis: Max reconnection attempts reached");
+        return new Error("Max reconnection attempts reached");
+      }
+      return Math.min(100 + retries * 200, 3000);
+    },
+  },
+});
+
+bullMQRedisConnection.on("error", (err) => {
+  console.error("[BullMQ Redis] Client error:", err);
+});
+bullMQRedisConnection.on("connect", () => {
+  console.log("[BullMQ Redis] Connected");
+});
+bullMQRedisConnection.on("reconnecting", () => {
+  console.log("[BullMQ Redis] Reconnecting...");
+});
+
+// ---------------------------------------------------------------------------
+// Graceful startup / shutdown helpers
+// ---------------------------------------------------------------------------
+
+export async function connectBullMQRedis(): Promise<void> {
+  if (!bullMQRedisConnection.isOpen) {
+    await bullMQRedisConnection.connect();
+  }
+}
+
+export async function disconnectBullMQRedis(): Promise<void> {
+  if (bullMQRedisConnection.isOpen) {
+    await bullMQRedisConnection.quit();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared ioredis instances for Pub/Sub and cache operations
+// ---------------------------------------------------------------------------
+// Subscriber mode is exclusive — a single connection is required.
+// We create two singleton ioredis clients (publisher and subscriber)
+// so the entire application shares them instead of each module spinning
+// up its own connection pool.
+// ---------------------------------------------------------------------------
+const IOREDIS_URL = process.env.REDIS_URL || DEFAULT_REDIS_URL;
+
+const ioredisOptions: any = {
+  retryStrategy: (times: number) => Math.min(100 + times * 200, 3000),
+  enableOfflineQueue: false,
+  maxRetriesPerRequest: 1,
+};
+
+export const sharedIORedisPublisher = new IORedis(IOREDIS_URL, ioredisOptions);
+export const sharedIORedisSubscriber = new IORedis(IOREDIS_URL, {
+  ...ioredisOptions,
+  lazyConnect: true,
+});
+
+sharedIORedisPublisher.on("error", (err: Error) => {
+  console.error("[IORedis Publisher] Client error:", err.message);
+});
+
+sharedIORedisSubscriber.on("error", (err: Error) => {
+  console.error("[IORedis Subscriber] Client error:", err.message);
+});
+
+let _ioredisPublisherReady = false;
+let _ioredisSubscriberReady = false;
+
+export async function connectIORedisPubSub(): Promise<void> {
+  if (!_ioredisPublisherReady) {
+    try {
+      await sharedIORedisPublisher.connect();
+      _ioredisPublisherReady = true;
+      console.log("[IORedis Publisher] Connected");
+    } catch (err) {
+      console.error("[IORedis Publisher] Connection failed:", err);
+    }
+  }
+  if (!_ioredisSubscriberReady) {
+    try {
+      await sharedIORedisSubscriber.connect();
+      _ioredisSubscriberReady = true;
+      console.log("[IORedis Subscriber] Connected");
+    } catch (err) {
+      console.error("[IORedis Subscriber] Connection failed:", err);
+    }
+  }
+}
+
+export async function disconnectIORedisPubSub(): Promise<void> {
+  try {
+    await sharedIORedisPublisher.quit();
+    _ioredisPublisherReady = false;
+  } catch {
+    sharedIORedisPublisher.disconnect();
+  }
+  try {
+    await sharedIORedisSubscriber.quit();
+    _ioredisSubscriberReady = false;
+  } catch {
+    sharedIORedisSubscriber.disconnect();
+  }
+}
+
 export async function disconnectRedis(): Promise<void> {
   if (sentinelSubscriber) {
     try {
@@ -274,12 +395,22 @@ export async function disconnectRedis(): Promise<void> {
     }
   }
 
+  // Close the dedicated BullMQ connection if it is still open
+  try {
+    if (bullMQRedisConnection.isOpen) {
+      await bullMQRedisConnection.quit();
+    }
+  } catch (err) {
+    console.error("[BullMQ Redis] Error during disconnect:", err);
+  }
+
   if (redisClient.isOpen) {
     await redisClient.quit();
   }
-}
 
-export { redisClient };
+  // Close shared ioredis pub/sub connections
+  await disconnectIORedisPubSub();
+}
 
 export function createRedisStore() {
   return new RedisStore({

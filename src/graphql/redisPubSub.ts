@@ -18,37 +18,9 @@
  */
 
 import { RedisPubSub } from "graphql-redis-subscriptions";
-import IORedis from "ioredis";
+import type IORedis from "ioredis";
 import type { TypedPubSub } from "./subscriptions";
-
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-
-const redisOptions: any = {
-  retryStrategy: (times) => Math.min(100 + times * 200, 3000),
-  enableOfflineQueue: false,
-  maxRetriesPerRequest: 1,
-  lazyConnect: false,
-};
-
-function makeRedisClient(role: "publisher" | "subscriber"): IORedis {
-  const client = new IORedis(REDIS_URL, redisOptions);
-
-  client.on("error", (err) => {
-    if (process.env.NODE_ENV !== "test") {
-      console.error(`[RedisPubSub:${role}] error:`, err.message);
-    }
-  });
-
-  client.on("connect", () => {
-    console.log(`[RedisPubSub:${role}] connected`);
-  });
-
-  client.on("reconnecting", () => {
-    console.warn(`[RedisPubSub:${role}] reconnecting…`);
-  });
-
-  return client;
-}
+import { sharedIORedisPublisher, sharedIORedisSubscriber } from "../config/redis";
 
 let _pubsub: RedisPubSub | null = null;
 
@@ -59,8 +31,8 @@ let _pubsub: RedisPubSub | null = null;
 export function getRedisPubSub(): TypedPubSub {
   if (!_pubsub) {
     _pubsub = new RedisPubSub({
-      publisher: makeRedisClient("publisher"),
-      subscriber: makeRedisClient("subscriber"),
+      publisher: sharedIORedisPublisher,
+      subscriber: sharedIORedisSubscriber,
     });
   }
   return _pubsub as unknown as TypedPubSub;

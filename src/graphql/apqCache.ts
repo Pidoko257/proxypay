@@ -10,7 +10,8 @@
  * never crashes due to cache downtime.
  */
 
-import Redis from "ioredis";
+import IORedis from "ioredis";
+import { sharedIORedisPublisher } from "../config/redis";
 
 export interface KeyValueCache {
   get(key: string): Promise<string | undefined>;
@@ -22,11 +23,11 @@ const APQ_KEY_PREFIX = "apq:";
 const DEFAULT_TTL_SECONDS = parseInt(process.env.APQ_TTL_SECONDS || "86400", 10); // 24 h
 
 export class RedisAPQCache implements KeyValueCache {
-  private client: Redis;
+  private client: IORedis;
   private ttl: number;
   private available = true;
 
-  constructor(client: Redis, ttlSeconds = DEFAULT_TTL_SECONDS) {
+  constructor(client: IORedis, ttlSeconds = DEFAULT_TTL_SECONDS) {
     this.client = client;
     this.ttl = ttlSeconds;
 
@@ -80,33 +81,9 @@ export class RedisAPQCache implements KeyValueCache {
 }
 
 /**
- * Creates a RedisAPQCache backed by a dedicated ioredis connection.
- * Uses a separate connection from the main Redis client so APQ cache
- * errors don't interfere with sessions, locks, or queues.
+ * Creates a RedisAPQCache backed by the shared ioredis publisher connection.
  */
 export function createAPQCache(): RedisAPQCache {
-  const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
   const ttl = parseInt(process.env.APQ_TTL_SECONDS || "86400", 10);
-
-  const client = new Redis(redisUrl, {
-    // Retry forever with capped backoff — APQ is non-critical
-    retryStrategy: (times) => Math.min(100 + times * 200, 3000),
-    enableOfflineQueue: false, // don't queue commands while disconnected
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-
-  client.on("error", (err) => {
-    // Suppress noisy repeated errors — the cache adapter already logs once
-    if (process.env.NODE_ENV !== "test") {
-      console.error("[APQ] ioredis error:", err.message);
-    }
-  });
-
-  // Connect in the background — failures are handled by the cache adapter
-  client.connect().catch((err) => {
-    console.warn("[APQ] Initial Redis connection failed:", err.message);
-  });
-
-  return new RedisAPQCache(client, ttl);
+  return new RedisAPQCache(sharedIORedisPublisher, ttl);
 }

@@ -1,0 +1,98 @@
+/**
+ * Sticky scroll-spy navigation.
+ *
+ * Color choices are verified against WCAG 2.1 AA (>= 4.5:1 for normal text):
+ *   - Inactive link  #44474e on #ffffff  -> ~8.9:1
+ *   - Active link    #ffffff on #1d4ed8  -> ~6.6:1
+ *   - Dark inactive  #d0d3d9 on #1b1b1d  -> ~12:1
+ *   - Dark active    #ffffff on #1d4ed8  -> ~6.6:1
+ * Active state is also signalled by weight + an underline bar (not color alone),
+ * and exposed via aria-current in the component.
+ */
+
+.nav {
+  position: sticky;
+  /* Sit directly beneath the Docusaurus top navbar on every breakpoint. */
+  top: var(--ifm-navbar-height, 60px);
+  z-index: 100;
+  background: var(--ifm-background-color);
+  border-bottom: 1px solid var(--ifm-toc-border-color, #e3e5e8);
+  padding: 0.5rem 1rem;
+  margin: 0 0 1.5rem;
+}
+
+.list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.item {
+  margin: 0;
+}
+
+.link {
+  display: inline-block;
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1.2;
+  color: #44474e;
+  text-decoration: none;
+  border-bottom: 3px solid transparent;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.link:hover {
+  background: #eef1f6;
+  color: #1d4ed8;
+  text-decoration: none;
+}
+
+.link:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
+}
+
+.linkActive,
+.linkActive:hover {
+  color: #ffffff;
+  background: #1d4ed8;
+  font-weight: 700;
+  border-bottom-color: #0b2e8a;
+}
+
+[data-theme='dark'] .link {
+  color: #d0d3d9;
+}
+
+[data-theme='dark'] .link:hover {
+  background: #2a2a2e;
+  color: #ffffff;
+}
+
+[data-theme='dark'] .linkActive,
+[data-theme='dark'] .linkActive:hover {
+  color: #ffffff;
+  background: #1d4ed8;
+  border-bottom-color: #93b4ff;
+}
+
+/* On narrow screens, let the bar scroll horizontally instead of wrapping. */
+@media (max-width: 600px) {
+  .list {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .item {
+    flex: 0 0 auto;
+  }
+}

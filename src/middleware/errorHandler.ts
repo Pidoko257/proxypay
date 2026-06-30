@@ -183,6 +183,8 @@ export const errorHandler = (
   }, 'Request Error');
 
   const details = extractLegacyDetails(err);
+  // Stack traces are intentionally excluded from the response body.
+  // They are only logged server-side (see logger.error above).
   const body: ErrorResponse & { statusCode: number; error?: string } = {
     code: errorCode,
     message: localizedMessage,

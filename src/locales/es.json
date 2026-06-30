@@ -24,6 +24,8 @@
     "INTERNAL_ERROR": "Error interno del servidor",
     "SERVICE_UNAVAILABLE": "El servicio no esta disponible temporalmente",
     "DATABASE_ERROR": "La operacion de base de datos fallo",
+    "TRUSTLINE_MISSING": "La cuenta del destinatario no tiene una linea de confianza Stellar requerida para el activo de pago",
+    "ERR_MISSING_TRUSTLINE": "La cuenta del destinatario no tiene una linea de confianza Stellar para el activo de pago. Use el XDR Change Trust proporcionado para establecerla.",
     "DEFAULT": "Ocurrio un error"
   },
   "sms": {

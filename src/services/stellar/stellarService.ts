@@ -5,6 +5,7 @@ import { transactionTotal, transactionErrorsTotal } from "../../utils/metrics";
 import { AssetService, getConfiguredPaymentAsset } from "./assetService";
 import { sanctionService } from "../sanctionService";
 import { resolveToBaseAddress } from "../../stellar/muxed";
+import { validateRecipientTrustline } from "../../stellar/trustlineValidation";
 
 dotenv.config();
 
@@ -182,17 +183,10 @@ export class StellarService {
 
       // REAL MODE
       const paymentAsset = getConfiguredPaymentAsset();
-      if (!paymentAsset.isNative()) {
-        const trusted = await this.assetService.hasTrustline(
-          resolvedDestinationAddress,
-          paymentAsset,
-        );
-        if (!trusted) {
-          throw new Error(
-            `Recipient has no trustline for ${paymentAsset.getCode()}. Add a trustline before paying this asset.`,
-          );
-        }
-      }
+
+      // Throws MissingTrustlineError (ERR_MISSING_TRUSTLINE) with a changeTrustXdr
+      // when the recipient lacks a trustline; result is Redis-cached for 60 s.
+      await validateRecipientTrustline(resolvedDestinationAddress, paymentAsset);
 
       const account = await this.server.loadAccount(
         this.issuerKeypair.publicKey(),

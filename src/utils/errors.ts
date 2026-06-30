@@ -95,6 +95,7 @@ export class BusinessLogicError extends Error implements AppError {
   code: string;
   statusCode: number;
   details?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
 
   constructor(
     message: string,

@@ -24,6 +24,8 @@
     "INTERNAL_ERROR": "Hitilafu ya ndani ya seva",
     "SERVICE_UNAVAILABLE": "Huduma haipatikani kwa muda",
     "DATABASE_ERROR": "Uendeshaji wa hifadhidata umeshindikana",
+    "TRUSTLINE_MISSING": "Akaunti ya mpokeaji haina mstari wa uaminifu wa Stellar unaohitajika kwa mali ya malipo",
+    "ERR_MISSING_TRUSTLINE": "Akaunti ya mpokeaji haina mstari wa uaminifu wa Stellar kwa mali ya malipo. Tumia XDR ya Change Trust iliyotolewa kuianzisha.",
     "DEFAULT": "Hitilafu imetokea"
   },
   "sms": {

@@ -1,6 +1,6 @@
 import * as StellarSdk from "stellar-sdk";
 import { getStellarServer, getNetworkPassphrase } from "../config/stellar";
-import { AssetService } from "../services/stellar/assetService";
+import { validateRecipientTrustline } from "./trustlineValidation";
 
 export interface PathPaymentParams {
   /** Keypair of the account sending the payment */
@@ -69,18 +69,11 @@ export async function executePathPayment(
   } = params;
 
   const server = getStellarServer();
-  const assetService = new AssetService();
 
-  // Verify destination has a trustline for the asset it will receive
-  if (!destAsset.isNative()) {
-    const trusted = await assetService.hasTrustline(destination, destAsset);
-    if (!trusted) {
-      throw new Error(
-        `Destination has no trustline for ${destAsset.getCode()}. ` +
-          `Ask the recipient to add a trustline before sending.`,
-      );
-    }
-  }
+  // Verify destination has a trustline for the asset it will receive.
+  // Throws MissingTrustlineError (ERR_MISSING_TRUSTLINE) with a changeTrustXdr
+  // when the trustline is absent; result is Redis-cached for 60 s.
+  await validateRecipientTrustline(destination, destAsset);
 
   const account = await server.loadAccount(senderKeypair.publicKey());
 

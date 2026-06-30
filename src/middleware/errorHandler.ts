@@ -24,6 +24,8 @@ export interface AppError extends Error {
   code?: string;
   statusCode?: number;
   details?: Record<string, unknown>;
+  /** Always included in the API response regardless of NODE_ENV (for critical user-facing data). */
+  meta?: Record<string, unknown>;
   locale?: string;
   requestId?: string;
 }
@@ -183,7 +185,7 @@ export const errorHandler = (
   }, 'Request Error');
 
   const details = extractLegacyDetails(err);
-  const body: ErrorResponse & { statusCode: number; error?: string } = {
+  const body: ErrorResponse & { statusCode: number; error?: string; meta?: Record<string, unknown> } = {
     code: errorCode,
     message: localizedMessage,
     message_en: englishMessage,
@@ -191,6 +193,7 @@ export const errorHandler = (
     statusCode,
     requestId,
     details,
+    meta: err.meta,
   };
 
   if (details && typeof details === "object" && typeof details.error === "string") {
@@ -203,6 +206,7 @@ export const errorHandler = (
 
   if (process.env.NODE_ENV === "production") {
     delete body.details;
+    // meta is intentionally kept — it contains user-actionable data (e.g. changeTrustXdr)
   }
 
   res.status(statusCode).json(body);

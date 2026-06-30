@@ -30,6 +30,7 @@ export const ERROR_CODES = {
   // Authorization errors (4030-4039) - HTTP 403
   FORBIDDEN: "FORBIDDEN",
   INSUFFICIENT_PERMISSIONS: "INSUFFICIENT_PERMISSIONS",
+  FEATURE_NOT_ENABLED: "FEATURE_NOT_ENABLED",
 
   // Resource errors (4040-4049) - HTTP 404
   NOT_FOUND: "NOT_FOUND",
@@ -105,7 +106,8 @@ export const getHttpStatus = (code: string): number => {
   }
   if (
     code === ERROR_CODES.FORBIDDEN ||
-    code === ERROR_CODES.INSUFFICIENT_PERMISSIONS
+    code === ERROR_CODES.INSUFFICIENT_PERMISSIONS ||
+    code === ERROR_CODES.FEATURE_NOT_ENABLED
   ) {
     return 403;
   }

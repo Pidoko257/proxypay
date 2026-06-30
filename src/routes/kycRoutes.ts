@@ -4,6 +4,7 @@ import { KYCController } from "../controllers/kycController";
 import { authenticateToken } from "../middleware/auth";
 import { upload, uploadErrorMessages } from "../middleware/upload";
 import { uploadToS3 } from "../services/s3Upload";
+import { KYCDocumentStorage } from "../services/kycDocumentStorage";
 import { Request, Response } from "express";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
@@ -76,6 +77,7 @@ function annotateDocumentVisibility(
 
 export const createKYCRoutes = (db: Pool): Router => {
   const router = Router();
+  const kycDocumentStorage = new KYCDocumentStorage(db);
   const kycController = new KYCController(db);
 
   // All KYC routes require authentication

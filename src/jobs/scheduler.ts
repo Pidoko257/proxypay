@@ -9,6 +9,7 @@ import { runBalanceMonitorJob } from "./balanceMonitorJob";
 import { runSep31MonitorJob } from "./sep31MonitorJob";
 import { runFeeBumpJob } from "./feeBumpJob";
 import { runSep31FeeBumpJob } from "./sep31FeeBumpJob";
+import { runStellarFeeStatsJob } from "./stellarFeeStatsJob";
 import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
@@ -88,6 +89,12 @@ const JOBS: JobConfig[] = [
     // Every 30 seconds - bumps fees for stuck SEP-31 transactions
     schedule: process.env.SEP31_FEE_BUMP_CRON || "*/30 * * * * *",
     handler: runSep31FeeBumpJob,
+  },
+  {
+    name: "stellar-fee-stats",
+    // Every 30 seconds - fetches Horizon fee stats and caches in Redis
+    schedule: process.env.STELLAR_FEE_STATS_CRON || "*/30 * * * * *",
+    handler: runStellarFeeStatsJob,
   },
   {
     name: "provider-balance-alert",

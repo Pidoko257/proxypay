@@ -13,6 +13,7 @@ import {
   getNetworkPassphrase,
   getStellarServer,
 } from "../config/stellar";
+import { getCachedBaseFee } from "../services/stellarFeeStatsCache";
 
 type StellarOperation = Parameters<TransactionBuilder["addOperation"]>[0];
 type StellarTimebounds = { minTime: string; maxTime: string };
@@ -94,6 +95,11 @@ function getFeePayerKeypair(): Keypair {
 }
 
 async function getTransactionBaseFee(): Promise<number> {
+  const cachedBaseFee = await getCachedBaseFee();
+  if (cachedBaseFee !== null) {
+    return getConfiguredBaseFee(cachedBaseFee);
+  }
+
   const server = getStellarServer();
   const fetchedBaseFee = await server.fetchBaseFee();
   return getConfiguredBaseFee(Number(fetchedBaseFee));

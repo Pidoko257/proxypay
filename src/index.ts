@@ -13,6 +13,7 @@ import { register } from "prom-client";
 import spdy from "spdy";
 import fs from "fs";
 import session from "express-session";
+import cookieParser from "cookie-parser";
 import type { SessionOptions } from "express-session";
 import {
   apiVersionMiddleware,
@@ -206,6 +207,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 const sessionSecret =
   process.env.SESSION_SECRET || "default-secret-change-in-production";
 const redisStore = createRedisStore();
+
+app.use(cookieParser());
 
 app.use(
   session(<SessionOptions>{

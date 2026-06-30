@@ -71,6 +71,11 @@ export const env = cleanEnv(process.env, {
     default: "development-pii-master-key-32-chars!",
     desc: "Master key for per-user HKDF key derivation. Must be a high-entropy secret in production. Never log or expose this value.",
   }),
+  ACCESS_TOKEN_EXPIRES_IN: str({
+    default: "15m",
+    desc: "Access token TTL (default: 15m for security)",
+    example: "15m",
+  }),
   REFRESH_TOKEN_EXPIRES_IN: str({
     default: process.env.REFRESH_TOKEN_EXPIRES_IN,
     desc: "REFRESH_TOKEN_EXPIRES_IN needs to be set in environment file",

@@ -19,11 +19,27 @@ export interface TransactionUpdatePayload {
   [key: string]: unknown;
 }
 
+export interface ConnectionStats {
+  totalConnections: number;
+  rateLimitViolations: number;
+  rejectedConnections: number;
+}
+
+interface RateLimitState {
+  /** Number of messages received in the current 1-second window. */
+  count: number;
+  /** Timestamp (ms) when the current window started. */
+  windowStart: number;
+  /** How many times this client has exceeded the rate limit. */
+  violations: number;
+}
+
 interface AuthenticatedWebSocket extends WebSocket {
   isAlive: boolean;
   userId?: string;
   subscriptions: Set<string>;
   missedPings: number; // tracks consecutive missed pongs
+  rateLimit: RateLimitState;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +73,22 @@ export class WebSocketManager {
   private readonly HEARTBEAT_INTERVAL_MS = 10_000; // faster heartbeat for quicker stale detection
   private readonly MAX_MISSED_PINGS = 2; // number of missed pings before termination
 
+  // ---- Connection limits ----
+  /** Maximum number of concurrent WebSocket connections allowed. */
+  static readonly MAX_CONNECTIONS = 1000;
+
+  // ---- Rate limiting ----
+  /** Maximum messages per client per second. */
+  private readonly RATE_LIMIT_MAX_MESSAGES = 10;
+  /** Duration of the rate-limit window in milliseconds. */
+  private readonly RATE_LIMIT_WINDOW_MS = 1_000;
+  /** Number of rate-limit violations before forcibly disconnecting the client. */
+  private readonly RATE_LIMIT_MAX_VIOLATIONS = 3;
+
+  // ---- Stats ----
+  private _rateLimitViolations = 0;
+  private _rejectedConnections = 0;
+
   constructor(httpServer: Server) {
     this.wss = new WebSocketServer({ server: httpServer });
     WebSocketManager.activeInstance = this;
@@ -73,10 +105,22 @@ export class WebSocketManager {
 
   private init(): void {
     this.wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+      // ---- Connection limit ----
+      if (this.clients.size >= WebSocketManager.MAX_CONNECTIONS) {
+        this._rejectedConnections++;
+        ws.close(1013, "Server at capacity – try again later");
+        return;
+      }
+
       const client = ws as AuthenticatedWebSocket;
       client.isAlive = true;
       client.subscriptions = new Set();
       client.missedPings = 0; // initialize missed ping counter
+      client.rateLimit = {
+        count: 0,
+        windowStart: Date.now(),
+        violations: 0,
+      };
 
       // Authenticate the client
       const token = this.extractToken(req);
@@ -147,6 +191,42 @@ export class WebSocketManager {
     client: AuthenticatedWebSocket,
     rawData: string,
   ): void {
+    // ---- Rate limiting ----
+    const now = Date.now();
+    const rl = client.rateLimit;
+
+    if (now - rl.windowStart >= this.RATE_LIMIT_WINDOW_MS) {
+      // Start a new window
+      rl.count = 0;
+      rl.windowStart = now;
+    }
+
+    rl.count++;
+
+    if (rl.count > this.RATE_LIMIT_MAX_MESSAGES) {
+      rl.violations++;
+      this._rateLimitViolations++;
+
+      this.sendToClient(client, {
+        type: "error",
+        data: {
+          message: "Rate limit exceeded – slow down",
+          code: "RATE_LIMIT_EXCEEDED",
+          retryAfterMs: this.RATE_LIMIT_WINDOW_MS - (now - rl.windowStart),
+        },
+      });
+
+      if (rl.violations >= this.RATE_LIMIT_MAX_VIOLATIONS) {
+        console.warn(
+          `Rate limit violations threshold reached for client ${clientId} – disconnecting`,
+        );
+        client.close(1008, "Rate limit violations exceeded");
+      }
+
+      return;
+    }
+
+    // ---- Message parsing ----
     let message: WebSocketMessage;
 
     try {
@@ -422,6 +502,20 @@ export class WebSocketManager {
   /** Returns the number of currently connected clients. */
   get connectionCount(): number {
     return this.clients.size;
+  }
+
+  /** Returns a snapshot of server-level connection and rate-limit statistics. */
+  getStats(): ConnectionStats {
+    return {
+      totalConnections: this.clients.size,
+      rateLimitViolations: this._rateLimitViolations,
+      rejectedConnections: this._rejectedConnections,
+    };
+  }
+
+  /** Alias for getStats() — returns connection and rate-limit statistics. */
+  getConnectionStats(): ConnectionStats {
+    return this.getStats();
   }
 
   static getInstance(): WebSocketManager | null {

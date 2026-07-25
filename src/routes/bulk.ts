@@ -14,8 +14,11 @@ import highThroughputService, {
 } from "../services/stellar/highThroughputService";
 import { createError } from "../middleware/errorHandler";
 import { ERROR_CODES } from "../constants/errorCodes";
+import { batchJobStore, BatchJob } from "../services/batchJobStore";
+import { addBatchJobs, BATCH_TRANSACTION_SIZE, cancelBatchJobs } from "../queue/batchQueue";
+import { pool } from "../config/database";
 
-interface CsvRow {
+export interface CsvRow {
   amount: string;
   phoneNumber: string;
   provider: string;
@@ -295,7 +298,14 @@ bulkRoutes.post(
     }
 
     const jobId = crypto.randomUUID();
-    const job: BulkJob = {
+    const userId = (req as any).user?.id ?? "anonymous";
+    const batchSize = Math.min(
+      parseInt(String(req.query.batchSize ?? BATCH_TRANSACTION_SIZE), 10) || BATCH_TRANSACTION_SIZE,
+      500,
+    );
+
+    // Create job in Redis-backed store (falls back gracefully if Redis is down)
+    const batchJob: BatchJob = {
       id: jobId,
       status: "pending",
       total: rows.length,
@@ -304,10 +314,24 @@ bulkRoutes.post(
       failed: 0,
       errors: [],
       createdAt: new Date(),
+      userId,
+      batchSize,
     };
-    jobs.set(jobId, job);
+    await batchJobStore.create(batchJob);
 
-    setImmediate(() => processJob(jobId, rows));
+    // Also keep in-memory for fallback / backward compatibility
+    const legacyJob: BulkJob = { ...batchJob };
+    jobs.set(jobId, legacyJob);
+
+    // Enqueue individual rows into BullMQ batch queue
+    try {
+      await addBatchJobs(
+        rows.map((row, i) => ({ jobId, rowIndex: i, row, userId, total: rows.length })),
+      );
+    } catch {
+      // If BullMQ is unavailable, fall back to in-process execution
+      setImmediate(() => processJob(jobId, rows));
+    }
 
     return res.status(202).json({
       jobId,
@@ -335,8 +359,10 @@ bulkRoutes.use(
   },
 );
 
-bulkRoutes.get("/:jobId", (req: Request, res: Response) => {
-  const job = jobs.get(req.params.jobId);
+bulkRoutes.get("/:jobId", async (req: Request, res: Response) => {
+  // Try Redis-backed store first, fall back to in-memory map
+  const redisJob = await batchJobStore.get(req.params.jobId);
+  const job = redisJob ?? jobs.get(req.params.jobId);
 
   if (!job) {
     throw createError(ERROR_CODES.NOT_FOUND, "Job not found", {
@@ -356,5 +382,139 @@ bulkRoutes.get("/:jobId", (req: Request, res: Response) => {
     errors: job.errors,
     createdAt: job.createdAt,
     ...(job.completedAt && { completedAt: job.completedAt }),
+    ...("batchSize" in job && { batchSize: (job as BatchJob).batchSize }),
+    ...("exportUrl" in job && (job as BatchJob).exportUrl && { exportUrl: (job as BatchJob).exportUrl }),
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET / — list batch jobs for the authenticated user
+// ─────────────────────────────────────────────────────────────────────────────
+bulkRoutes.get(
+  "/",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const userId = (req as any).user?.id;
+    if (!userId) {
+      throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required");
+    }
+
+    const limit = Math.min(parseInt(String(req.query.limit ?? "20"), 10) || 20, 100);
+    const jobs = await batchJobStore.listByUser(userId, limit);
+
+    return res.json({
+      jobs: jobs.map((j) => ({
+        jobId: j.id,
+        status: j.status,
+        total: j.total,
+        processed: j.processed,
+        succeeded: j.succeeded,
+        failed: j.failed,
+        createdAt: j.createdAt,
+        ...(j.completedAt && { completedAt: j.completedAt }),
+        ...(j.exportUrl && { exportUrl: j.exportUrl }),
+      })),
+      count: jobs.length,
+    });
+  },
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /:jobId — cancel a pending batch job
+// ─────────────────────────────────────────────────────────────────────────────
+bulkRoutes.delete(
+  "/:jobId",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const { jobId } = req.params;
+    const userId = (req as any).user?.id;
+
+    const job = await batchJobStore.get(jobId);
+    if (!job) {
+      throw createError(ERROR_CODES.NOT_FOUND, "Job not found");
+    }
+
+    // Only the owning user (or admin) can cancel
+    if (job.userId !== userId) {
+      throw createError(ERROR_CODES.FORBIDDEN, "Not authorized to cancel this job");
+    }
+
+    if (job.status !== "pending") {
+      return res.status(409).json({ error: "Only pending jobs can be cancelled" });
+    }
+
+    const cancelled = await cancelBatchJobs(jobId);
+    await batchJobStore.delete(jobId);
+
+    return res.json({ message: "Job cancelled", rowsCancelled: cancelled });
+  },
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /:jobId/export — download batch results as CSV or JSON
+// ─────────────────────────────────────────────────────────────────────────────
+bulkRoutes.get(
+  "/:jobId/export",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const { jobId } = req.params;
+    const format = String(req.query.format ?? "json").toLowerCase();
+
+    const job = await batchJobStore.get(jobId) ?? jobs.get(jobId);
+    if (!job) {
+      throw createError(ERROR_CODES.NOT_FOUND, "Job not found");
+    }
+
+    if (job.status !== "completed") {
+      return res.status(409).json({ error: "Export is only available for completed jobs" });
+    }
+
+    // Fetch the actual transaction records tagged with this batchId
+    const { rows: txRows } = await pool.query(
+      `SELECT id, reference_number, type, amount, phone_number, provider,
+              status, stellar_address, created_at, updated_at
+       FROM transactions
+       WHERE metadata->>'batchId' = $1
+       ORDER BY created_at ASC`,
+      [jobId],
+    );
+
+    if (format === "csv") {
+      const header = "id,reference_number,type,amount,phone_number,provider,status,stellar_address,created_at\n";
+      const csvBody = txRows
+        .map((r: any) =>
+          [
+            r.id,
+            r.reference_number,
+            r.type,
+            r.amount,
+            r.phone_number,
+            r.provider,
+            r.status,
+            r.stellar_address,
+            new Date(r.created_at).toISOString(),
+          ]
+            .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+            .join(","),
+        )
+        .join("\n");
+
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="batch-${jobId}.csv"`);
+      return res.send(header + csvBody);
+    }
+
+    // Default: JSON
+    return res.json({
+      jobId,
+      status: job.status,
+      summary: {
+        total: job.total,
+        succeeded: job.succeeded,
+        failed: job.failed,
+      },
+      transactions: txRows,
+      exportedAt: new Date().toISOString(),
+    });
+  },
+);

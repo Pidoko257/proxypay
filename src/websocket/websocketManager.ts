@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { IncomingMessage, Server } from "http";
 import { createClient, RedisClientType } from "redis";
 import { verifyToken } from "../auth/jwt";
+import { Counter, Gauge, Histogram } from "prom-client";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,7 +25,47 @@ interface AuthenticatedWebSocket extends WebSocket {
   userId?: string;
   subscriptions: Set<string>;
   missedPings: number; // tracks consecutive missed pongs
+  messageCount: number; // message counter for rate limiting
+  lastMessageTime: number; // timestamp of last message for rate limiting
+  connectedAt: number; // connection timestamp
 }
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+const wsConnectionsTotal = new Counter({
+  name: "ws_connections_total",
+  help: "Total number of WebSocket connections established",
+});
+
+const wsActiveConnections = new Gauge({
+  name: "ws_active_connections",
+  help: "Number of currently active WebSocket connections",
+});
+
+const wsMessagesReceived = new Counter({
+  name: "ws_messages_received_total",
+  help: "Total number of messages received via WebSocket",
+  labelNames: ["type"],
+});
+
+const wsMessagesSent = new Counter({
+  name: "ws_messages_sent_total",
+  help: "Total number of messages sent via WebSocket",
+  labelNames: ["type"],
+});
+
+const wsRateLimitExceeded = new Counter({
+  name: "ws_rate_limit_exceeded_total",
+  help: "Number of times rate limit was exceeded",
+});
+
+const wsConnectionDuration = new Histogram({
+  name: "ws_connection_duration_seconds",
+  help: "Connection duration in seconds",
+  buckets: [1, 5, 10, 30, 60, 300, 600, 1800, 3600],
+});
 
 // ---------------------------------------------------------------------------
 // WebSocket Manager
@@ -38,6 +79,9 @@ interface AuthenticatedWebSocket extends WebSocket {
  *  - Broadcasting transaction status updates to subscribed clients
  *  - Heartbeat / ping-pong to clean up stale connections
  *  - Redis pub/sub for horizontal scaling across multiple process instances
+ *  - Connection limits per user
+ *  - Rate limiting on message handling
+ *  - Prometheus metrics for monitoring
  */
 export class WebSocketManager {
   private static activeInstance: WebSocketManager | null = null;
@@ -48,6 +92,8 @@ export class WebSocketManager {
   private userRooms: Map<string, Set<string>> = new Map();
   // Map of transactionId -> Set of client IDs subscribed to that transaction
   private subscriptions: Map<string, Set<string>> = new Map();
+  // Map of userId -> number of active connections for rate limiting
+  private userConnectionCounts: Map<string, number> = new Map();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private redisSub: RedisClientType | null = null;
   private redisPub: RedisClientType | null = null;
@@ -56,6 +102,18 @@ export class WebSocketManager {
   private readonly REDIS_CHANNEL = "transaction.updates";
   private readonly HEARTBEAT_INTERVAL_MS = 10_000; // faster heartbeat for quicker stale detection
   private readonly MAX_MISSED_PINGS = 2; // number of missed pings before termination
+  private readonly MAX_CONNECTIONS_PER_USER = parseInt(
+    process.env.WS_MAX_CONNECTIONS_PER_USER || "5",
+  );
+  private readonly RATE_LIMIT_WINDOW_MS = parseInt(
+    process.env.WS_RATE_LIMIT_WINDOW_MS || "1000",
+  );
+  private readonly RATE_LIMIT_MAX_MESSAGES = parseInt(
+    process.env.WS_RATE_LIMIT_MAX_MESSAGES || "10",
+  );
+  private readonly MAX_TOTAL_CONNECTIONS = parseInt(
+    process.env.WS_MAX_TOTAL_CONNECTIONS || "10000",
+  );
 
   constructor(httpServer: Server) {
     this.wss = new WebSocketServer({ server: httpServer });
@@ -77,6 +135,15 @@ export class WebSocketManager {
       client.isAlive = true;
       client.subscriptions = new Set();
       client.missedPings = 0; // initialize missed ping counter
+      client.messageCount = 0;
+      client.lastMessageTime = Date.now();
+      client.connectedAt = Date.now();
+
+      // Check total connection limit
+      if (this.clients.size >= this.MAX_TOTAL_CONNECTIONS) {
+        client.close(1008, "Server at connection capacity");
+        return;
+      }
 
       // Authenticate the client
       const token = this.extractToken(req);
@@ -105,11 +172,25 @@ export class WebSocketManager {
         return;
       }
 
-      const clientId = `${client.userId}::${Date.now()}`;
+      // Check per-user connection limit
+      const userConnectionCount = this.userConnectionCounts.get(client.userId) || 0;
+      if (userConnectionCount >= this.MAX_CONNECTIONS_PER_USER) {
+        client.close(1008, `Maximum connections per user exceeded (${this.MAX_CONNECTIONS_PER_USER})`);
+        return;
+      }
+
+      // Increment user connection count
+      this.userConnectionCounts.set(client.userId, userConnectionCount + 1);
+
+      const clientId = `${client.userId}::${Date.now()}::${Math.random().toString(36).substr(2, 9)}`;
       this.clients.set(clientId, client);
       this.joinUserRoom(client.userId, clientId);
 
-      console.log(`WebSocket client connected: ${clientId}`);
+      // Update metrics
+      wsConnectionsTotal.inc();
+      wsActiveConnections.set(this.clients.size);
+
+      console.log(`WebSocket client connected: ${clientId} (${this.clients.size} active)`);
 
       // Handle pong responses to the heartbeat
       client.on("pong", () => {
@@ -142,11 +223,36 @@ export class WebSocketManager {
   // Message handling
   // -------------------------------------------------------------------------
 
+  private isRateLimited(client: AuthenticatedWebSocket): boolean {
+    const now = Date.now();
+    const timeSinceLastMessage = now - client.lastMessageTime;
+
+    // Reset counter if outside the window
+    if (timeSinceLastMessage > this.RATE_LIMIT_WINDOW_MS) {
+      client.messageCount = 0;
+    }
+
+    client.lastMessageTime = now;
+    client.messageCount += 1;
+
+    return client.messageCount > this.RATE_LIMIT_MAX_MESSAGES;
+  }
+
   private handleMessage(
     clientId: string,
     client: AuthenticatedWebSocket,
     rawData: string,
   ): void {
+    // Check rate limit
+    if (this.isRateLimited(client)) {
+      wsRateLimitExceeded.inc();
+      this.sendToClient(client, {
+        type: "error",
+        data: { message: "Rate limit exceeded" },
+      });
+      return;
+    }
+
     let message: WebSocketMessage;
 
     try {
@@ -158,6 +264,8 @@ export class WebSocketManager {
       });
       return;
     }
+
+    wsMessagesReceived.labels(message.type).inc();
 
     switch (message.type) {
       case "subscribe": {
@@ -309,6 +417,7 @@ export class WebSocketManager {
   private sendToClient(client: WebSocket, message: WebSocketMessage): void {
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify(message));
+      wsMessagesSent.labels(message.type).inc();
     }
   }
 
@@ -333,7 +442,25 @@ export class WebSocketManager {
     }
     this.leaveUserRoom(client.userId, clientId);
     this.clients.delete(clientId);
-    console.log(`WebSocket client disconnected: ${clientId}`);
+
+    // Update user connection count
+    if (client.userId) {
+      const currentCount = this.userConnectionCounts.get(client.userId) || 1;
+      if (currentCount <= 1) {
+        this.userConnectionCounts.delete(client.userId);
+      } else {
+        this.userConnectionCounts.set(client.userId, currentCount - 1);
+      }
+    }
+
+    // Record connection duration metric
+    const durationSeconds = (Date.now() - client.connectedAt) / 1000;
+    wsConnectionDuration.observe(durationSeconds);
+
+    // Update active connections gauge
+    wsActiveConnections.set(this.clients.size);
+
+    console.log(`WebSocket client disconnected: ${clientId} (duration: ${durationSeconds}s, ${this.clients.size} active)`);
   }
 
   // -------------------------------------------------------------------------
@@ -422,6 +549,28 @@ export class WebSocketManager {
   /** Returns the number of currently connected clients. */
   get connectionCount(): number {
     return this.clients.size;
+  }
+
+  /** Returns the number of active connections for a specific user. */
+  getUserConnectionCount(userId: string): number {
+    return this.userConnectionCounts.get(userId) || 0;
+  }
+
+  /** Returns metrics object for monitoring. */
+  getMetrics() {
+    return {
+      activeConnections: this.clients.size,
+      maxConnectionsPerUser: this.MAX_CONNECTIONS_PER_USER,
+      maxTotalConnections: this.MAX_TOTAL_CONNECTIONS,
+      rateLimitWindowMs: this.RATE_LIMIT_WINDOW_MS,
+      rateLimitMaxMessages: this.RATE_LIMIT_MAX_MESSAGES,
+      userRoomCount: this.userRooms.size,
+      subscriptionCount: this.subscriptions.size,
+      totalSubscriptions: Array.from(this.subscriptions.values()).reduce(
+        (sum, set) => sum + set.size,
+        0,
+      ),
+    };
   }
 
   static getInstance(): WebSocketManager | null {

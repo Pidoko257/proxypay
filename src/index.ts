@@ -66,6 +66,7 @@ import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
+import { onboardingRoutes } from "./routes/onboarding";
 import { travelRuleRoutes } from "./routes/travelRule";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
 import sep31Router from "./stellar/sep31";
@@ -389,6 +390,7 @@ app.use("/", paymentLinkRoutes);
 // GDPR
 app.use("/api/gdpr", privacyRoutes);
 app.use("/api/developer", developerDashboardRoutes);
+app.use("/api/onboarding", onboardingRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);

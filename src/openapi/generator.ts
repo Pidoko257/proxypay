@@ -19,6 +19,7 @@ import './schemas/htlc';
 import './schemas/prices';
 import './schemas/sep38';
 import './schemas/sep30';
+import './schemas/onboarding';
 
 // ── Path registrations ────────────────────────────────────────────────────────
 import './paths/auth';
@@ -31,6 +32,7 @@ import './paths/htlc';
 import './paths/prices';
 import './paths/sep38';
 import './paths/sep30';
+import './paths/onboarding';
 
 import { OpenApiGeneratorV3 } from '@asteasolutions/zod-to-openapi';
 import { registry } from './registry';
@@ -72,6 +74,7 @@ export function generateOpenAPIDocument(): Record<string, unknown> {
       { name: 'Prices', description: 'Historical price data' },
       { name: 'SEP-38 Quotes', description: 'SEP-38 Quote & Price Stream protocol — firm quotes locked in Redis' },
       { name: 'SEP-30 Key Recovery', description: 'SEP-30 Multi-Sig Key Recovery — M-of-N cryptographic recovery sessions with full audit trail' },
+      { name: 'Onboarding', description: 'Multi-step developer registration and onboarding flow' },
     ],
   }) as unknown as Record<string, unknown>;
 }

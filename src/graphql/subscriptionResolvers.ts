@@ -2,8 +2,10 @@ import { withFilter } from "graphql-subscriptions";
 import {
   SubscriptionChannels,
   transactionChannel,
+  paymentStatusChannel,
   type TransactionCreatedPayload,
   type TransactionUpdatedPayload,
+  type PaymentStatusUpdatedPayload,
   type DisputeCreatedPayload,
   type DisputeUpdatedPayload,
   type DisputeNoteAddedPayload,
@@ -91,18 +93,39 @@ function formatBulkImportJobPayload(payload: BulkImportJobUpdatedPayload) {
 // Subscription resolvers factory
 // ---------------------------------------------------------------------------
 
+function requireWsAuth(context: { auth?: { authenticated?: boolean } }) {
+  if (!context?.auth?.authenticated) {
+    throw new Error("UNAUTHENTICATED: valid authToken required");
+  }
+}
+
 export function createSubscriptionResolvers(pubsub: TypedPubSub) {
   return {
     Subscription: {
+      // ── paymentStatusUpdated ────────────────────────────────────────────
+      // Targeted Redis channel per payment id for real-time status delivery
+      // across horizontally scaled API instances.
+      paymentStatusUpdated: {
+        subscribe: (_parent: unknown, args: { id: string }, context: any) => {
+          requireWsAuth(context);
+          return pubsub.asyncIterator<PaymentStatusUpdatedPayload>(
+            paymentStatusChannel(args.id),
+          );
+        },
+        resolve: (payload: PaymentStatusUpdatedPayload) => ({
+          id: payload.id,
+          status: payload.status,
+          referenceNumber: payload.referenceNumber,
+          updatedAt: payload.updatedAt,
+        }),
+      },
+
       // ── transactionUpdated ──────────────────────────────────────────────
       // Subscribes to a per-transaction Redis channel so only the relevant
       // connection receives the event — no server-side filtering needed.
       transactionUpdated: {
         subscribe: (_parent: unknown, args: { id: string }, context: any) => {
-          // Reject unauthenticated WS connections
-          if (!context?.auth?.authenticated) {
-            throw new Error("UNAUTHENTICATED: valid authToken required");
-          }
+          requireWsAuth(context);
           // Subscribe to the per-transaction channel
           const channel = args.id
             ? transactionChannel(args.id)
@@ -116,9 +139,7 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
       // ── transactionCreated ──────────────────────────────────────────────
       transactionCreated: {
         subscribe: (_parent: unknown, _args: unknown, context: any) => {
-          if (!context?.auth?.authenticated) {
-            throw new Error("UNAUTHENTICATED: valid authToken required");
-          }
+          requireWsAuth(context);
           return pubsub.asyncIterator<TransactionCreatedPayload>(
             SubscriptionChannels.TRANSACTION_CREATED,
           );
@@ -130,9 +151,7 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
       // ── transactionCompleted ────────────────────────────────────────────
       transactionCompleted: {
         subscribe: (_parent: unknown, _args: unknown, context: any) => {
-          if (!context?.auth?.authenticated) {
-            throw new Error("UNAUTHENTICATED: valid authToken required");
-          }
+          requireWsAuth(context);
           return pubsub.asyncIterator<TransactionUpdatedPayload>(
             SubscriptionChannels.TRANSACTION_COMPLETED,
           );
@@ -144,9 +163,7 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
       // ── transactionFailed ───────────────────────────────────────────────
       transactionFailed: {
         subscribe: (_parent: unknown, _args: unknown, context: any) => {
-          if (!context?.auth?.authenticated) {
-            throw new Error("UNAUTHENTICATED: valid authToken required");
-          }
+          requireWsAuth(context);
           return pubsub.asyncIterator<TransactionUpdatedPayload>(
             SubscriptionChannels.TRANSACTION_FAILED,
           );
@@ -158,9 +175,7 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
       // ── disputeCreated ──────────────────────────────────────────────────
       disputeCreated: {
         subscribe: (_parent: unknown, _args: unknown, context: any) => {
-          if (!context?.auth?.authenticated) {
-            throw new Error("UNAUTHENTICATED: valid authToken required");
-          }
+          requireWsAuth(context);
           return pubsub.asyncIterator<DisputeCreatedPayload>(
             SubscriptionChannels.DISPUTE_CREATED,
           );
@@ -173,9 +188,7 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
       disputeUpdated: {
         subscribe: withFilter(
           (_parent: unknown, _args: unknown, context: any) => {
-            if (!context?.auth?.authenticated) {
-              throw new Error("UNAUTHENTICATED: valid authToken required");
-            }
+            requireWsAuth(context);
             return pubsub.asyncIterator<DisputeUpdatedPayload>(
               SubscriptionChannels.DISPUTE_UPDATED,
             );
@@ -193,9 +206,7 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
       disputeNoteAdded: {
         subscribe: withFilter(
           (_parent: unknown, _args: unknown, context: any) => {
-            if (!context?.auth?.authenticated) {
-              throw new Error("UNAUTHENTICATED: valid authToken required");
-            }
+            requireWsAuth(context);
             return pubsub.asyncIterator<DisputeNoteAddedPayload>(
               SubscriptionChannels.DISPUTE_NOTE_ADDED,
             );
@@ -213,9 +224,7 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
       bulkImportJobUpdated: {
         subscribe: withFilter(
           (_parent: unknown, _args: unknown, context: any) => {
-            if (!context?.auth?.authenticated) {
-              throw new Error("UNAUTHENTICATED: valid authToken required");
-            }
+            requireWsAuth(context);
             return pubsub.asyncIterator<BulkImportJobUpdatedPayload>(
               SubscriptionChannels.BULK_IMPORT_JOB_UPDATED,
             );

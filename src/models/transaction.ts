@@ -7,7 +7,9 @@ import { CachedTransactionInvalidation } from "../services/cachedTransactionServ
 import {
   SubscriptionChannels,
   transactionChannel,
+  paymentStatusChannel,
   type TransactionUpdatedPayload,
+  type PaymentStatusUpdatedPayload,
 } from "../graphql/subscriptions";
 
 export type AssetType = "native" | "credit_alphanum4" | "credit_alphanum12";
@@ -352,20 +354,46 @@ export class TransactionModel {
       });
     }
 
-    // ── Publish GraphQL subscription event ──────────────────────────────
-    // Publish to both the per-transaction channel (targeted) and the
-    // broadcast channel (for clients watching all transactions).
-    const pubsub = getRedisPubSub();
+    // ── Publish GraphQL subscription events ─────────────────────────────
+    // Per-id channels fan out via Redis Pub/Sub across API instances.
+    // Publish failures must never block the status update itself.
+    try {
+      const pubsub = getRedisPubSub();
+      const updatedAt = new Date(row.updated_at).toISOString();
 
-    const payload: TransactionUpdatedPayload = {
-      id,
-      referenceNumber: row.reference_number,
-      status,
-      updatedAt: new Date(row.updated_at).toISOString(),
-    };
+      const payload: TransactionUpdatedPayload = {
+        id,
+        referenceNumber: row.reference_number,
+        status,
+        updatedAt,
+      };
 
-    await pubsub.publish(transactionChannel(id), payload);
-    await pubsub.publish(SubscriptionChannels.TRANSACTION_UPDATED, payload);
+      const paymentPayload: PaymentStatusUpdatedPayload = {
+        id,
+        status,
+        referenceNumber: row.reference_number,
+        updatedAt,
+      };
+
+      await pubsub.publish(transactionChannel(id), payload);
+      await pubsub.publish(SubscriptionChannels.TRANSACTION_UPDATED, payload);
+      await pubsub.publish(paymentStatusChannel(id), paymentPayload);
+      await pubsub.publish(
+        SubscriptionChannels.PAYMENT_STATUS_UPDATED,
+        paymentPayload,
+      );
+
+      if (status === TransactionStatus.Completed) {
+        await pubsub.publish(SubscriptionChannels.TRANSACTION_COMPLETED, payload);
+      } else if (status === TransactionStatus.Failed) {
+        await pubsub.publish(SubscriptionChannels.TRANSACTION_FAILED, payload);
+      }
+    } catch (err) {
+      console.warn(
+        "[pubsub] Failed to publish payment/transaction status update",
+        err,
+      );
+    }
 
     const ws = WebSocketManager.getInstance();
     await ws?.broadcastTransactionUpdate({

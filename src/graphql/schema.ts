@@ -100,8 +100,19 @@ export const typeDefs = gql`
     completedAt: String
   }
 
+  # Focused payload for payment status change notifications
+  type PaymentStatusUpdate {
+    id: ID!
+    status: String!
+    referenceNumber: String!
+    updatedAt: String!
+  }
+
   # Subscription types for real-time updates
   type Subscription {
+    # Real-time payment status changes for a specific payment/transaction
+    paymentStatusUpdated(id: ID!): PaymentStatusUpdate!
+
     # Subscribe to transaction events
     transactionCreated: Transaction!
     transactionUpdated(id: ID): Transaction!

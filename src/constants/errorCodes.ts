@@ -53,6 +53,8 @@ export const ERROR_CODES = {
   RATE_LIMIT: "RATE_LIMIT",
   /** Destination Stellar account has not established a trustline for the payment asset. */
   TRUSTLINE_MISSING: "TRUSTLINE_MISSING",
+  /** Customer payment limit exceeded (daily, weekly, or monthly). */
+  ERR_LIMIT_EXCEEDED: "ERR_LIMIT_EXCEEDED",
 
   // Server errors (5000+) - HTTP 500+
   INTERNAL_ERROR: "INTERNAL_ERROR",
@@ -125,6 +127,7 @@ export const getHttpStatus = (code: string): number => {
   }
   if (
     code === ERROR_CODES.LIMIT_EXCEEDED ||
+    code === ERROR_CODES.ERR_LIMIT_EXCEEDED ||
     code === ERROR_CODES.RATE_LIMIT ||
     code === ERROR_CODES.ACCOUNT_LOCKED
   ) {

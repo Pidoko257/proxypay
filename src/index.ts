@@ -84,10 +84,15 @@ import accountingReconciliationRoutes from "./routes/accountingReconciliation";
 import exchangeRateBufferRoutes from "./routes/exchangeRateBuffers";
 import adminAssetRoutes from "./routes/admin/assets";
 import settingsRoutes from "./routes/settings";
+import paymentLimitsRoutes from "./routes/paymentLimits";
+import organizationSettingsRoutes from "./routes/organizationSettings";
 import { statementsRoutes } from "./routes/statements";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
-import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
+import {
+  startHeartbeatService,
+  stopHeartbeatService,
+} from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 
 // Sentry Middleware
@@ -383,6 +388,8 @@ app.use("/api/reconciliation", reconciliationRoutes);
 app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/payment-limits", paymentLimitsRoutes);
+app.use("/api/organization/settings", organizationSettingsRoutes);
 app.use("/api/statements", statementsRoutes);
 app.use("/", paymentLinkRoutes);
 
@@ -564,7 +571,8 @@ async function initializeRuntime(): Promise<void> {
     await layeredCache.init();
     console.log("Layered cache (L1/L2) initialized");
 
-    const { providerSettingsService } = await import("./services/providerSettingsService.js");
+    const { providerSettingsService } =
+      await import("./services/providerSettingsService.js");
     await providerSettingsService.getAllSettings();
     console.log("Provider settings cache initialized");
 

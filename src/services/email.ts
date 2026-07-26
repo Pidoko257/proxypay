@@ -331,6 +331,113 @@ export class EmailService {
     }
   }
 
+  /**
+   * Sends a notification to an org admin when their webhook endpoint has been
+   * automatically disabled by the health-check job due to a low success rate.
+   */
+  async sendWebhookDisabledNotification(
+    email: string,
+    options: {
+      webhookId: string;
+      webhookUrl: string;
+      successRate: number;
+      disabledAt: Date;
+      reEnableUrl?: string;
+    },
+  ): Promise<void> {
+    if (process.env.NODE_ENV === "test") {
+      console.log("Skipping webhook disabled email in test environment");
+      return;
+    }
+
+    const templateId = process.env.SENDGRID_WEBHOOK_DISABLED_TEMPLATE_ID;
+    const from = process.env.EMAIL_FROM || '"ProxyPay" <no-reply@proxypay.com>';
+    const successPct = (options.successRate * 100).toFixed(1);
+    const reEnableUrl =
+      options.reEnableUrl ??
+      `${process.env.APP_BASE_URL ?? "https://app.proxypay.com"}/webhooks/${options.webhookId}/re-enable`;
+
+    try {
+      if (templateId) {
+        await this.sendEmail({
+          to: email,
+          templateId,
+          dynamicTemplateData: {
+            webhookId: options.webhookId,
+            webhookUrl: options.webhookUrl,
+            successRate: successPct,
+            disabledAt: options.disabledAt.toISOString(),
+            disabledAtLocalized: options.disabledAt.toLocaleString(),
+            reEnableUrl,
+            year: new Date().getFullYear(),
+          },
+        });
+      } else {
+        // Inline HTML fallback — no SendGrid template required.
+        await sgMail.send({
+          from,
+          to: email,
+          subject: "Action Required: Your webhook endpoint has been disabled",
+          html: `
+            <div style="font-family:sans-serif;max-width:560px;margin:0 auto;">
+              <h2 style="color:#c0392b;">Webhook Endpoint Disabled</h2>
+              <p>
+                Our automated health-check system detected that one of your registered
+                webhook endpoints has an unacceptably low delivery success rate and has
+                been <strong>automatically disabled</strong>.
+              </p>
+              <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+                <tr>
+                  <td style="padding:8px;background:#f9f9f9;font-weight:bold;">Webhook ID</td>
+                  <td style="padding:8px;">${options.webhookId}</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px;background:#f9f9f9;font-weight:bold;">Endpoint URL</td>
+                  <td style="padding:8px;word-break:break-all;">${options.webhookUrl}</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px;background:#f9f9f9;font-weight:bold;">Success Rate</td>
+                  <td style="padding:8px;color:#c0392b;"><strong>${successPct}%</strong> (threshold: 30%)</td>
+                </tr>
+                <tr>
+                  <td style="padding:8px;background:#f9f9f9;font-weight:bold;">Disabled At</td>
+                  <td style="padding:8px;">${options.disabledAt.toLocaleString()}</td>
+                </tr>
+              </table>
+              <p>
+                Please investigate your endpoint and, once the issue is resolved, 
+                re-enable the webhook from your dashboard or by calling the API:
+              </p>
+              <p style="text-align:center;margin:24px 0;">
+                <a href="${reEnableUrl}"
+                   style="background:#2ecc71;color:#fff;padding:12px 24px;text-decoration:none;border-radius:4px;font-weight:bold;">
+                  Re-enable Webhook
+                </a>
+              </p>
+              <p style="font-size:13px;color:#666;">
+                You can also re-enable via the API:<br>
+                <code>POST /api/merchant/webhooks/${options.webhookId}/re-enable</code>
+              </p>
+              <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">
+              <p style="color:#999;font-size:12px;">
+                &copy; ${new Date().getFullYear()} ProxyPay. This is an automated system notification.
+              </p>
+            </div>
+          `,
+          text:
+            `Your webhook endpoint has been automatically disabled.\n\n` +
+            `Webhook ID: ${options.webhookId}\n` +
+            `Endpoint URL: ${options.webhookUrl}\n` +
+            `Success Rate: ${successPct}% (threshold: 30%)\n` +
+            `Disabled At: ${options.disabledAt.toLocaleString()}\n\n` +
+            `Please investigate and re-enable via: ${reEnableUrl}`,
+        });
+      }
+    } catch (error) {
+      console.error("[Email] Webhook disabled notification delivery failed:", error);
+    }
+  }
+
   async sendVulnerabilityReport(
     email: string,
     report: VulnerabilityReport,

@@ -87,3 +87,15 @@ export {
 
 // Trace-ID propagation utilities
 export { withTraceId, traceIdFromJob, childLoggerWithTrace, TRACE_ID_KEY } from "./trace";
+
+// Webhook health-check queue / worker
+export {
+  webhookHealthCheckQueue,
+  scheduleWebhookHealthCheckJob,
+  closeWebhookHealthCheckQueue,
+} from "./webhookHealthCheckQueue";
+export type { WebhookHealthCheckJobData } from "./webhookHealthCheckQueue";
+export {
+  startWebhookHealthCheckWorker,
+  closeWebhookHealthCheckWorker,
+} from "./webhookHealthCheckWorker";

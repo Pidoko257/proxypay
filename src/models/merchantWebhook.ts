@@ -9,6 +9,8 @@ export interface MerchantWebhook {
   description?: string;
   events: string[];
   isActive: boolean;
+  disabledReason?: string;
+  disabledAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -69,6 +71,8 @@ function mapRow(row: any): MerchantWebhook {
     description: row.description ?? undefined,
     events: row.events ?? [],
     isActive: row.is_active,
+    disabledReason: row.disabled_reason ?? undefined,
+    disabledAt: row.disabled_at ? new Date(row.disabled_at) : undefined,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
@@ -220,5 +224,90 @@ export class MerchantWebhookModel {
       logs: logsRes.rows.map(mapLogRow),
       total: parseInt(countRes.rows[0].count, 10),
     };
+  }
+
+  // ── Health-check helpers ───────────────────────────────────────────────────
+
+  /**
+   * Returns all active webhooks that have at least `minDeliveries` log entries.
+   * Used by the health-check job to find candidates for evaluation.
+   */
+  async findActiveWithSufficientHistory(minDeliveries = 1): Promise<MerchantWebhook[]> {
+    const res = await queryRead(
+      `SELECT mw.*
+       FROM merchant_webhooks mw
+       WHERE mw.is_active = TRUE
+         AND (
+           SELECT COUNT(*)
+           FROM webhook_delivery_logs wdl
+           WHERE wdl.webhook_id = mw.id
+         ) >= $1`,
+      [minDeliveries],
+    );
+    return res.rows.map(mapRow);
+  }
+
+  /**
+   * Calculates the success rate for a webhook over its last `window` deliveries.
+   * Returns a value in [0, 1], or null if there are no log entries.
+   */
+  async getSuccessRate(webhookId: string, window = 100): Promise<number | null> {
+    const res = await queryRead(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'delivered') AS successes,
+         COUNT(*) AS total
+       FROM (
+         SELECT status
+         FROM webhook_delivery_logs
+         WHERE webhook_id = $1
+         ORDER BY created_at DESC
+         LIMIT $2
+       ) sub`,
+      [webhookId, window],
+    );
+    const row = res.rows[0];
+    if (!row || parseInt(row.total, 10) === 0) return null;
+    return parseInt(row.successes, 10) / parseInt(row.total, 10);
+  }
+
+  /**
+   * Disables a webhook and records the reason + timestamp.
+   * Does NOT check ownership — called by the automated health-check job.
+   */
+  async disableBySystem(
+    id: string,
+    reason: string,
+  ): Promise<MerchantWebhook | null> {
+    const res = await queryWrite(
+      `UPDATE merchant_webhooks
+       SET is_active       = FALSE,
+           disabled_reason = $2,
+           disabled_at     = NOW(),
+           updated_at      = NOW()
+       WHERE id = $1
+         AND is_active = TRUE
+       RETURNING *`,
+      [id, reason],
+    );
+    return res.rows[0] ? mapRow(res.rows[0]) : null;
+  }
+
+  /**
+   * Re-enables a webhook on behalf of a user.
+   * Clears the disabled_reason and disabled_at fields.
+   */
+  async reEnable(id: string, userId: string): Promise<MerchantWebhook | null> {
+    const res = await queryWrite(
+      `UPDATE merchant_webhooks
+       SET is_active       = TRUE,
+           disabled_reason = NULL,
+           disabled_at     = NULL,
+           updated_at      = NOW()
+       WHERE id = $1
+         AND user_id = $2
+       RETURNING *`,
+      [id, userId],
+    );
+    return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
 }

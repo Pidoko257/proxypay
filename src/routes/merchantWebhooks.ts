@@ -12,6 +12,7 @@
  *   DELETE /api/merchant/webhooks/:id                    — delete webhook
  *   POST   /api/merchant/webhooks/:id/test               — send test delivery
  *   GET    /api/merchant/webhooks/:id/deliveries         — delivery history
+ *   POST   /api/merchant/webhooks/:id/re-enable          — re-enable a disabled webhook
  */
 
 import { Router, Request, Response } from "express";
@@ -204,6 +205,60 @@ router.post("/:id/test", async (req: Request, res: Response) => {
     const msg = err instanceof Error ? err.message : "Internal server error";
     const status = msg === "Webhook not found" ? 404 : 500;
     return res.status(status).json({ error: msg });
+  }
+});
+
+// ── Re-enable (after health-check auto-disable) ────────────────────────────
+
+/**
+ * POST /api/merchant/webhooks/:id/re-enable
+ *
+ * Allows a merchant to re-enable a webhook that was automatically disabled by
+ * the health-check job. The org acknowledges the issue by hitting this endpoint.
+ *
+ * The webhook is only re-enabled if:
+ *   - It exists and belongs to the authenticated user.
+ *   - It is currently inactive (was disabled by the system or manually).
+ *
+ * Returns the updated webhook object.
+ */
+router.post("/:id/re-enable", async (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    // Verify the webhook exists and belongs to this user first
+    const existing = await webhookModel.findById(req.params.id, userId);
+    if (!existing) return res.status(404).json({ error: "Webhook not found" });
+
+    if (existing.isActive) {
+      return res.status(409).json({
+        error: "Webhook is already active",
+        webhook_id: existing.id,
+      });
+    }
+
+    const webhook = await webhookModel.reEnable(req.params.id, userId);
+    if (!webhook) return res.status(404).json({ error: "Webhook not found" });
+
+    const { secret: _s, ...safe } = webhook;
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "merchant-webhooks",
+        message: "Webhook re-enabled by user",
+        webhookId: webhook.id,
+        userId,
+      }),
+    );
+    return res.json({
+      re_enabled: true,
+      webhook: safe,
+    });
+  } catch (err) {
+    console.error("[merchant-webhooks] re-enable error", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 

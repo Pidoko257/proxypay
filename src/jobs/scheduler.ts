@@ -27,6 +27,8 @@ import {
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+import { scheduleWebhookHealthCheckJob } from "../queue/webhookHealthCheckQueue";
+import { startWebhookHealthCheckWorker } from "../queue/webhookHealthCheckWorker";
 
 interface JobConfig {
   name: string;
@@ -186,5 +188,13 @@ export function startJobs(): void {
   // DB-polling notification mechanisms.
   startNotificationWorker().catch((err) => {
     console.warn("Failed to start NotificationWorker:", err);
+  });
+
+  // Start the BullMQ webhook health-check worker and schedule the hourly repeat job.
+  // The worker processes jobs off the queue; scheduleWebhookHealthCheckJob registers
+  // the repeat so it fires every hour (configurable via WEBHOOK_HEALTH_CHECK_INTERVAL_MS).
+  startWebhookHealthCheckWorker();
+  scheduleWebhookHealthCheckJob().catch((err) => {
+    console.warn("[scheduler] Failed to schedule webhook-health-check job:", err);
   });
 }

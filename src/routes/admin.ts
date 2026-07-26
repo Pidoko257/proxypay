@@ -3199,4 +3199,55 @@ router.get(
   },
 );
 
+/**
+ * GET /api/admin/websocket/metrics
+ * WebSocket server metrics and monitoring
+ */
+router.get(
+  "/websocket/metrics",
+  requireAdmin,
+  logAdminAction("GET_WEBSOCKET_METRICS"),
+  async (req: Request, res: Response) => {
+    try {
+      const { WebSocketManager } = await import("../websocket");
+      const wsManager = WebSocketManager.getInstance();
+
+      if (!wsManager) {
+        return res.json({
+          status: "inactive",
+          activeConnections: 0,
+          message: "WebSocket server not initialized",
+        });
+      }
+
+      const metrics = wsManager.getMetrics();
+
+      res.json({
+        status: "active",
+        timestamp: new Date().toISOString(),
+        connections: {
+          active: metrics.activeConnections,
+          maxPerUser: metrics.maxConnectionsPerUser,
+          maxTotal: metrics.maxTotalConnections,
+        },
+        rateLimiting: {
+          windowMs: metrics.rateLimitWindowMs,
+          maxMessagesPerWindow: metrics.rateLimitMaxMessages,
+        },
+        subscriptions: {
+          uniqueTransactions: metrics.subscriptionCount,
+          totalSubscriptions: metrics.totalSubscriptions,
+          userRooms: metrics.userRoomCount,
+        },
+      });
+    } catch (error) {
+      console.error("[WebSocket] Metrics fetch failed:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch WebSocket metrics",
+      );
+    }
+  },
+);
+
 export { router as adminRoutes };

@@ -35,6 +35,7 @@ import { getConfiguredPaymentAsset } from "../services/stellar/assetService";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { travelRuleService } from "../compliance/travelRule";
 import { createError } from "../middleware/errorHandler";
+import { validateMemoForDestination } from "../services/memoValidationService";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
@@ -90,6 +91,9 @@ export const transactionSchema = z.object({
     .string()
     .max(256, { message: "Note cannot exceed 256 characters" })
     .optional(),
+  // Optional memo fields for Stellar transactions
+  memo: z.string().optional(),
+  memoType: z.enum(["text", "id", "hash"]).optional(),
   // Optional 2FA fields for withdrawals
   twoFactorToken: z.string().optional(),
   backupCode: z.string().optional(),
@@ -446,7 +450,7 @@ async function processTransactionRequest(
       req.body.provider = req.body.provider.toLowerCase();
     }
 
-    const { amount, phoneNumber, provider, stellarAddress, userId, notes } =
+    const { amount, phoneNumber, provider, stellarAddress, userId, notes, memo, memoType } =
       req.body;
 
     const requestAmount = getRequestAmount(amount);
@@ -548,6 +552,24 @@ async function processTransactionRequest(
     // before creating the transaction record, to avoid on-chain failures.
     if (type === "withdraw") {
       try {
+        // Validate memo for known exchange addresses
+        const memoValidation = validateMemoForDestination(
+          stellarAddress,
+          memo,
+          memoType,
+        );
+        if (!memoValidation.valid) {
+          throw createError(
+            memoValidation.errorCode || ERROR_CODES.ERR_MEMO_REQUIRED,
+            memoValidation.errorMessage,
+            {
+              error: memoValidation.errorMessage,
+              requiredMemoType: memoValidation.requiredMemoType,
+              exchangeName: memoValidation.exchangeName,
+            },
+          );
+        }
+
         const paymentAsset = getConfiguredPaymentAsset();
         await checkDestinationTrustline(stellarAddress, paymentAsset);
       } catch (err) {
@@ -556,6 +578,8 @@ async function processTransactionRequest(
             error: err.message,
           });
         }
+        // Rethrow memo validation errors and other known errors
+        if (err && (err as any).code) throw err;
         // Unexpected Horizon error — surface as 502 so callers can retry
 
         throw createError(ERROR_CODES.SERVICE_UNAVAILABLE, null, {
@@ -613,6 +637,8 @@ async function processTransactionRequest(
                 provider,
                 stellarAddress,
                 requestId: (req as any).id,
+                memo,
+                memoType,
               },
               {
                 jobId: transaction.id,

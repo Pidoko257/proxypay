@@ -47,6 +47,7 @@ import {
 } from "../models/complianceDocument";
 import { providerSettingsService } from "../services/providerSettingsService";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
+import { getAllExchangeAddresses, addExchangeAddress, removeExchangeAddress, type StellarMemoType } from "../config/exchangeAddresses";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 
@@ -3196,6 +3197,139 @@ router.get(
       console.error("[Queue] Stats fetch failed:", error);
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
     }
+  },
+);
+
+/**
+ * =========================
+ * EXCHANGE ADDRESS MANAGEMENT
+ * =========================
+ */
+
+// GET /api/admin/exchange-addresses - List all known exchange addresses
+router.get(
+  "/exchange-addresses",
+  requireAdmin,
+  logAdminAction("LIST_EXCHANGE_ADDRESSES"),
+  (_req: Request, res: Response) => {
+    const addresses = getAllExchangeAddresses();
+    res.json({
+      total: addresses.length,
+      data: addresses,
+    });
+  },
+);
+
+// POST /api/admin/exchange-addresses - Add a new known exchange address
+router.post(
+  "/exchange-addresses",
+  requireAdmin,
+  logAdminAction("ADD_EXCHANGE_ADDRESS"),
+  (req: Request, res: Response) => {
+    try {
+      const { address, name, requiredMemoType, description } = req.body;
+      const adminUser = (req as AuthRequest).user;
+
+      // Validate required fields
+      if (!address || typeof address !== "string" || address.trim().length === 0) {
+        throw createError(ERROR_CODES.MISSING_FIELD, "address is required", {
+          message: "A valid Stellar address is required",
+        });
+      }
+
+      // Validate Stellar address format (G-address)
+      if (!/^G[A-Z2-7]{55}$/.test(address.trim())) {
+        throw createError(ERROR_CODES.INVALID_INPUT, "Invalid Stellar address format", {
+          message: "Address must be a valid Stellar public key (G...)",
+        });
+      }
+
+      if (!name || typeof name !== "string" || name.trim().length === 0) {
+        throw createError(ERROR_CODES.MISSING_FIELD, "name is required", {
+          message: "Exchange/service name is required",
+        });
+      }
+
+      const validMemoTypes: StellarMemoType[] = ["text", "id", "hash"];
+      if (
+        !requiredMemoType ||
+        !validMemoTypes.includes(requiredMemoType as StellarMemoType)
+      ) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "requiredMemoType must be one of: text, id, hash",
+          {
+            message: "requiredMemoType must be one of: text, id, hash",
+          },
+        );
+      }
+
+      const entry = addExchangeAddress({
+        address: address.trim(),
+        name: name.trim(),
+        requiredMemoType: requiredMemoType as StellarMemoType,
+        description: description || undefined,
+        addedBy: adminUser?.id || "unknown",
+      });
+
+      console.log("[ADMIN] Exchange address added", {
+        address: entry.address,
+        name: entry.name,
+        addedBy: adminUser?.id,
+      });
+
+      return res.status(201).json({
+        message: `Exchange address "${entry.name}" added successfully`,
+        entry,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("already registered")) {
+        throw createError(
+          ERROR_CODES.DUPLICATE_REQUEST,
+          "Address already registered",
+          { message: error.message },
+        );
+      }
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to add exchange address",
+        { message: "Failed to add exchange address" },
+      );
+    }
+  },
+);
+
+// DELETE /api/admin/exchange-addresses/:address - Remove an exchange address
+router.delete(
+  "/exchange-addresses/:address",
+  requireAdmin,
+  logAdminAction("REMOVE_EXCHANGE_ADDRESS"),
+  (req: Request, res: Response) => {
+    const { address } = req.params;
+
+    if (!address || !/^G[A-Z2-7]{55}$/.test(address)) {
+      throw createError(ERROR_CODES.INVALID_INPUT, "Invalid Stellar address format", {
+        message: "Address must be a valid Stellar public key (G...)",
+      });
+    }
+
+    const removed = removeExchangeAddress(address);
+
+    if (!removed) {
+      throw createError(ERROR_CODES.NOT_FOUND, "Exchange address not found", {
+        message: `Address ${address} is not in the known exchange addresses registry`,
+      });
+    }
+
+    console.log("[ADMIN] Exchange address removed", {
+      address,
+      adminId: (req as AuthRequest).user?.id,
+    });
+
+    return res.json({
+      message: "Exchange address removed successfully",
+      address,
+    });
   },
 );
 

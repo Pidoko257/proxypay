@@ -14,6 +14,8 @@ export interface TransactionJobData {
   stellarAddress: string;
   requestId?: string;
   _traceId?: string;
+  memo?: string;
+  memoType?: "text" | "id" | "hash";
 }
 
 export interface TransactionJobResult {

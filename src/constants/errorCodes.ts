@@ -54,6 +54,12 @@ export const ERROR_CODES = {
   /** Destination Stellar account has not established a trustline for the payment asset. */
   TRUSTLINE_MISSING: "TRUSTLINE_MISSING",
 
+  // Memo validation errors (4000-4099) - HTTP 400
+  /** Destination is a known exchange address that requires a memo for payment routing. */
+  ERR_MEMO_REQUIRED: "ERR_MEMO_REQUIRED",
+  /** Memo type provided does not match the required memo type for this exchange. */
+  ERR_MEMO_TYPE_MISMATCH: "ERR_MEMO_TYPE_MISMATCH",
+
   // Server errors (5000+) - HTTP 500+
   INTERNAL_ERROR: "INTERNAL_ERROR",
   SERVICE_UNAVAILABLE: "SERVICE_UNAVAILABLE",
@@ -134,7 +140,9 @@ export const getHttpStatus = (code: string): number => {
     code === ERROR_CODES.INSUFFICIENT_BALANCE ||
     code === ERROR_CODES.INSUFFICIENT_FUNDS ||
     code === ERROR_CODES.TRANSACTION_FAILED ||
-    code === ERROR_CODES.TRUSTLINE_MISSING
+    code === ERROR_CODES.TRUSTLINE_MISSING ||
+    code === ERROR_CODES.ERR_MEMO_REQUIRED ||
+    code === ERROR_CODES.ERR_MEMO_TYPE_MISMATCH
   ) {
     return 400;
   }

@@ -122,6 +122,8 @@ export class StellarService {
     senderName?: string,
     receiverName?: string,
     useFeeBump?: boolean,
+    memo?: string,
+    memoType?: "text" | "id" | "hash",
   ): Promise<{
     hash?: string;
     submittedAt?: Date;
@@ -209,17 +211,33 @@ export class StellarService {
             amount: amount,
           }),
         )
-        .setTimeout(30)
-        .build();
+        .setTimeout(30);
 
-      transaction.sign(this.issuerKeypair);
+      // Attach memo if provided
+      if (memo && memoType) {
+        switch (memoType) {
+          case "text":
+            transaction.addMemo(StellarSdk.Memo.text(memo));
+            break;
+          case "id":
+            transaction.addMemo(StellarSdk.Memo.id(memo));
+            break;
+          case "hash":
+            transaction.addMemo(StellarSdk.Memo.hash(memo));
+            break;
+        }
+      }
+
+      const builtTx = transaction.build();
+
+      builtTx.sign(this.issuerKeypair);
 
       // Check if fee bumping is requested
       let response: StellarSdk.Horizon.HorizonApi.SubmitTransactionResponse;
       if (useFeeBump) {
-        response = await this.submitFeeBumpTransaction(transaction);
+        response = await this.submitFeeBumpTransaction(builtTx);
       } else {
-        response = await this.server.submitTransaction(transaction);
+        response = await this.server.submitTransaction(builtTx);
       }
 
       console.log("Stellar payment successful", {

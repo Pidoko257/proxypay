@@ -214,6 +214,8 @@ async function processTransaction(
     stellarAddress,
     requestId,
     _traceId,
+    memo,
+    memoType,
   } = data;
 
   const logFields: Record<string, string> = { transactionId };
@@ -299,9 +301,10 @@ async function processTransaction(
                 destination: stellarAddress,
                 asset: "native",
                 amount: String(amount),
+                memo,
               }).then(r => ({ hash: r.hash, submittedAt: new Date() }));
             }
-            return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName);
+            return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName, undefined, memo, memoType);
           },
           retryConfig,
         );
@@ -373,9 +376,10 @@ async function processTransaction(
               destination: stellarAddress,
               asset: "native",
               amount: String(amount),
+              memo,
             });
           }
-          return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName);
+          return stellarService.sendPayment(stellarAddress, amount, senderName, receiverName, undefined, memo, memoType);
         },
         retryConfig,
       );

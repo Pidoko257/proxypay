@@ -57,6 +57,13 @@ export {
 export { queueOptions } from "./config";
 export { capturePersistentFailure, queryDLQ, replayDLQEntry } from "./dlq";
 export type { DLQEntry, CaptureOptions, DLQQueryOptions } from "./dlq";
+export {
+  getAllQueueMetrics,
+  getQueueFailedJobs,
+  getMonitoredQueueNames,
+  MAX_FAILED_JOBS,
+} from "./observability";
+export type { QueueMetrics, FailedJobDetail } from "./observability";
 export { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob };
 
 // Account Merge Queue Exports

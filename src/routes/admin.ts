@@ -35,6 +35,7 @@ import {
   getDisputeResolutionTrends,
 } from "../services/metrics";
 import { queryDLQ, replayDLQEntry } from "../queue/dlq";
+import { getAllQueueMetrics, getQueueFailedJobs } from "../queue/observability";
 import {
   triggerManualTransfer,
   getLiquidityTransfers,
@@ -1511,6 +1512,46 @@ router.post(
 
     const entry = await replayDLQEntry(jobId, admin.id);
     res.json({ success: true, entry });
+  },
+);
+
+/**
+ * =========================
+ * QUEUE OBSERVABILITY
+ * =========================
+ */
+
+// GET /api/admin/queues
+// Returns waiting/active/completed/failed/delayed counts for every BullMQ queue
+router.get(
+  "/queues",
+  requireAdmin,
+  logAdminAction("VIEW_QUEUE_METRICS"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const queues = await getAllQueueMetrics();
+      res.json({ queues, timestamp: new Date().toISOString() });
+    } catch (error) {
+      console.error("[Queue Observability] Failed to fetch queue metrics:", error);
+      next(createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue metrics"));
+    }
+  },
+);
+
+// GET /api/admin/queues/:name/failed
+// Returns the last 10 failed jobs for a single queue, with error details
+router.get(
+  "/queues/:name/failed",
+  requireAdmin,
+  logAdminAction("VIEW_QUEUE_FAILED_JOBS"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { name } = req.params;
+      const jobs = await getQueueFailedJobs(name);
+      res.json({ queue: name, count: jobs.length, jobs });
+    } catch (error) {
+      next(error);
+    }
   },
 );
 

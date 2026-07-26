@@ -48,6 +48,7 @@ jest.mock("../../src/config/database", () => ({
 
 // Now safe to import adminRoutes
 import { adminRoutes } from "../../src/routes/admin";
+import { errorHandler } from "../../src/middleware/errorHandler";
 
 describe("Admin Routes - Provider Health", () => {
   let app: express.Application;
@@ -69,6 +70,7 @@ describe("Admin Routes - Provider Health", () => {
     });
 
     app.use("/api/admin", adminRoutes);
+    app.use(errorHandler);
   });
 
   describe("GET /api/admin/providers/health", () => {
@@ -76,7 +78,7 @@ describe("Admin Routes - Provider Health", () => {
       const response = await request(app).get("/api/admin/providers/health");
 
       expect(response.status).toBe(403);
-      expect(response.body.message).toBe("Admin access required");
+      expect(response.body.error).toBe("Admin access required");
     });
 
     it("should return 200 and include expected keys when admin is authenticated", async () => {
@@ -138,6 +140,7 @@ describe("Admin Routes - Refund Transaction", () => {
     });
 
     app.use("/api/admin", adminRoutes);
+    app.use(errorHandler);
   });
 
   describe("POST /api/admin/transactions/:id/refund", () => {
@@ -147,7 +150,7 @@ describe("Admin Routes - Refund Transaction", () => {
         .query({ mockUser: "true" });
 
       expect(response.status).toBe(403);
-      expect(response.body.message).toBe("Admin access required");
+      expect(response.body.error).toBe("Admin access required");
     });
 
     it("should return 403 when unauthenticated", async () => {

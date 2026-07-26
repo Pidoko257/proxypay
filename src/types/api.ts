@@ -172,9 +172,16 @@ export interface LimitExceededErrorResponse extends ErrorResponse {
 // Health
 // ---------------------------------------------------------------------------
 
+export interface HealthDependencyStatus {
+  name: string;
+  status: "up" | "down";
+  latency_ms: number;
+}
+
 export interface HealthCheckResponse {
-  status: "ok";
+  status: "ok" | "degraded";
   timestamp: string;
+  dependencies: HealthDependencyStatus[];
   gitHash?: string;
 }
 

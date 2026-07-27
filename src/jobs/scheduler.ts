@@ -27,6 +27,8 @@ import {
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+import { runPartitionMaintenanceJob } from "./partitionMaintenanceJob";
+import { PARTITION_MAINTENANCE_CRON } from "../config/env";
 
 interface JobConfig {
   name: string;
@@ -149,6 +151,12 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
+  },
+  {
+    name: "partition-maintenance",
+    // 25th of every month at midnight — creates next month's transactions partition
+    schedule: PARTITION_MAINTENANCE_CRON,
+    handler: runPartitionMaintenanceJob,
   },
 ];
 

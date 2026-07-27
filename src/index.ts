@@ -89,6 +89,8 @@ import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { timeoutRoutes } from "./routes/timeout";
+import { timeoutService } from "./services/timeoutService";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -385,6 +387,7 @@ app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/statements", statementsRoutes);
 app.use("/", paymentLinkRoutes);
+app.use("/api/timeouts", timeoutRoutes);
 
 // GDPR
 app.use("/api/gdpr", privacyRoutes);
@@ -505,6 +508,8 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
     stopHeartbeatService();
     console.log("[Shutdown] Heartbeat service stopped");
 
+    timeoutService.stopAlertMonitor();
+
     console.log("[Shutdown] Closing PostgreSQL pool");
     await pool.end();
     console.log("[Shutdown] PostgreSQL pool closed");
@@ -539,6 +544,9 @@ async function initializeRuntime(): Promise<void> {
   // Initialize background jobs and monitoring
   const { startJobs } = await import("./jobs/scheduler.js");
   startJobs();
+
+  // Initialize timeout alert monitor
+  timeoutService.startAlertMonitor();
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();

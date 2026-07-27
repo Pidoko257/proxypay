@@ -9,6 +9,9 @@ import {
   searchAmlAlertsByUser,
   getAmlDashboardStats,
   markAlertForSAR,
+  holdTransaction,
+  releaseHeldTransaction,
+  listHeldTransactions,
 } from "../controllers/amlAuditController";
 
 export const auditRoutes = Router();
@@ -73,4 +76,28 @@ auditRoutes.post(
   haltOnTimedout,
   authorizeObj("aml_alerts", "write"),
   markAlertForSAR,
+);
+
+auditRoutes.post(
+  "/aml/transactions/:transactionId/hold",
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  authorizeObj("aml_alerts", "write"),
+  holdTransaction,
+);
+
+auditRoutes.post(
+  "/aml/transactions/:transactionId/release",
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  authorizeObj("aml_alerts", "write"),
+  releaseHeldTransaction,
+);
+
+auditRoutes.get(
+  "/aml/transactions/held",
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  authorizeObj("aml_alerts", "read"),
+  listHeldTransactions,
 );

@@ -217,3 +217,24 @@ export const systemHeartbeat = new Gauge({
   labelNames: ["service"],
   registers: [register],
 });
+
+export const deduplicationRequestsTotal = new Counter({
+  name: "deduplication_requests_total",
+  help: "Total number of requests inspected by the deduplication middleware",
+  labelNames: ["method", "route"],
+  registers: [register],
+});
+
+export const deduplicationHitsTotal = new Counter({
+  name: "deduplication_hits_total",
+  help: "Total number of requests blocked or served from cache as duplicates",
+  labelNames: ["method", "route"],
+  registers: [register],
+});
+
+export const deduplicationRedisErrorsTotal = new Counter({
+  name: "deduplication_redis_errors_total",
+  help: "Total number of Redis errors encountered by the deduplication middleware",
+  labelNames: ["error"],
+  registers: [register],
+});

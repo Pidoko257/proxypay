@@ -3,10 +3,13 @@ import {
   ScopeSets,
   listAllScopeNames,
   createApiKey,
+  generateApiKey,
+  validateApiKey,
   describeScopes,
   validateTimeWindow,
   hasScope,
 } from "../apikeys";
+import bcrypt from "bcrypt";
 
 describe("ApiKey scopes and helpers", () => {
   test("ScopeSets exposes resource arrays", () => {
@@ -25,16 +28,44 @@ describe("ApiKey scopes and helpers", () => {
     expect(all).toEqual(expect.arrayContaining(["DEPOSITS_INITIATE", "TRANSACTIONS_READ"]));
   });
 
-  test("createApiKey honors named scopes and sets permissions bitmask", () => {
+  test("generateApiKey formats key as pk_{env}_{64hex}", () => {
+    const key = generateApiKey("production");
+    expect(key).toMatch(/^pk_production_[a-f0-9]{64}$/);
+
+    const defaultKey = generateApiKey();
+    expect(defaultKey).toMatch(/^pk_[a-zA-Z0-9_-]+_[a-f0-9]{64}$/);
+  });
+
+  test("createApiKey generates keyPrefix, cost-12 keyHash, and raw key", () => {
     const user: { apiKeys?: any[] } = { apiKeys: [] };
-    const key = createApiKey(user, {
+    const keyObj = createApiKey(user, {
+      env: "test",
       scopes: ["DEPOSITS_INITIATE", "DEPOSITS_READ"],
       expiresInDays: 1,
     });
 
-    expect(key.scopes).toEqual(expect.arrayContaining(["DEPOSITS_INITIATE", "DEPOSITS_READ"]));
-    expect((key.permissions & ApiKeyScope.DEPOSITS_INITIATE) === ApiKeyScope.DEPOSITS_INITIATE).toBe(true);
-    expect((key.permissions & ApiKeyScope.DEPOSITS_READ) === ApiKeyScope.DEPOSITS_READ).toBe(true);
+    expect(keyObj.key).toBeDefined();
+    expect(keyObj.key).toMatch(/^pk_test_[a-f0-9]{64}$/);
+    expect(keyObj.keyPrefix).toBe(keyObj.key!.slice(0, 8));
+    expect(keyObj.keyHash).toBeDefined();
+    expect(bcrypt.compareSync(keyObj.key!, keyObj.keyHash)).toBe(true);
+
+    expect(keyObj.scopes).toEqual(expect.arrayContaining(["DEPOSITS_INITIATE", "DEPOSITS_READ"]));
+    expect((keyObj.permissions & ApiKeyScope.DEPOSITS_INITIATE) === ApiKeyScope.DEPOSITS_INITIATE).toBe(true);
+    expect((keyObj.permissions & ApiKeyScope.DEPOSITS_READ) === ApiKeyScope.DEPOSITS_READ).toBe(true);
+  });
+
+  test("validateApiKey validates incoming key against prefix and bcrypt keyHash", () => {
+    const user: { apiKeys?: any[] } = { apiKeys: [] };
+    const createdKey = createApiKey(user, { env: "test" });
+    const rawKey = createdKey.key!;
+
+    const found = validateApiKey(user, rawKey);
+    expect(found).toBeDefined();
+    expect(found?.keyPrefix).toBe(rawKey.slice(0, 8));
+
+    const invalidKey = "pk_test_invalidkeythatisnotmatchinganything1234567890abcdef12345678";
+    expect(validateApiKey(user, invalidKey)).toBeNull();
   });
 
   test("describeScopes returns names for a permission bitmask", () => {

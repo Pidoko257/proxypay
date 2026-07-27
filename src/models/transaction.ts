@@ -391,6 +391,36 @@ export class TransactionModel {
     return res.rows.map(mapTransactionRow);
   }
 
+  async search(
+    query: string,
+    limit = 50,
+    offset = 0,
+  ): Promise<Transaction[]> {
+    const cappedLimit = Math.min(Math.max(limit, 1), 100);
+    const safeOffset = Math.max(offset, 0);
+
+    const result = await queryRead(
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+       FROM transactions
+       WHERE search_vector @@ plainto_tsquery('english', $1)
+       ORDER BY ts_rank(search_vector, plainto_tsquery('english', $1)) DESC, created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [query, cappedLimit, safeOffset],
+    );
+
+    return result.rows.map(mapTransactionRow);
+  }
+
+  async searchCount(query: string): Promise<number> {
+    const result = await queryRead(
+      `SELECT COUNT(*)::int AS total
+       FROM transactions
+       WHERE search_vector @@ plainto_tsquery('english', $1)`,
+      [query],
+    );
+    return Number(result.rows[0]?.total ?? 0);
+  }
+
   async getBalanceStatistics(userId: string) {
     const res = await queryRead(
       `SELECT 

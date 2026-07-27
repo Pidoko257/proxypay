@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { AMLAlertModel, AMLAlertFilter } from "../models/amlAlert";
 import { TransactionModel } from "../models/transaction";
 import { UserModel } from "../models/users";
+import { amlService } from "../services/aml";
 
 const amlAlertModel = new AMLAlertModel();
 const transactionModel = new TransactionModel();
@@ -449,7 +450,6 @@ export const markAlertForSAR = async (
 
     const { pdfUrl, xmlUrl } = await generateSAR(alert.userId, alertId);
 
-    // Record the action in review notes
     await amlAlertModel.review(
       alertId,
       {
@@ -468,5 +468,84 @@ export const markAlertForSAR = async (
   } catch (error) {
     console.error("Failed to mark alert for SAR:", error);
     res.status(500).json({ error: "Failed to generate SAR reports" });
+  }
+};
+
+/**
+ * Hold a transaction for AML review
+ * POST /api/audit/aml/transactions/:transactionId/hold
+ */
+export const holdTransaction = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  try {
+    const { transactionId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
+      res.status(400).json({ error: "Reason is required" });
+      return;
+    }
+
+    const transaction = await transactionModel.findById(transactionId);
+    if (!transaction) {
+      res.status(404).json({ error: "Transaction not found" });
+      return;
+    }
+
+    await amlService.holdTransaction(transactionId, reason.trim(), req.jwtUser?.userId || "system");
+
+    res.json({ message: "Transaction held for AML review", transactionId });
+  } catch (error) {
+    console.error("Failed to hold transaction:", error);
+    res.status(500).json({ error: "Failed to hold transaction" });
+  }
+};
+
+/**
+ * Release a held transaction
+ * POST /api/audit/aml/transactions/:transactionId/release
+ */
+export const releaseHeldTransaction = async (
+  req: Request,
+  res: Response,
+): Promise<void> => {
+  try {
+    const { transactionId } = req.params;
+
+    const transaction = await transactionModel.findById(transactionId);
+    if (!transaction) {
+      res.status(404).json({ error: "Transaction not found" });
+      return;
+    }
+
+    await transactionModel.updateStatus(transactionId, "pending");
+    await transactionModel.updateAdminNotes(
+      transactionId,
+      `[AML_RELEASE] Transaction released from hold by ${req.jwtUser?.userId || "system"}`,
+    );
+
+    res.json({ message: "Transaction released from AML hold", transactionId });
+  } catch (error) {
+    console.error("Failed to release held transaction:", error);
+    res.status(500).json({ error: "Failed to release held transaction" });
+  }
+};
+
+/**
+ * List held transactions for AML review
+ * GET /api/audit/aml/transactions/held
+ */
+export const listHeldTransactions = async (
+  _req: Request,
+  res: Response,
+): Promise<void> => {
+  try {
+    const held = amlService.getHeldTransactions(200);
+    res.json({ data: held });
+  } catch (error) {
+    console.error("Failed to list held transactions:", error);
+    res.status(500).json({ error: "Failed to list held transactions" });
   }
 };

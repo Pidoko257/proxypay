@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import { z } from "zod";
+import crypto from "crypto";
 import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { maskPhoneNumber } from "../utils/masking";
@@ -585,14 +586,28 @@ async function processTransactionRequest(
               }
             }
 
+            let status: TransactionStatus = TransactionStatus.Pending;
+            let tags: string[] = [];
+            try {
+              const { AMLAlertModel } = await import("../models/amlAlert.js");
+              const alertModel = new AMLAlertModel();
+              const highRiskAlerts = await alertModel.list({ userId: (req as any).user?.id || userId, status: "pending_review", severity: "high" });
+              if (highRiskAlerts.total > 0) {
+                status = TransactionStatus.Review;
+                tags = ["aml-review"];
+              }
+            } catch {
+              // ignore alert check failure
+            }
+
             const transaction = await transactionModel.create({
               type,
               amount: String(amount),
               phoneNumber,
               provider,
               stellarAddress,
-              status: TransactionStatus.Pending,
-              tags: [],
+              status,
+              tags,
               notes,
               userId,
               idempotencyKey,

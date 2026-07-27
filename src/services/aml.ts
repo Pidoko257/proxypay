@@ -334,6 +334,43 @@ export class AMLService {
     return result;
   }
 
+  async holdTransaction(transactionId: string, reason: string, heldBy: string): Promise<void> {
+    const nowIso = new Date().toISOString();
+    const line = JSON.stringify({
+      timestamp: nowIso,
+      level: "WARN",
+      type: "AML_HOLD",
+      transactionId,
+      heldBy,
+      reason,
+    });
+    console.warn(line);
+
+    try {
+      await pool.query(
+        `UPDATE transactions SET status = $1, admin_notes = COALESCE(admin_notes, '') || $2 WHERE id = $3`,
+        ["hold", `\n[AML_HOLD] ${reason}`, transactionId],
+      );
+    } catch (error) {
+      console.error("[AML] Failed to hold transaction:", error);
+    }
+  }
+
+  getHeldTransactions(limit: number = 50): Array<{
+    transactionId: string;
+    reason: string;
+    heldAt: string;
+  }> {
+    return this.alerts
+      .filter((a) => a.status === "pending_review")
+      .slice(0, limit)
+      .map((a) => ({
+        transactionId: a.transactionId,
+        reason: a.reasons.join("; "),
+        heldAt: a.createdAt,
+      }));
+  }
+
   getAlerts(filter?: AMLAlertFilter): AMLAlert[] {
     const startMs = filter?.startDate?.getTime() ?? Number.NEGATIVE_INFINITY;
     const endMs = filter?.endDate?.getTime() ?? Number.POSITIVE_INFINITY;

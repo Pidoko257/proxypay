@@ -1131,6 +1131,58 @@ router.get(
   },
 );
 
+// GET /api/admin/transactions/search?q=
+router.get(
+  "/transactions/search",
+  requireAdmin,
+  rateLimitListQueries,
+  logAdminAction("SEARCH_TRANSACTIONS"),
+  async (req: Request, res: Response) => {
+    try {
+      const q = req.query.q as string;
+      if (!q || typeof q !== "string" || q.trim().length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Search query is required",
+          {
+            message: "Search query is required",
+          },
+        );
+      }
+
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 10;
+      const offset = (page - 1) * limit;
+
+      const transactions = await transactionModel.search(
+        q.trim(),
+        limit,
+        offset,
+      );
+      const total = await transactionModel.searchCount(q.trim());
+
+      res.json({
+        data: transactions,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+        },
+      });
+    } catch (err) {
+      console.error("Error searching transactions:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to search transactions",
+        {
+          error: "Failed to search transactions",
+        },
+      );
+    }
+  },
+);
+
 // PUT /api/admin/transactions/:id
 router.put(
   "/transactions/:id",

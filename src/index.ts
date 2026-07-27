@@ -572,9 +572,11 @@ async function initializeRuntime(): Promise<void> {
       startProviderBalanceAlertWorker,
       scheduleProviderBalanceAlertJob,
       startAccountingTokenRefreshWorker,
+      startOrganizationCleanupWorker,
     } = await import("./queue/index.js");
     startProviderBalanceAlertWorker();
     startAccountingTokenRefreshWorker();
+    startOrganizationCleanupWorker();
     await scheduleProviderBalanceAlertJob();
     console.log("Provider balance alert queue initialized");
   } catch (err) {

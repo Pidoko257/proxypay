@@ -49,6 +49,12 @@ import { providerSettingsService } from "../services/providerSettingsService";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import {
+  listOrganizations,
+  getOrganization,
+  suspendOrganization,
+  deleteOrganization,
+} from "../controllers/admin/organizationController";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -3197,6 +3203,44 @@ router.get(
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
     }
   },
+);
+
+/**
+ * =========================
+ * ORGANIZATIONS (Super-Admin Only)
+ * =========================
+ */
+
+// GET /api/admin/organizations
+router.get(
+  "/organizations",
+  requireSuperAdmin,
+  logAdminAction("LIST_ORGANIZATIONS"),
+  listOrganizations,
+);
+
+// GET /api/admin/organizations/:id
+router.get(
+  "/organizations/:id",
+  requireSuperAdmin,
+  logAdminAction("GET_ORGANIZATION"),
+  getOrganization,
+);
+
+// PATCH /api/admin/organizations/:id/suspend
+router.patch(
+  "/organizations/:id/suspend",
+  requireSuperAdmin,
+  logAdminAction("SUSPEND_ORGANIZATION"),
+  suspendOrganization,
+);
+
+// DELETE /api/admin/organizations/:id
+router.delete(
+  "/organizations/:id",
+  requireSuperAdmin,
+  logAdminAction("DELETE_ORGANIZATION"),
+  deleteOrganization,
 );
 
 export { router as adminRoutes };

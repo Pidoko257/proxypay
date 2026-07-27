@@ -5,16 +5,19 @@ const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://localhost:5672";
 
 export const EXCHANGES = {
   TRANSACTIONS: "transactions.topic",
+  ORGANIZATIONS: "organizations.topic",
 };
 
 export const ROUTING_KEYS = {
   TRANSACTION_PROCESS: "transaction.process",
   TRANSACTION_COMPLETED: "transaction.completed",
   TRANSACTION_FAILED: "transaction.failed",
+  ORGANIZATION_CLEANUP: "organization.cleanup",
 };
 
 export const QUEUES = {
   TRANSACTION_PROCESSING: "transaction-processing-queue",
+  ORGANIZATION_CLEANUP: "organization-cleanup",
 };
 
 class RabbitMQManager {
@@ -36,6 +39,13 @@ class RabbitMQManager {
             QUEUES.TRANSACTION_PROCESSING,
             EXCHANGES.TRANSACTIONS,
             ROUTING_KEYS.TRANSACTION_PROCESS
+          ),
+          channel.assertExchange(EXCHANGES.ORGANIZATIONS, "topic", { durable: true }),
+          channel.assertQueue(QUEUES.ORGANIZATION_CLEANUP, { durable: true }),
+          channel.bindQueue(
+            QUEUES.ORGANIZATION_CLEANUP,
+            EXCHANGES.ORGANIZATIONS,
+            ROUTING_KEYS.ORGANIZATION_CLEANUP
           ),
         ]);
       },

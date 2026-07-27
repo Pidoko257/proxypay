@@ -35,6 +35,11 @@ export const env = cleanEnv(process.env, {
     desc: "Cron schedule for the automated index reindex maintenance job",
     example: "0 3 * * *",
   }),
+  PARTITION_MAINTENANCE_CRON: str({
+    default: "0 0 25 * *",
+    desc: "Cron schedule for the monthly partition maintenance job (creates next-month partition). Default: 25th of every month at midnight.",
+    example: "0 0 25 * *",
+  }),
   INDEX_REINDEX_MIN_SIZE_MB: num({
     default: 100,
     desc: "Minimum size in MB for an index to be eligible for automatic reindexing",
@@ -156,6 +161,7 @@ export const {
   INDEX_REINDEX_MIN_SIZE_MB,
   INDEX_REINDEX_MAX_SCAN_COUNT,
   INDEX_REINDEX_MAX_ACTIVE_CONNECTIONS,
+  PARTITION_MAINTENANCE_CRON,
   QUICKBOOKS_CLIENT_ID,
   QUICKBOOKS_CLIENT_SECRET,
   QUICKBOOKS_REDIRECT_URI,

@@ -3,6 +3,7 @@ import { getStellarServer, getNetworkPassphrase } from "../../config/stellar";
 import dotenv from "dotenv";
 import { transactionTotal, transactionErrorsTotal } from "../../utils/metrics";
 import { AssetService, getConfiguredPaymentAsset } from "./assetService";
+import { validateTrustlineBeforePayment } from "./trustlineValidationService";
 import { sanctionService } from "../sanctionService";
 import { resolveToBaseAddress } from "../../stellar/muxed";
 
@@ -155,7 +156,10 @@ export class StellarService {
           );
         } catch (error) {
           // If it's a SanctionScreeningError, re-throw it
-          if (error instanceof Error && error.name === "SanctionScreeningError") {
+          if (
+            error instanceof Error &&
+            error.name === "SanctionScreeningError"
+          ) {
             throw error;
           }
           // Log other errors but don't fail if address validation fails
@@ -182,17 +186,10 @@ export class StellarService {
 
       // REAL MODE
       const paymentAsset = getConfiguredPaymentAsset();
-      if (!paymentAsset.isNative()) {
-        const trusted = await this.assetService.hasTrustline(
-          resolvedDestinationAddress,
-          paymentAsset,
-        );
-        if (!trusted) {
-          throw new Error(
-            `Recipient has no trustline for ${paymentAsset.getCode()}. Add a trustline before paying this asset.`,
-          );
-        }
-      }
+      await validateTrustlineBeforePayment(
+        resolvedDestinationAddress,
+        paymentAsset,
+      );
 
       const account = await this.server.loadAccount(
         this.issuerKeypair.publicKey(),
@@ -395,7 +392,8 @@ export class StellarService {
       })
         .addOperation(
           StellarSdk.Operation.setOptions({
-            setFlags: StellarSdk.xdr.AccountFlags.authClawbackEnabledFlag().value,
+            setFlags:
+              StellarSdk.xdr.AccountFlags.authClawbackEnabledFlag().value,
           }),
         )
         .setTimeout(30)
@@ -434,7 +432,13 @@ export class StellarService {
 
     if (this.isMockMode || !this.issuerKeypair) {
       console.log("Mock Stellar clawback:", { fromAddress, amount });
-      await this.logClawbackToAudit("mock_clawback_hash", fromAddress, amount, adminId, true);
+      await this.logClawbackToAudit(
+        "mock_clawback_hash",
+        fromAddress,
+        amount,
+        adminId,
+        true,
+      );
       return { hash: "mock_clawback_hash" };
     }
 
@@ -461,13 +465,26 @@ export class StellarService {
       console.log("Stellar clawback successful", { hash: response.hash });
 
       // Log to audit trail
-      await this.logClawbackToAudit(response.hash, fromAddress, amount, adminId, true);
+      await this.logClawbackToAudit(
+        response.hash,
+        fromAddress,
+        amount,
+        adminId,
+        true,
+      );
 
       return { hash: response.hash };
     } catch (error) {
       console.error("Stellar clawback failed:", error);
       // Log failed attempt
-      await this.logClawbackToAudit(null, fromAddress, amount, adminId, false, error);
+      await this.logClawbackToAudit(
+        null,
+        fromAddress,
+        amount,
+        adminId,
+        false,
+        error,
+      );
       throw error;
     }
   }
@@ -485,13 +502,13 @@ export class StellarService {
   ): Promise<void> {
     try {
       const { pool } = await import("../../config/database.js");
-      
+
       const auditData = {
         transaction_hash: txHash,
         from_address: fromAddress,
         amount: amount,
         success: success,
-        error_message: error ? (error.message || String(error)) : null,
+        error_message: error ? error.message || String(error) : null,
       };
 
       await pool.query(
@@ -503,7 +520,7 @@ export class StellarService {
           "stellar_clawback",
           txHash || "failed",
           JSON.stringify(auditData),
-        ]
+        ],
       );
     } catch (auditError) {
       console.error("Failed to write clawback audit log:", auditError);

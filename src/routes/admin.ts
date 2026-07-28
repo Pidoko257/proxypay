@@ -46,6 +46,9 @@ import {
   ComplianceDocumentUpdateInput,
 } from "../models/complianceDocument";
 import { providerSettingsService } from "../services/providerSettingsService";
+import { getProvidersStatus } from "../services/providerStatusService";
+import { checkMobileMoneyHealth } from "../services/mobilemoney/providers/healthCheck";
+import { getHealthDashboard, triggerHealthCheck } from "../services/healthDashboard";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
@@ -3130,13 +3133,26 @@ router.get(
 );
 
 /**
- * GET /api/admin/health
- * Quick health check for monitoring
+ * GET /api/admin/health/dashboard
+ * Unified health dashboard for all external integrations
  */
 router.get(
-  "/health",
-  logAdminAction("GET_HEALTH"),
-  async (req: Request, res: Response) => {
+  "/health/dashboard",
+  requireAdmin,
+  logAdminAction("GET_HEALTH_DASHBOARD"),
+  getHealthDashboard,
+);
+
+/**
+ * POST /api/admin/health/trigger
+ * Manually trigger a health check for all integrations
+ */
+router.post(
+  "/health/trigger",
+  requireAdmin,
+  logAdminAction("TRIGGER_HEALTH_CHECK"),
+  triggerHealthCheck,
+);
     try {
       const startTime = Date.now();
 

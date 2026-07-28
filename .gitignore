@@ -38,9 +38,20 @@ pact.log
 
 
 
+# Test snapshots
+**/__snapshots__/
+**/*.snap
+
 # Load test output
 tests/load/results/*.json
 benchmarks/results/*.json
+
+# Performance baselines
+tests/load/baselines/*.json
+
+# Pact test logs
+pact.log
+*.pact.log
 
 # Temporary files
 *.tmp

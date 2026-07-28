@@ -1,5 +1,11 @@
 import { createClient, RedisClientType } from "redis";
 import { healthCheckResponseTimeSeconds } from "../../../utils/metrics";
+// Side-effect import: registers the three shipped adapters so
+// `resolveHealthConfigs()` and the onboarding tooling can introspect them.
+// The canonical entrypoint is src/providerOnboarding/index.ts; the
+// direct import here keeps the import graph lean for callers that
+// don't otherwise depend on the workflow module.
+import "../../../providerOnboarding/builtinAdapters";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 

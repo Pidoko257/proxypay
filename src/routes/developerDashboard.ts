@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { DeveloperDashboardController } from "../controllers/developerDashboardController";
-import { requireAuth } from "../middleware/auth";
+import { ApiKeyController } from "../controllers/apiKeyController";
+import { authenticateToken, requireAuth } from "../middleware/auth";
 
 export const developerDashboardRoutes = Router();
 
@@ -10,3 +11,5 @@ export const developerDashboardRoutes = Router();
  * @access  Private
  */
 developerDashboardRoutes.get("/dashboard", requireAuth, DeveloperDashboardController.getDashboard);
+developerDashboardRoutes.post("/api-keys", authenticateToken, ApiKeyController.create);
+developerDashboardRoutes.get("/api-keys", authenticateToken, ApiKeyController.list);

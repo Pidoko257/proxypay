@@ -222,7 +222,7 @@ export interface CreateApiKeyOptions {
   permissions?: number;
   scopes?: ApiKeyScopeName[];
   label?: string;
-  /** Days until expiry (default: 30) */
+  /** Days until expiry (default: API_KEY_DEFAULT_EXPIRY_DAYS) */
   expiresInDays?: number;
   allowedTimeWindow?: TimeWindow;
   allowedIpCidrs?: string[];
@@ -242,13 +242,12 @@ export function createApiKey(
 
   const permissions = resolvePermissions(options);
   const scopes = describeScopes(permissions);
+  const expiresInDays = resolveExpiryDays(options.expiresInDays);
 
   const newKey: ApiKey = {
     key: generateApiKey(),
     createdAt: new Date(),
-    expiresAt: new Date(
-      Date.now() + (options.expiresInDays ?? 30) * 24 * 60 * 60 * 1000,
-    ),
+    expiresAt: new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000),
     isActive: true,
     permissions,
     scopes,
@@ -355,7 +354,9 @@ export function rotateApiKey(
   const newKey: ApiKey = {
     key: generateApiKey(),
     createdAt: new Date(),
-    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    expiresAt: new Date(
+      Date.now() + getDefaultExpiryDays() * 24 * 60 * 60 * 1000,
+    ),
     isActive: true,
     permissions: sourceKey?.permissions ?? ScopeGroup.FULL_ACCESS,
     scopes: sourceKey?.scopes ?? describeScopes(ScopeGroup.FULL_ACCESS),
@@ -404,4 +405,36 @@ function resolvePermissions(options: CreateApiKeyOptions): number {
     );
   }
   return ScopeGroup.FULL_ACCESS;
+}
+
+const MAX_API_KEY_EXPIRY_DAYS = 365;
+
+function getDefaultExpiryDays(): number {
+  const configuredDays = Number.parseInt(
+    process.env.API_KEY_DEFAULT_EXPIRY_DAYS || "90",
+    10,
+  );
+
+  if (
+    !Number.isInteger(configuredDays) ||
+    configuredDays < 1 ||
+    configuredDays > MAX_API_KEY_EXPIRY_DAYS
+  ) {
+    throw new Error(
+      `API_KEY_DEFAULT_EXPIRY_DAYS must be an integer between 1 and ${MAX_API_KEY_EXPIRY_DAYS}`,
+    );
+  }
+
+  return configuredDays;
+}
+
+function resolveExpiryDays(value: number | undefined): number {
+  const days = value ?? getDefaultExpiryDays();
+  if (!Number.isInteger(days) || days < 1 || days > MAX_API_KEY_EXPIRY_DAYS) {
+    throw new Error(
+      `expiresInDays must be an integer between 1 and ${MAX_API_KEY_EXPIRY_DAYS}`,
+    );
+  }
+
+  return days;
 }

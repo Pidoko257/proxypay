@@ -3,11 +3,13 @@ import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import { v4 as uuidv4 } from "uuid";
 import { RefreshTokenFamilyModel } from "../models/refreshTokenFamily";
+import { redisClient } from "../config/redis";
 
 dotenv.config();
 
-const JWT_EXPIRES_IN = "1h";
-const REFRESH_TOKEN_EXPIRES_IN = "7d";
+const ACCESS_TOKEN_EXPIRES_IN = process.env.ACCESS_TOKEN_EXPIRES_IN || "15m";
+const REFRESH_TOKEN_EXPIRES_IN = process.env.REFRESH_TOKEN_EXPIRES_IN || "7d";
+const REFRESH_BLOCKLIST_PREFIX = "refresh_blocklist:";
 const refreshTokenFamilyModel = new RefreshTokenFamilyModel();
 
 export interface JWTImpersonationClaim {
@@ -32,6 +34,23 @@ function getJwtSecret(): string {
   return secret;
 }
 
+function refreshTokenBlocklistKey(tokenId: string): string {
+  return `${REFRESH_BLOCKLIST_PREFIX}${tokenId}`;
+}
+
+function parseDurationToSeconds(duration: string): number {
+  const match = duration.match(/^(\d+)(s|m|h|d)$/);
+  if (!match) return 7 * 24 * 60 * 60;
+  const value = parseInt(match[1], 10);
+  switch (match[2]) {
+    case "s": return value;
+    case "m": return value * 60;
+    case "h": return value * 3600;
+    case "d": return value * 86400;
+    default: return 7 * 24 * 60 * 60;
+  }
+}
+
 export interface JWTPayload {
   userId: string;
   email: string;
@@ -51,30 +70,30 @@ export interface RefreshTokenPayload {
   exp?: number;
 }
 
-
 /**
- * Generates a JWT token for the given user payload
- * @param payload - User data to include in the token
- * @returns Signed JWT token
+ * Generates a short-lived access token (default 15m).
+ * The caller is expected to renew via the refresh token cookie.
  */
 export function generateToken(
   payload: Omit<JWTPayload, "iat" | "exp">,
   options?: GenerateTokenOptions,
 ): string {
-  const expiresIn = options?.expiresIn ?? JWT_EXPIRES_IN;
+  const expiresIn = options?.expiresIn ?? ACCESS_TOKEN_EXPIRES_IN;
   return jwt.sign(payload, getJwtSecret(), {
     expiresIn: typeof expiresIn === 'string' ? expiresIn : expiresIn,
   } as jwt.SignOptions);
 }
 
 /**
- * Generates a refresh token and tracks its family chain
- * @param userId - User's ID
- * @param familyId - Family chain ID (new for first token)
- * @param parentTokenId - Parent token ID (if rotating)
- * @returns Signed refresh token
+ * Generates a refresh token with family-chain tracking.
+ * On rotation (parentTokenId provided), the parent is blocklisted in Redis
+ * and the old DB row is marked revoked to prevent reuse.
  */
-export async function generateRefreshToken(userId: string, familyId?: string, parentTokenId?: string): Promise<string> {
+export async function generateRefreshToken(
+  userId: string,
+  familyId?: string,
+  parentTokenId?: string,
+): Promise<string> {
   const tokenId = uuidv4();
   const famId = familyId || uuidv4();
   const payload: RefreshTokenPayload = {
@@ -86,15 +105,17 @@ export async function generateRefreshToken(userId: string, familyId?: string, pa
   const token = jwt.sign(payload, getJwtSecret(), {
     expiresIn: REFRESH_TOKEN_EXPIRES_IN,
   });
-  await refreshTokenFamilyModel.create({ user_id: userId, family_id: famId, token, parent_token: parentTokenId });
+  await refreshTokenFamilyModel.create({
+    user_id: userId,
+    family_id: famId,
+    token,
+    parent_token: parentTokenId,
+  });
   return token;
 }
 
-
 /**
- * Verifies a JWT token and returns the decoded payload
- * @param token - JWT token to verify
- * @returns Decoded token payload
+ * Verifies a JWT access token and returns the decoded payload.
  * @throws Error if token is invalid or expired
  */
 export function verifyToken(token: string): JWTPayload {
@@ -114,12 +135,15 @@ export function verifyToken(token: string): JWTPayload {
 }
 
 /**
- * Verifies a refresh token, detects reuse, and revokes family if reused
- * @param token - Refresh token to verify
- * @returns Decoded refresh token payload
- * @throws Error if token is invalid, expired, or reused
+ * Verifies a refresh token: checks JWT signature, Redis blocklist, then DB.
+ * Returns the decoded payload and DB row so the caller can blocklist the
+ * used token after issuing new ones. Detects reuse and revokes the entire
+ * family chain if a blocklisted or already-revoked token is presented.
  */
-export async function verifyRefreshToken(token: string): Promise<RefreshTokenPayload> {
+export async function verifyRefreshToken(token: string): Promise<{
+  decoded: RefreshTokenPayload;
+  dbRow: { id: string };
+}> {
   const secret = getJwtSecret();
   let decoded: RefreshTokenPayload;
   try {
@@ -133,22 +157,61 @@ export async function verifyRefreshToken(token: string): Promise<RefreshTokenPay
       throw new Error("Refresh token verification failed", { cause: error });
     }
   }
-  // Check for reuse
-  const dbToken = await refreshTokenFamilyModel.findByToken(token);
-  if (!dbToken || dbToken.is_revoked) {
-    // Revoke the whole family if reused
+
+  const blocklisted = await isRefreshTokenBlocklisted(decoded.tokenId);
+  if (blocklisted) {
     if (decoded.familyId && decoded.userId) {
-      await refreshTokenFamilyModel.revokeFamily(decoded.familyId, decoded.userId, 'reuse_detected');
+      await refreshTokenFamilyModel.revokeFamily(
+        decoded.familyId,
+        decoded.userId,
+        "reuse_detected",
+      );
     }
-    throw new Error("Refresh token reuse detected. All tokens in this chain are revoked. Please re-login.");
+    throw new Error(
+      "Refresh token reuse detected. All tokens in this chain are revoked. Please re-login.",
+    );
   }
-  return decoded;
+
+  const dbRow = await refreshTokenFamilyModel.findByToken(token);
+  if (!dbRow || dbRow.is_revoked) {
+    if (decoded.familyId && decoded.userId) {
+      await refreshTokenFamilyModel.revokeFamily(
+        decoded.familyId,
+        decoded.userId,
+        "reuse_detected",
+      );
+    }
+    throw new Error(
+      "Refresh token reuse detected. All tokens in this chain are revoked. Please re-login.",
+    );
+  }
+
+  return { decoded, dbRow };
 }
 
 /**
- * Checks if a token is expired without throwing an error
- * @param token - JWT token to check
- * @returns True if token is expired, false otherwise
+ * Adds a refresh token ID to the Redis blocklist with a TTL matching
+ * the refresh token lifetime so it cannot be reused.
+ */
+export async function blocklistRefreshToken(tokenId: string): Promise<void> {
+  if (!redisClient.isOpen) return;
+  const ttlSeconds = parseDurationToSeconds(REFRESH_TOKEN_EXPIRES_IN);
+  await redisClient.set(refreshTokenBlocklistKey(tokenId), "1", {
+    EX: ttlSeconds,
+  });
+}
+
+/**
+ * Checks whether a refresh token ID has already been consumed (blocklisted).
+ */
+export async function isRefreshTokenBlocklisted(tokenId: string): Promise<boolean> {
+  if (!redisClient.isOpen) return false;
+  const result = await redisClient.get(refreshTokenBlocklistKey(tokenId));
+  return result !== null;
+}
+
+/**
+ * Checks if a token is expired without throwing.
  */
 export function isTokenExpired(token: string): boolean {
   try {

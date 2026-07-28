@@ -6,6 +6,7 @@ import {
   JWTPayload,
   generateRefreshToken,
   verifyRefreshToken,
+  blocklistRefreshToken,
 } from "../auth/jwt";
 import { createSSORouter } from "../auth/sso";
 import { createOIDCRouter, initializeOIDCProviders } from "../auth/oidc";
@@ -37,6 +38,31 @@ import { createError } from "../middleware/errorHandler";
 const emailService = new EmailService();
 
 export const authRoutes = Router();
+
+// Refresh token cookie — HttpOnly, Secure, SameSite=Strict
+// Access tokens (15m) are returned in the JSON body and renewed via this cookie.
+const REFRESH_COOKIE = "refresh_token";
+const REFRESH_TOKEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const COOKIE_PATH = "/api/auth";
+
+function setRefreshCookie(res: Response, token: string): void {
+  res.cookie(REFRESH_COOKIE, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    maxAge: REFRESH_TOKEN_MAX_AGE_MS,
+    path: COOKIE_PATH,
+  });
+}
+
+function clearRefreshCookie(res: Response): void {
+  res.clearCookie(REFRESH_COOKIE, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: COOKIE_PATH,
+  });
+}
 
 export const registerSchema = z.object({
   phone_number: z.string().min(1, "phone_number is required"),
@@ -91,12 +117,12 @@ authRoutes.use("/sso/oidc", createOIDCRouter());
 /**
  * POST /api/auth/login
  *
- * Authenticates a user and returns JWT + refresh token.
+ * Authenticates a user and returns a short-lived access token (15m).
+ * The long-lived refresh token is set as an HttpOnly cookie.
  * Enforces account lockout after 5 failed attempts within 10 minutes.
  * Sends an email notification when an account is locked.
  */
 authRoutes.post(
-  "/login",
   loginRateLimiter,
   async (req: Request, res: Response) => {
     const { phone_number } = req.body;
@@ -111,7 +137,7 @@ authRoutes.post(
     const lockoutId = phone_number;
 
     try {
-      // ── 1. Gate: reject immediately if the account is already locked ──────────
+      // Gate: reject immediately if the account is already locked
       const lockoutStatus = await getLockoutStatus(lockoutId);
       if (lockoutStatus.isLocked) {
         throw createError(
@@ -126,15 +152,15 @@ authRoutes.post(
         );
       }
 
-      // ── 2. Attempt authentication ─────────────────────────────────────────────
+      // Attempt authentication
       const user = await authenticateUser(phone_number);
 
       if (!user) {
-        // ── 3a. Authentication failed: record the attempt ──────────────────────
+        // Authentication failed: record the attempt
         const result = await recordFailedAttempt(lockoutId);
 
         if (result.justLocked) {
-          // ── 3b. Account just got locked: send notification email ───────────
+          // Account just got locked: send notification email
           // Best-effort: look up the user's email to notify them.
           try {
             const userRecord = await getUserByPhoneNumber(phone_number);
@@ -228,10 +254,11 @@ authRoutes.post(
       const refreshToken = await generateRefreshToken(user.id);
       const permissions = await getUserPermissions(user.id);
 
+      setRefreshCookie(res, refreshToken);
+
       res.json({
         message: "Login successful",
         token,
-        refreshToken,
         user: {
           userId: user.id,
           email: user.phone_number,
@@ -252,31 +279,54 @@ authRoutes.post(
 /**
  * POST /api/auth/refresh
  *
- * Rotates refresh token, issues new access and refresh tokens, and enforces strict rotation
+ * Rotates the refresh token: verifies the current one, blocklists it in Redis,
+ * and issues a new access token (15m) and rotated refresh token cookie.
+ * Rejects reused tokens and revokes the entire family chain on detection.
  */
 authRoutes.post("/refresh", async (req: Request, res: Response) => {
-  const { refreshToken } = req.body;
+  const refreshToken =
+    (req.cookies && req.cookies[REFRESH_COOKIE]) || req.body.refreshToken;
+
   if (!refreshToken) {
     throw createError(ERROR_CODES.MISSING_FIELD, "Refresh token is required", {
       error: "Refresh token is required",
     });
   }
+
   try {
-    // Verify and check for reuse
-    const decoded = await verifyRefreshToken(refreshToken);
-    // Issue new access and refresh tokens (rotate)
-    const token = generateToken({ userId: decoded.userId, email: "" }); // You may want to fetch email if needed
+    const { decoded } = await verifyRefreshToken(refreshToken);
+
+    await blocklistRefreshToken(decoded.tokenId);
+
+    const token = generateToken({
+      userId: decoded.userId,
+      email: "",
+    });
+
     const newRefreshToken = await generateRefreshToken(
       decoded.userId,
       decoded.familyId,
       decoded.tokenId,
     );
+
+    setRefreshCookie(res, newRefreshToken);
+
     res.json({
       message: "Token rotation successful",
       token,
-      refreshToken: newRefreshToken,
     });
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("reuse detected")
+    ) {
+      clearRefreshCookie(res);
+      throw createError(
+        ERROR_CODES.TOKEN_REUSE_DETECTED,
+        error.message,
+        { error: "TOKEN_REUSE_DETECTED" },
+      );
+    }
     throw createError(
       ERROR_CODES.UNAUTHORIZED,
       error instanceof Error ? error.message : "Unknown error",
@@ -288,12 +338,34 @@ authRoutes.post("/refresh", async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/auth/logout
+ *
+ * Blockslists the refresh token and clears the HttpOnly cookie.
+ * If the token is already expired/invalid the cookie is still cleared.
+ */
+authRoutes.post("/logout", async (req: Request, res: Response) => {
+  const refreshToken =
+    (req.cookies && req.cookies[REFRESH_COOKIE]) || req.body.refreshToken;
+
+  if (refreshToken) {
+    try {
+      const { decoded } = await verifyRefreshToken(refreshToken);
+      await blocklistRefreshToken(decoded.tokenId);
+    } catch {
+      // Token already expired/invalid — just clear the cookie
+    }
+  }
+
+  clearRefreshCookie(res);
+  res.json({ message: "Logged out successfully" });
+});
+
+/**
  * GET /api/auth/tokens
  *
- * List all active refresh token
+ * List all active refresh tokens for the current user's family
  */
 authRoutes.get(
-  "/tokens/active/:family_id",
   authenticateToken,
   tokenController.findAll,
 );
@@ -301,10 +373,9 @@ authRoutes.get(
 /**
  * DELETE /api/auth/tokens
  *
- * Delete all refresh token
+ * Revoke all refresh tokens in the given family
  */
 authRoutes.delete(
-  "/tokens/revoke-all/:family_id",
   authenticateToken,
   tokenController.revokeAll,
 );
@@ -312,10 +383,9 @@ authRoutes.delete(
 /**
  * DELETE /api/auth/tokens
  *
- * Delete a specific refresh token
+ * Revoke a single refresh token by token_id and family_id
  */
 authRoutes.delete(
-  "/tokens/:token_id/:family_id",
   authenticateToken,
   tokenController.revoke,
 );
@@ -323,7 +393,7 @@ authRoutes.delete(
 /**
  * POST /api/auth/verify
  *
- * Verify a JWT token and return the decoded payload
+ * Verify a JWT access token and return the decoded payload.
  */
 authRoutes.post("/verify", (req: Request, res: Response) => {
   const { token } = req.body;
@@ -358,11 +428,10 @@ authRoutes.post("/verify", (req: Request, res: Response) => {
 /**
  * GET /api/auth/me
  *
- * Protected route that returns current user information
- * Requires valid JWT token in Authorization header
+ * Protected route that returns current user information.
+ * Requires a valid JWT access token in the Authorization header.
  */
 authRoutes.get(
-  "/me",
   authenticateToken,
   async (req: Request, res: Response) => {
     const payload = req.jwtUser as JWTPayload;

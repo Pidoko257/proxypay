@@ -40,6 +40,7 @@ export const ERROR_CODES = {
   CONFLICT: "CONFLICT",
   DUPLICATE_REQUEST: "DUPLICATE_REQUEST",
   TRANSACTION_EXISTS: "TRANSACTION_EXISTS",
+  EMAIL_UNVERIFIED: "EMAIL_UNVERIFIED",
 
   // Security / abuse-prevention errors (4290-4299) - HTTP 429
   ACCOUNT_LOCKED: "ACCOUNT_LOCKED",
@@ -105,7 +106,8 @@ export const getHttpStatus = (code: string): number => {
   }
   if (
     code === ERROR_CODES.FORBIDDEN ||
-    code === ERROR_CODES.INSUFFICIENT_PERMISSIONS
+    code === ERROR_CODES.INSUFFICIENT_PERMISSIONS ||
+    code === ERROR_CODES.EMAIL_UNVERIFIED
   ) {
     return 403;
   }

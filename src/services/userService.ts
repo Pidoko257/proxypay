@@ -23,6 +23,8 @@ export interface User {
 
 export interface CreateUserRequest {
   phone_number: string;
+  email?: string;
+  password_hash?: string;
   kyc_level?: string;
   role_name?: string;
   mcc?: string;
@@ -114,6 +116,7 @@ export async function getUserById(userId: string): Promise<User | null> {
 export async function createUser(userData: CreateUserRequest): Promise<User> {
   const {
     phone_number,
+    email,
     kyc_level = "unverified",
     role_name = "user",
     mcc,
@@ -139,14 +142,16 @@ export async function createUser(userData: CreateUserRequest): Promise<User> {
   const roleId = roleResult.rows[0].id;
 
   const query = `
-    INSERT INTO users (phone_number, kyc_level, role_id, mcc, display_name)
-    VALUES ($1, $2, $3, $4, $5)
+    INSERT INTO users (phone_number, email, kyc_level, role_id, mcc, display_name)
+    VALUES ($1, $2, $3, $4, $5, $6)
     RETURNING id, phone_number, kyc_level, role_id, display_name, mcc, two_factor_secret, two_factor_enabled, two_factor_verified, backup_codes, created_at, updated_at
   `;
 
   const encryptedPhone = encrypt(phone_number, true);
+  const encryptedEmail = email ? encrypt(email) : null;
   const result = await pool.query(query, [
     encryptedPhone,
+    encryptedEmail,
     kyc_level,
     roleId,
     merchantMcc,

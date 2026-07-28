@@ -27,6 +27,7 @@ export const ERROR_CODES = {
   TOKEN_EXPIRED: "TOKEN_EXPIRED",
   INVALID_TOKEN: "INVALID_TOKEN",
   TOKEN_REUSE_DETECTED: "TOKEN_REUSE_DETECTED",
+  ERR_KEY_EXPIRED: "ERR_KEY_EXPIRED",
 
   // Authorization errors (4030-4039) - HTTP 403
   FORBIDDEN: "FORBIDDEN",
@@ -101,7 +102,8 @@ export const getHttpStatus = (code: string): number => {
     code === ERROR_CODES.INVALID_CREDENTIALS ||
     code === ERROR_CODES.TOKEN_EXPIRED ||
     code === ERROR_CODES.INVALID_TOKEN ||
-    code === ERROR_CODES.TOKEN_REUSE_DETECTED
+    code === ERROR_CODES.TOKEN_REUSE_DETECTED ||
+    code === ERROR_CODES.ERR_KEY_EXPIRED
   ) {
     return 401;
   }

@@ -7,6 +7,7 @@ import { getAdminSep10Service } from "../stellar/adminSep10";
 import { evaluateGeoLoginAccess } from "../auth/geo";
 import { queryRead } from "../config/database";
 import { ScopeGroup } from "../auth/apikeys";
+import { ERROR_CODES } from "../constants/errorCodes";
 
 type RequestUser = {
   id: string;
@@ -102,8 +103,12 @@ export const requireAuth = async (
         if (!row.is_active) {
           return res.status(401).json({ error: "Unauthorized", message: "API key is inactive" });
         }
-        if (row.expires_at && new Date(row.expires_at) < new Date()) {
-          return res.status(401).json({ error: "Unauthorized", message: "API key has expired" });
+        if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) {
+          return res.status(401).json({
+            code: ERROR_CODES.ERR_KEY_EXPIRED,
+            error: ERROR_CODES.ERR_KEY_EXPIRED,
+            message: "API key has expired",
+          });
         }
 
         (req as AuthRequest).user = { id: "api-key-user", role: "admin" };

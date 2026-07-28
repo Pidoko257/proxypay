@@ -11,6 +11,14 @@ export interface LockoutEmailOptions {
   locale?: string;
 }
 
+export interface ApiKeyExpiryWarningOptions {
+  keyId: string;
+  keyPrefix: string;
+  label?: string | null;
+  expiresAt: Date;
+  daysRemaining: number;
+}
+
 sgMail.setApiKey(process.env.SENDGRID_API_KEY || "");
 
 export interface EmailOptions {
@@ -169,6 +177,48 @@ export class EmailService {
       }
     } catch (error) {
       console.error("[Email] Lockout notification delivery failed:", error);
+    }
+  }
+
+  async sendApiKeyExpiryWarning(
+    email: string,
+    options: ApiKeyExpiryWarningOptions,
+  ): Promise<void> {
+    const templateId =
+      process.env.SENDGRID_API_KEY_EXPIRY_TEMPLATE_ID ||
+      process.env.SENDGRID_GENERAL_TEMPLATE_ID;
+
+    if (templateId) {
+      await this.sendEmail({
+        to: email,
+        templateId,
+        dynamicTemplateData: {
+          keyId: options.keyId,
+          keyPrefix: options.keyPrefix,
+          label: options.label ?? undefined,
+          expiresAt: options.expiresAt.toISOString(),
+          daysRemaining: options.daysRemaining,
+          year: new Date().getFullYear(),
+        },
+      });
+      return;
+    }
+
+    if (process.env.NODE_ENV === "test") return;
+
+    try {
+      const label = options.label ? ` (${options.label})` : "";
+      await sgMail.send({
+        from: process.env.EMAIL_FROM || '"Mobile Money" <no-reply@mobilemoney.com>',
+        to: email,
+        subject: "Your API key is expiring soon",
+        text:
+          `API key ${options.keyPrefix}${label} expires on ` +
+          `${options.expiresAt.toISOString()} (${options.daysRemaining} day(s) remaining). ` +
+          "Create a replacement key before it expires.",
+      });
+    } catch (error) {
+      console.error("API key expiry warning delivery failed:", error);
     }
   }
 

@@ -575,10 +575,14 @@ async function initializeRuntime(): Promise<void> {
       startProviderBalanceAlertWorker,
       scheduleProviderBalanceAlertJob,
       startAccountingTokenRefreshWorker,
+      startApiKeyExpiryWarningWorker,
+      scheduleApiKeyExpiryWarningJob,
     } = await import("./queue/index.js");
     startProviderBalanceAlertWorker();
     startAccountingTokenRefreshWorker();
+    startApiKeyExpiryWarningWorker();
     await scheduleProviderBalanceAlertJob();
+    await scheduleApiKeyExpiryWarningJob();
     console.log("Provider balance alert queue initialized");
   } catch (err) {
     console.error("Redis failed", err);

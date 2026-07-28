@@ -3,6 +3,8 @@ import { queueOptions } from "./config";
 import { ACCOUNTING_TOKEN_REFRESH_QUEUE_NAME, AccountingTokenRefreshJobData } from "./accountingTokenRefreshQueue";
 import { AccountingService } from "../services/accounting";
 import logger from "../utils/logger";
+import { registerWorkerForShutdown } from "./gracefulShutdown";
+import { accountingTokenRefreshQueue } from "./accountingTokenRefreshQueue";
 
 let worker: Worker | null = null;
 
@@ -39,6 +41,15 @@ export function startAccountingTokenRefreshWorker(): void {
   worker.on("failed", (job, err) => {
     logger.error(err, `Accounting token refresh job ${job?.id} failed`);
   });
+
+  // Register worker for graceful shutdown
+  if (worker) {
+    registerWorkerForShutdown({
+      worker,
+      queue: accountingTokenRefreshQueue,
+      workerName: "accountingTokenRefreshWorker",
+    });
+  }
 
   logger.info("Accounting token refresh worker started");
 }

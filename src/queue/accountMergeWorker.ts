@@ -8,6 +8,8 @@ import {
 } from "./accountMergeQueue";
 import { getNetworkPassphrase, getStellarServer } from "../config/stellar";
 import { capturePersistentFailure } from "./dlq";
+import { registerWorkerForShutdown } from "./gracefulShutdown";
+import { accountMergeQueue } from "./accountMergeQueue";
 
 const ACCOUNT_MERGE_PREFIX = "[account-merge]";
 const STROOPS_PER_XLM = 10_000_000n;
@@ -311,6 +313,13 @@ accountMergeWorker.on("failed", (job, error) => {
       console.error("[DLQ] Error capturing failure:", err),
     );
   }
+});
+
+// Register worker for graceful shutdown
+registerWorkerForShutdown({
+  worker: accountMergeWorker,
+  queue: accountMergeQueue,
+  workerName: "accountMergeWorker",
 });
 
 export async function closeAccountMergeWorker() {

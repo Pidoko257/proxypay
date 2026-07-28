@@ -4,14 +4,23 @@ import { transactionWorker, closeWorker } from "./worker";
 import { syncQueue } from "./syncQueue";
 import { syncWorker, closeSyncWorker } from "./syncWorker";
 import { connection } from "./config";
-import { startProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
+import { startProviderBalanceAlertWorker, closeProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
 import { scheduleProviderBalanceAlertJob } from "./providerBalanceAlertQueue";
 import { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker } from "./accountingTokenRefreshWorker";
+import { handleBullMQGracefulShutdown } from "./gracefulShutdown";
+import { closeAccountMergeWorker } from "./accountMergeWorker";
 
 export async function shutdownQueue(): Promise<void> {
+  // Handle BullMQ worker graceful shutdown with proper timeout and job completion
+  await handleBullMQGracefulShutdown();
+
+  // Close other queue resources
   await Promise.all([
     closeWorker().catch(() => undefined),
     closeSyncWorker().catch(() => undefined),
+    closeAccountingTokenRefreshWorker().catch(() => undefined),
+    closeProviderBalanceAlertWorker().catch(() => undefined),
+    closeAccountMergeWorker().catch(() => undefined),
     transactionQueue.close().catch(() => undefined),
     syncQueue.close().catch(() => undefined),
   ]);

@@ -7,6 +7,8 @@ import {
   NetworkError,
   ValidationError,
 } from "../services/accounting/accountingService";
+import { registerWorkerForShutdown } from "./gracefulShutdown";
+import { syncQueue } from "./syncQueue";
 
 // Create instance of our Accounting Service
 export const accountingService = new AccountingService();
@@ -77,6 +79,13 @@ export const syncWorker = new Worker<SyncJobData, SyncJobResult>(
     concurrency: 3, // Safe concurrency limit for accounting API rate-limits
   },
 );
+
+// Register worker for graceful shutdown
+registerWorkerForShutdown({
+  worker: syncWorker,
+  queue: syncQueue,
+  workerName: "syncWorker",
+});
 
 // Graceful shutdown helper
 export async function closeSyncWorker(): Promise<void> {

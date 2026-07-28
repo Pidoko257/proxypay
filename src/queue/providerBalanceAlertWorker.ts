@@ -7,6 +7,8 @@ import {
   ProviderBalanceAlertJobData,
 } from "./providerBalanceAlertQueue";
 import { traceIdFromJob, childLoggerWithTrace } from "./trace";
+import { registerWorkerForShutdown } from "./gracefulShutdown";
+import { providerBalanceAlertQueue } from "./providerBalanceAlertQueue";
 
 let providerBalanceAlertWorker: Worker<ProviderBalanceAlertJobData> | null = null;
 
@@ -38,6 +40,15 @@ export function startProviderBalanceAlertWorker(): void {
       error.message,
     );
   });
+
+  // Register worker for graceful shutdown
+  if (providerBalanceAlertWorker) {
+    registerWorkerForShutdown({
+      worker: providerBalanceAlertWorker,
+      queue: providerBalanceAlertQueue,
+      workerName: "providerBalanceAlertWorker",
+    });
+  }
 }
 
 export async function closeProviderBalanceAlertWorker(): Promise<void> {

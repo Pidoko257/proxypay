@@ -10,7 +10,6 @@ import {
   validateDashboardConfig,
   DASHBOARD_CONFIG_VALIDATION_ERRORS,
 } from "../utils/dashboardConfig";
-import { auditInterceptor } from "../middleware/auditInterceptor";
 import {
   rateLimitExport,
   rateLimitListQueries,
@@ -54,8 +53,6 @@ const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
 const IMPERSONATION_TOKEN_TTL_MS = 15 * 60 * 1000;
 const READ_ONLY_IMPERSONATION_MESSAGE = "Read-only mode active";
-
-router.use(auditInterceptor(pool));
 
 // Multer configuration for CSV uploads
 const csvUpload = multer({
@@ -2982,16 +2979,16 @@ router.put(
     try {
       const providerName = req.params.providerName;
       const { failure_threshold, timeout_ms, fallback_order } = req.body;
-      
+
       const settings = await providerSettingsService.upsertProviderSettings(
         providerName,
         failure_threshold || 3,
         timeout_ms || 5000,
         fallback_order || null
       );
-      
+
       resetCircuitBreakerForProvider(providerName);
-      
+
       res.json({ message: "Provider settings updated successfully", settings });
     } catch (error) {
       console.error("Error updating provider settings:", error);

@@ -71,6 +71,11 @@ export const env = cleanEnv(process.env, {
     default: "development-pii-master-key-32-chars!",
     desc: "Master key for per-user HKDF key derivation. Must be a high-entropy secret in production. Never log or expose this value.",
   }),
+  ACCESS_TOKEN_EXPIRES_IN: str({
+    default: "15m",
+    desc: "Access token TTL (default: 15m for security)",
+    example: "15m",
+  }),
   REFRESH_TOKEN_EXPIRES_IN: str({
     default: process.env.REFRESH_TOKEN_EXPIRES_IN,
     desc: "REFRESH_TOKEN_EXPIRES_IN needs to be set in environment file",
@@ -100,6 +105,10 @@ export const env = cleanEnv(process.env, {
     default: "",
     desc: "Admin API key for internal tooling",
     example: "admin-secret-key",
+  }),
+  API_KEY_DEFAULT_EXPIRY_DAYS: num({
+    default: 90,
+    desc: "Default lifetime for newly created API keys in days",
   }),
   APQ_TTL_SECONDS: str({
     default: "86400",
@@ -136,6 +145,16 @@ export const env = cleanEnv(process.env, {
   }),
 });
 
+if (
+  !Number.isInteger(env.API_KEY_DEFAULT_EXPIRY_DAYS) ||
+  env.API_KEY_DEFAULT_EXPIRY_DAYS < 1 ||
+  env.API_KEY_DEFAULT_EXPIRY_DAYS > 365
+) {
+  throw new Error(
+    "API_KEY_DEFAULT_EXPIRY_DAYS must be an integer between 1 and 365",
+  );
+}
+
 // Re-export specific values for convenience
 export const {
   DATABASE_URL,
@@ -150,6 +169,7 @@ export const {
   PAGERDUTY_INTEGRATION_KEY,
   PAGERDUTY_DEDUP_KEY,
   ADMIN_API_KEY,
+  API_KEY_DEFAULT_EXPIRY_DAYS,
   APP_MAINTENANCE_MODE,
   INDEX_REINDEX_JOB_ENABLED,
   INDEX_REINDEX_CRON,

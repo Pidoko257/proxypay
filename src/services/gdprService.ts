@@ -5,7 +5,6 @@ import { DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { v4 as uuid } from "uuid";
 import { Transaction, TransactionModel } from "../models/transaction";
 import { logAuditEvent } from "../utils/log-audit-event";
-import { AuditLog, auditService } from "./auditlogService";
 import { TransactionService } from "./transactionService";
 import {
   deactivateUserAccount,
@@ -127,15 +126,7 @@ export class GDPRService {
 
       await updateUserById(userId, anonymizedUser);
 
-      // Purge PII from audit logs
-      const auditLogs = await auditService.fetchAuditLogs(userId);
-      for (const log of auditLogs) {
-        const anonymizedLog: AuditLog = {
-          ...log,
-          action: this.hashString(log.action),
-        };
-        await auditService.updateAuditLog(anonymizedLog);
-      }
+      // Audit records are immutable and are retained for compliance.
 
       // Log erasure event
       await logAuditEvent(userId, "RIGHT_TO_BE_FORGOTTEN_EXECUTED");

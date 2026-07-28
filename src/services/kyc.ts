@@ -2,6 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { AccountingService } from './accounting';
+import { appendAuditLog } from './auditlogService';
 
 // KYC Provider: Entrust Identity Verification (formerly Onfido)
 // Documentation: https://documentation.identity.entrust.com/api/latest/
@@ -329,15 +330,35 @@ export class KYCService {
    * Update user KYC level in database
    */
   async updateUserKYCLevel(userId: string, kycLevel: KYCLevel): Promise<void> {
+    const client = await this.db.connect();
     try {
-      const query = `
-        UPDATE users 
-        SET kyc_level = $1, updated_at = CURRENT_TIMESTAMP 
-        WHERE id = $2
-      `;
-      
-      await this.db.query(query, [kycLevel, userId]);
-      
+      await client.query('BEGIN');
+      const currentResult = await client.query(
+        'SELECT id, kyc_level FROM users WHERE id = $1 FOR UPDATE',
+        [userId],
+      );
+      if (!currentResult.rows[0]) {
+        throw new Error(`User ${userId} not found`);
+      }
+
+      const result = await client.query(
+        `UPDATE users
+            SET kyc_level = $1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = $2
+          RETURNING id, kyc_level, updated_at`,
+        [kycLevel, userId],
+      );
+
+      await appendAuditLog(client, {
+        userId: 'system:kyc-provider',
+        action: 'kyc.level.update',
+        entityType: 'user',
+        entityId: userId,
+        beforeState: currentResult.rows[0],
+        afterState: result.rows[0],
+      });
+      await client.query('COMMIT');
+
       console.log(`Updated KYC level for user ${userId} to ${kycLevel}`);
       // If user reached a verified level, attempt to sync contact to accounting providers (Xero)
       try {
@@ -349,8 +370,11 @@ export class KYCService {
         console.error(`Failed to sync accounting contact after KYC update for user ${userId}: ${err instanceof Error ? err.message : String(err)}`);
       }
     } catch (error) {
+      await client.query('ROLLBACK');
       console.error(`Failed to update user KYC level: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
+    } finally {
+      client.release();
     }
   }
 

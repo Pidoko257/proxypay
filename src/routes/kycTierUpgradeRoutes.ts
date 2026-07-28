@@ -17,6 +17,7 @@ import {
 import { KYC_REJECTION_REASONS } from "../config/kycRejectionReasons";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { getAuditContext } from "../middleware/auditContext";
 
 const router = Router();
 
@@ -87,6 +88,7 @@ router.post("/:id/approve", async (req: Request, res: Response) => {
       requestId,
       reviewedBy,
       notes,
+      auditContext: getAuditContext(req, reviewedBy),
     });
 
     res.json({
@@ -142,7 +144,13 @@ router.post("/:id/reject", async (req: Request, res: Response) => {
       });
     }
 
-    await rejectKycUpgrade({ requestId, reviewedBy, notes, rejectionReason });
+    await rejectKycUpgrade({
+      requestId,
+      reviewedBy,
+      notes,
+      rejectionReason,
+      auditContext: getAuditContext(req, reviewedBy),
+    });
 
     res.json({ message: "KYC upgrade rejected" });
   } catch (err) {
@@ -196,7 +204,12 @@ router.post("/bulk/approve", async (req: Request, res: Response) => {
 
     for (const requestId of requestIds) {
       try {
-        await approveKycUpgrade({ requestId, reviewedBy, notes });
+        await approveKycUpgrade({
+          requestId,
+          reviewedBy,
+          notes,
+          auditContext: getAuditContext(req, reviewedBy),
+        });
         results.push({ requestId, status: "success" });
       } catch (err) {
         results.push({
@@ -289,6 +302,7 @@ router.post("/bulk/reject", async (req: Request, res: Response) => {
           reviewedBy,
           notes,
           rejectionReason,
+          auditContext: getAuditContext(req, reviewedBy),
         });
         results.push({ requestId, status: "success" });
       } catch (err) {

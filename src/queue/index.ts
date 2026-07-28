@@ -7,13 +7,23 @@ import { connection } from "./config";
 import { startProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
 import { scheduleProviderBalanceAlertJob } from "./providerBalanceAlertQueue";
 import { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker } from "./accountingTokenRefreshWorker";
+import {
+  closeApiKeyExpiryWarningQueue,
+  scheduleApiKeyExpiryWarningJob,
+} from "./apiKeyExpiryWarningQueue";
+import {
+  closeApiKeyExpiryWarningWorker,
+  startApiKeyExpiryWarningWorker,
+} from "./apiKeyExpiryWarningWorker";
 
 export async function shutdownQueue(): Promise<void> {
   await Promise.all([
     closeWorker().catch(() => undefined),
     closeSyncWorker().catch(() => undefined),
+    closeApiKeyExpiryWarningWorker().catch(() => undefined),
     transactionQueue.close().catch(() => undefined),
     syncQueue.close().catch(() => undefined),
+    closeApiKeyExpiryWarningQueue().catch(() => undefined),
   ]);
 }
 
@@ -58,6 +68,7 @@ export { queueOptions } from "./config";
 export { capturePersistentFailure, queryDLQ, replayDLQEntry } from "./dlq";
 export type { DLQEntry, CaptureOptions, DLQQueryOptions } from "./dlq";
 export { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob };
+export { startApiKeyExpiryWarningWorker, scheduleApiKeyExpiryWarningJob };
 
 // Account Merge Queue Exports
 export {

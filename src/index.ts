@@ -13,6 +13,7 @@ import { register } from "prom-client";
 import spdy from "spdy";
 import fs from "fs";
 import session from "express-session";
+import cookieParser from "cookie-parser";
 import type { SessionOptions } from "express-session";
 import {
   apiVersionMiddleware,
@@ -59,6 +60,7 @@ import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
 import { readReplicaRoutingMiddleware } from "./middleware/readReplicaRouting";
 import { dbConnectionLeakDetector } from "./middleware/dbConnectionLeakDetector";
+import { auditContextMiddleware } from "./middleware/auditContext";
 import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
@@ -173,6 +175,7 @@ app.use(
 // app.use(rateLimitMiddleware);
 app.use(responseTime);
 app.use(requestId);
+app.use(auditContextMiddleware);
 app.use(readReplicaRoutingMiddleware);
 app.use(i18nMiddleware);
 app.use(dbConnectionLeakDetector);
@@ -206,6 +209,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 const sessionSecret =
   process.env.SESSION_SECRET || "default-secret-change-in-production";
 const redisStore = createRedisStore();
+
+app.use(cookieParser());
 
 app.use(
   session(<SessionOptions>{
@@ -572,10 +577,14 @@ async function initializeRuntime(): Promise<void> {
       startProviderBalanceAlertWorker,
       scheduleProviderBalanceAlertJob,
       startAccountingTokenRefreshWorker,
+      startApiKeyExpiryWarningWorker,
+      scheduleApiKeyExpiryWarningJob,
     } = await import("./queue/index.js");
     startProviderBalanceAlertWorker();
     startAccountingTokenRefreshWorker();
+    startApiKeyExpiryWarningWorker();
     await scheduleProviderBalanceAlertJob();
+    await scheduleApiKeyExpiryWarningJob();
     console.log("Provider balance alert queue initialized");
   } catch (err) {
     console.error("Redis failed", err);

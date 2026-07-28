@@ -1,8 +1,58 @@
+import { jest, describe, expect, it } from "@jest/globals";
 import request from "supertest";
-import app from "../../src/index";
+import { Keypair } from "stellar-sdk";
+
+const randomKeypair = Keypair.random();
+process.env.STELLAR_SIGNING_KEY = randomKeypair.secret();
+process.env.STELLAR_RECEIVING_ACCOUNT = randomKeypair.publicKey();
+
+jest.mock("spdy", () => ({
+  createServer: jest.fn<any>().mockReturnValue({
+    listen: jest.fn<any>((_port: any, cb: any) => { if (cb) cb(); }),
+  }),
+}));
+
+jest.mock("../../src/config/redis", () => ({
+  connectRedis: jest.fn<any>().mockResolvedValue(undefined),
+  disconnectRedis: jest.fn<any>().mockResolvedValue(undefined),
+  redisClient: { isOpen: false, ping: jest.fn<any>() },
+  createRedisStore: jest.fn<any>().mockReturnValue({
+    on: jest.fn<any>(),
+    get: jest.fn<any>((_sid: any, cb: any) => { if (cb) cb(null, {}); }),
+    set: jest.fn<any>((_sid: any, _sess: any, cb: any) => { if (cb) cb(null); }),
+    destroy: jest.fn<any>((_sid: any, cb: any) => { if (cb) cb(null); }),
+  }),
+  SESSION_TTL_SECONDS: 86400,
+}));
+
+jest.mock("../../src/middleware/rateLimit", () => {
+  const actual = jest.requireActual("../../src/middleware/rateLimit");
+  return {
+    ...actual,
+    sep24RateLimiter: jest.fn<any>((_req: any, _res: any, next: any) => next()),
+  };
+});
+
+jest.mock("../../src/config/database", () => {
+  const queryMock = jest.fn<any>();
+  return {
+    pool: { connect: jest.fn<any>(), query: queryMock },
+    queryRead: jest.fn<any>().mockResolvedValue({ rows: [] }),
+    queryWrite: jest.fn<any>().mockResolvedValue({ rows: [] }),
+    getPool: jest.fn<any>(),
+  };
+});
+
+const app = require("../../src/index").default;
+
+const VALID_STELLAR_ACCOUNT = (() => {
+  const kp = Keypair.random();
+  return kp.publicKey();
+})();
 
 describe("SEP-24 Interactive Flow", () => {
   let txId: string;
+  let sep24TxId: string;
 
   it("GET /sep24/info returns deposit and withdraw configuration", async () => {
     const res = await request(app).get("/sep24/info");
@@ -16,7 +66,7 @@ describe("SEP-24 Interactive Flow", () => {
     const payload = {
       asset_code: "XLM",
       amount: "10",
-      account: "GBB4H2JIBOXV6JUD4F2ZXK6WOD5ALW3TBJWB3UnfF4u2PA7QQYUMVY26",
+      account: VALID_STELLAR_ACCOUNT,
       success_url: "https://example.com/success",
       failure_url: "https://example.com/failure",
     };
@@ -57,7 +107,7 @@ describe("SEP-24 Interactive Flow", () => {
     const createRes = await request(app).post("/sep24/deposit").send({
       asset_code: "XLM",
       amount: "12",
-      account: "GBB4H2JIBOXV6JUD4F2ZXK6WOD5ALW3TBJWB3UnfF4u2PA7QQYUMVY26",
+      account: VALID_STELLAR_ACCOUNT,
       success_url: "https://example.com/success",
       failure_url: "https://example.com/failure",
     });
@@ -72,5 +122,78 @@ describe("SEP-24 Interactive Flow", () => {
     expect(res.status).toBe(200);
     expect(res.body.transaction.status).toBe("failed");
     expect(res.body).toHaveProperty("redirect");
+  });
+
+  // ── SEP-24 Compliant Routes ─────────────────────────────────────────────
+
+  it("POST /sep24/transactions/deposit/interactive returns transaction ID and redirect URL", async () => {
+    const payload = {
+      asset_code: "XLM",
+      amount: "25",
+      account: VALID_STELLAR_ACCOUNT,
+      success_url: "https://example.com/success",
+      failure_url: "https://example.com/failure",
+    };
+
+    const res = await request(app)
+      .post("/sep24/transactions/deposit/interactive")
+      .send(payload);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("id");
+    expect(res.body).toHaveProperty("url");
+    expect(res.body.url).toContain("transaction_id=");
+    expect(typeof res.body.id).toBe("string");
+    expect(typeof res.body.url).toBe("string");
+
+    sep24TxId = res.body.id;
+  });
+
+  it("GET /sep24/transaction returns transaction details via query param", async () => {
+    expect(sep24TxId).toBeTruthy();
+
+    const res = await request(app).get(`/sep24/transaction?id=${sep24TxId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("id", sep24TxId);
+    expect(res.body).toHaveProperty("kind", "deposit");
+    expect(res.body).toHaveProperty("status", "pending_user_transfer_start");
+    expect(res.body).toHaveProperty("asset_in", "XLM");
+    expect(res.body).toHaveProperty("amount_in", "25");
+  });
+
+  it("GET /sep24/transaction returns 400 when id query param is missing", async () => {
+    const res = await request(app).get("/sep24/transaction");
+    expect(res.status).toBe(400);
+  });
+
+  it("GET /sep24/transaction returns 404 for non-existent id", async () => {
+    const res = await request(app).get("/sep24/transaction?id=nonexistent-id");
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /sep24/transactions/deposit/interactive rejects unsupported asset", async () => {
+    const res = await request(app)
+      .post("/sep24/transactions/deposit/interactive")
+      .send({
+        asset_code: "INVALID_COIN",
+        amount: "10",
+        account: VALID_STELLAR_ACCOUNT,
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /sep24/transactions/deposit/interactive rejects invalid Stellar account", async () => {
+    const res = await request(app)
+      .post("/sep24/transactions/deposit/interactive")
+      .send({
+        asset_code: "XLM",
+        amount: "10",
+        account: "NOT_A_VALID_ADDRESS",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBeTruthy();
   });
 });

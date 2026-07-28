@@ -282,6 +282,9 @@ export class CurrencyService {
       this.cache = { rates, fetchedAt: new Date() };
       this.usingFallback = false;
       console.log("[CurrencyService] Exchange rates refreshed successfully");
+
+      // Publish rate update events for GraphQL subscriptions
+      this.publishRateUpdates(rates);
     } catch (err) {
       const message = (err as Error).message;
       if (this.cache) {
@@ -297,6 +300,37 @@ export class CurrencyService {
         this.cache = { rates: FALLBACK_RATES, fetchedAt: new Date() };
         this.usingFallback = true;
       }
+    }
+  }
+
+  /**
+   * Publish exchange rate updates to GraphQL subscriptions.
+   * Called after successful rate refresh.
+   */
+  private async publishRateUpdates(newRates: ExchangeRates): Promise<void> {
+    try {
+      // Lazy-load pubsub to avoid circular dependency issues
+      const { getRedisPubSub } = await import("../graphql/redisPubSub");
+      const { SubscriptionChannels } = await import("../graphql/subscriptions");
+      
+      const pubsub = getRedisPubSub();
+      const oldRates = this.cache?.rates ?? {};
+
+      for (const currency of SUPPORTED_CURRENCIES) {
+        if (newRates[currency] !== oldRates[currency]) {
+          const payload = {
+            currency,
+            rate: String(newRates[currency]),
+            previousRate: oldRates[currency] ? String(oldRates[currency]) : undefined,
+            updatedAt: new Date().toISOString(),
+          };
+          
+          await pubsub.publish(SubscriptionChannels.EXCHANGE_RATE_UPDATED, payload);
+        }
+      }
+    } catch (err) {
+      // Don't fail the rate fetch if pubsub is unavailable
+      console.warn("[CurrencyService] Failed to publish rate updates:", (err as Error).message);
     }
   }
 }

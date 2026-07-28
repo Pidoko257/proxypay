@@ -47,6 +47,8 @@
     "test:load:breakpoint": "k6 run -e SCENARIO=breakpoint tests/load/api.js",
     "test:load:legacy": "k6 run tests/load/k6/load_test_scenarios.js",
     "test:bench": "node tests/load/autocannon/benchmark.js",
+    "test:perf:regression": "node tests/load/performance-regression.js",
+    "test:perf:save-baseline": "node -e \"const fs=require('fs');const p=require('path').join(__dirname,'tests','load','baselines','baseline.json');fs.writeFileSync(p,JSON.stringify({timestamp:new Date().toISOString(),scenarios:[]},null,2))\"",
     "bench:soroban-gas": "node benchmarks/soroban-gas-bench.js",
     "sdk:generate": "echo 'Start dev server first (npm run dev), then run: openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config.yaml -o sdk'",
     "sdk:generate:python": "openapi-generator-cli generate --generator-key python",

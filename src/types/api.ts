@@ -203,3 +203,23 @@ export interface QueueActionResponse {
   success: boolean;
   message: string;
 }
+
+export interface IntegrationHealth {
+  name: string;
+  status: "up" | "down" | "degraded";
+  lastCheck: string;
+  responseTimeMs: number | null;
+  error?: string;
+}
+
+export interface HealthDashboardResponse {
+  status: "healthy" | "degraded" | "unhealthy";
+  timestamp: string;
+  integrations: IntegrationHealth[];
+  summary: {
+    total: number;
+    up: number;
+    down: number;
+    degraded: number;
+  };
+}

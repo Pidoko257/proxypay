@@ -1,10 +1,12 @@
 import request from "supertest";
 import express from "express";
+import { Pool } from "pg";
 
 // Prefix with 'mock' to allow use in hoisted jest.mock
 const mockCreate = jest.fn();
 const mockFindById = jest.fn();
 const mockUpdateMetadata = jest.fn();
+const mockPoolQuery = jest.fn();
 
 // Mock TransactionModel
 jest.mock("../../src/models/transaction", () => {
@@ -20,6 +22,15 @@ jest.mock("../../src/models/transaction", () => {
       findById: mockFindById,
       updateMetadata: mockUpdateMetadata,
     })),
+  };
+});
+
+// Mock database.Pool
+jest.mock("../../src/config/database", () => {
+  return {
+    pool: {
+      query: mockPoolQuery,
+    } as unknown as Pool,
   };
 });
 
@@ -528,6 +539,237 @@ describe("SEP-31 Cross-Border Payments API", () => {
       const result = calculateFee(100);
       expect(result.fee).toBeGreaterThan(0);
       expect(result.total).toBe(100 + result.fee);
+    });
+  });
+
+  // ─── PUT /sep31/customer/sender ─────────────────────────────────────
+
+  describe("PUT /sep31/customer/sender", () => {
+    const testApiKey = "test-api-key-123";
+    const validSenderData = {
+      first_name: "John",
+      last_name: "Doe",
+      email_address: "john.doe@example.com",
+      mobile_number: "+1234567890",
+      birth_date: "1990-01-15",
+      id_number: "ID123456789",
+      id_type: "passport",
+      id_country_code: "USA",
+      address: "123 Main St",
+      city: "New York",
+      postal_code: "10001",
+      address_country_code: "USA",
+    };
+
+    it("should register a new sender successfully", async () => {
+      // Mock API key validation
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [{ permissions: 1, is_active: true, expires_at: null }],
+      });
+
+      // Mock sender not found (new registration)
+      mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+      // Mock successful insert
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [{ id: "sender-uuid-123" }],
+      });
+
+      const res = await request(app)
+        .put("/sep31/customer/sender")
+        .set("X-API-Key", testApiKey)
+        .send(validSenderData);
+
+      expect(res.status).toBe(201);
+      expect(res.body).toHaveProperty("id");
+      expect(res.body).toHaveProperty("status", "ACCEPTED");
+      expect(res.body).toHaveProperty("message", "Sender registered successfully");
+    });
+
+    it("should update existing sender (idempotent)", async () => {
+      // Mock API key validation
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [{ permissions: 1, is_active: true, expires_at: null }],
+      });
+
+      // Mock sender found (update)
+      mockPoolQuery.mockResolvedValueOnce({
+        rows: [{ id: "existing-sender-id" }],
+      });
+
+      // Mock successful update
+      mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+      const res = await request(app)
+        .put("/sep31/customer/sender")
+        .set("X-API-Key", testApiKey)
+        .send(validSenderData);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty("id", "existing-sender-id");
+      expect(res.body).toHaveProperty("status", "ACCEPTED");
+      expect(res.body).toHaveProperty("message", "Sender information updated successfully");
+    });
+
+    it("should return 401 without API key", async () => {
+      const res = await request(app)
+        .put("/sep31/customer/sender")
+        .send(validSenderData);
+
+      expect(res.status).toBe(401);
+    });
+
+    it("should return 401 for invalid API key", async () => {
+      mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+      const res = await request(app)
+        .put("/sep31/customer/sender")
+        .set("X-API-Key", "invalid-key")
+        .send(validSenderData);
+
+      expect(res.status).toBe(401);
+    });
+
+    it("should return 400 for missing required fields", async () => {
+      const res = await request(app)
+        .put("/sep31/customer/sender")
+        .set("X-API-Key", testApiKey)
+        .send({
+          first_name: "John",
+          // missing last_name and email_address
+        });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("should return 400 for invalid email format", async () => {
+      const res = await request(app)
+        .put("/sep31/customer/sender")
+        .set("X-API-Key", testApiKey)
+        .send({
+          first_name: "John",
+          last_name: "Doe",
+          email_address: "invalid-email",
+        });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("should return 400 for invalid date format", async () => {
+      const res = await request(app)
+        .put("/sep31/customer/sender")
+        .set("X-API-Key", testApiKey)
+        .send({
+          first_name: "John",
+          last_name: "Doe",
+          email_address: "john@example.com",
+          birth_date: "01/15/1990", // Wrong format
+        });
+
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ─── GET /sep31/customer/sender/:id ───────────────────────────────────
+
+  describe("GET /sep31/customer/sender/:id", () => {
+    const testApiKey = "test-api-key-123";
+    const senderId = "sender-uuid-123";
+
+    it("should retrieve sender information successfully", async () => {
+      const mockSender = {
+        id: senderId,
+        first_name: "John",
+        last_name: "Doe",
+        email_address: "john.doe@example.com",
+        mobile_number: "+1234567890",
+        birth_date: "1990-01-15",
+        birth_place: null,
+        birth_country: null,
+        address: "123 Main St",
+        address_country_code: "USA",
+        state_or_province: null,
+        city: "New York",
+        postal_code: "10001",
+        id_type: "passport",
+        id_country_code: "USA",
+        id_issue_date: null,
+        id_expiration_date: null,
+        id_number: "ID123456789",
+        tax_id: null,
+        tax_id_name: null,
+        occupation: null,
+        employer_name: null,
+        employer_address: null,
+        sep12_type: "sep31-sender",
+        status: "ACCEPTED",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      mockPoolQuery.mockResolvedValueOnce({ rows: [mockSender] });
+
+      const res = await request(app)
+        .get(`/sep31/customer/sender/${senderId}`)
+        .set("X-API-Key", testApiKey);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty("id", senderId);
+      expect(res.body).toHaveProperty("first_name", "John");
+      expect(res.body).toHaveProperty("last_name", "Doe");
+      expect(res.body).toHaveProperty("email_address", "john.doe@example.com");
+    });
+
+    it("should return 401 without API key", async () => {
+      const res = await request(app).get(`/sep31/customer/sender/${senderId}`);
+
+      expect(res.status).toBe(401);
+    });
+
+    it("should return 404 for non-existent sender", async () => {
+      mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+      const res = await request(app)
+        .get(`/sep31/customer/sender/${senderId}`)
+        .set("X-API-Key", testApiKey);
+
+      expect(res.status).toBe(404);
+    });
+
+    it("should return 400 for invalid UUID format", async () => {
+      const res = await request(app)
+        .get("/sep31/customer/sender/invalid-uuid")
+        .set("X-API-Key", testApiKey);
+
+      expect(res.status).toBe(400);
+    });
+
+    it("should only return senders belonging to the API key", async () => {
+      // This test ensures that the API key isolation works
+      const mockSender = {
+        id: senderId,
+        first_name: "John",
+        last_name: "Doe",
+        email_address: "john.doe@example.com",
+        // ... other fields
+        sep12_type: "sep31-sender",
+        status: "ACCEPTED",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      mockPoolQuery.mockResolvedValueOnce({ rows: [mockSender] });
+
+      const res = await request(app)
+        .get(`/sep31/customer/sender/${senderId}`)
+        .set("X-API-Key", testApiKey);
+
+      expect(res.status).toBe(200);
+      // The query should include both id and api_key_id
+      expect(mockPoolQuery).toHaveBeenCalledWith(
+        expect.stringContaining("WHERE id = $1 AND api_key_id = $2"),
+        expect.arrayContaining([senderId, testApiKey])
+      );
     });
   });
 });

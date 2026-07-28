@@ -6,6 +6,9 @@ import { getConfiguredPaymentAsset } from "../services/stellar/assetService";
 import  rateLimit from "express-rate-limit";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { z } from "zod";
+import { pool } from "../config/database";
+import { requireAuth } from "../middleware/auth";
 
 const router = Router();
 const transactionModel = new TransactionModel();
@@ -117,6 +120,41 @@ function generateMemo(): string {
 function isValidUUID(str: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 }
+
+// --- SEP-31 Sender Registration Schema ---
+const PutSenderSchema = z.object({
+  // Required sender fields per SEP-31 spec
+  first_name: z.string().min(1, "First name is required"),
+  last_name: z.string().min(1, "Last name is required"),
+  email_address: z.string().email("Invalid email address"),
+  
+  // Optional but commonly required fields
+  mobile_number: z.string().optional(),
+  birth_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format (YYYY-MM-DD)").optional(),
+  birth_place: z.string().optional(),
+  birth_country: z.string().length(3).optional(),
+  
+  // Address fields
+  address: z.string().optional(),
+  address_country_code: z.string().length(3).optional(),
+  state_or_province: z.string().optional(),
+  city: z.string().optional(),
+  postal_code: z.string().optional(),
+  
+  // ID document fields
+  id_type: z.string().optional(),
+  id_country_code: z.string().length(3).optional(),
+  id_issue_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format (YYYY-MM-DD)").optional(),
+  id_expiration_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Invalid date format (YYYY-MM-DD)").optional(),
+  id_number: z.string().optional(),
+  
+  // Additional fields
+  tax_id: z.string().optional(),
+  tax_id_name: z.string().optional(),
+  occupation: z.string().optional(),
+  employer_name: z.string().optional(),
+  employer_address: z.string().optional(),
+}).catchall(z.any()); // Allow additional custom fields
 
 // --- Routes ---
 
@@ -457,6 +495,306 @@ router.patch("/transactions/:id", sep31WriteLimiter, async (req: Request, res: R
   } catch (error: any) {
     console.error("SEP-31 PATCH /transactions/:id error:", error);
     throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
+  }
+});
+
+/**
+ * PUT /customer/sender
+ *
+ * Registers or updates a sender for SEP-31 cross-border payments.
+ * Validates required sender fields per SEP-31 spec and stores them
+ * linked to the requesting API key's organization.
+ */
+router.put("/customer/sender", requireAuth, sep31WriteLimiter, async (req: Request, res: Response) => {
+  try {
+    // Validate request body
+    const validatedData = PutSenderSchema.parse(req.body);
+    
+    // Extract API key from request (set by requireAuth middleware)
+    const apiKey = req.header("X-API-Key");
+    if (!apiKey) {
+      throw createError(ERROR_CODES.UNAUTHORIZED, "API key required", {
+        error: "unauthorized",
+        message: "API key required for sender registration",
+      });
+    }
+    
+    // Get API key details to extract organization_id if available
+    const apiKeyQuery = `
+      SELECT permissions, is_active, expires_at
+      FROM api_keys
+      WHERE key = $1
+      LIMIT 1
+    `;
+    const apiKeyResult = await pool.query(apiKeyQuery, [apiKey]);
+    
+    if (apiKeyResult.rows.length === 0) {
+      throw createError(ERROR_CODES.UNAUTHORIZED, "Invalid API key", {
+        error: "unauthorized",
+        message: "Invalid API key",
+      });
+    }
+    
+    const apiKeyRow = apiKeyResult.rows[0];
+    if (!apiKeyRow.is_active) {
+      throw createError(ERROR_CODES.UNAUTHORIZED, "API key is inactive", {
+        error: "unauthorized",
+        message: "API key is inactive",
+      });
+    }
+    if (apiKeyRow.expires_at && new Date(apiKeyRow.expires_at) < new Date()) {
+      throw createError(ERROR_CODES.UNAUTHORIZED, "API key has expired", {
+        error: "unauthorized",
+        message: "API key has expired",
+      });
+    }
+    
+    // Check if sender already exists for this API key + id_number combination (idempotent)
+    const existingSenderQuery = `
+      SELECT id FROM sep31_senders
+      WHERE api_key_id = $1 AND id_number = $2
+      LIMIT 1
+    `;
+    
+    let senderId: string;
+    
+    if (validatedData.id_number) {
+      const existingResult = await pool.query(existingSenderQuery, [apiKey, validatedData.id_number]);
+      
+      if (existingResult.rows.length > 0) {
+        // Update existing sender
+        senderId = existingResult.rows[0].id;
+        
+        const updateQuery = `
+          UPDATE sep31_senders
+          SET
+            first_name = $1,
+            last_name = $2,
+            email_address = $3,
+            mobile_number = $4,
+            birth_date = $5,
+            birth_place = $6,
+            birth_country = $7,
+            address = $8,
+            address_country_code = $9,
+            state_or_province = $10,
+            city = $11,
+            postal_code = $12,
+            id_type = $13,
+            id_country_code = $14,
+            id_issue_date = $15,
+            id_expiration_date = $16,
+            tax_id = $17,
+            tax_id_name = $18,
+            occupation = $19,
+            employer_name = $20,
+            employer_address = $21,
+            status = 'ACCEPTED'
+          WHERE id = $22
+        `;
+        
+        await pool.query(updateQuery, [
+          validatedData.first_name,
+          validatedData.last_name,
+          validatedData.email_address,
+          validatedData.mobile_number || null,
+          validatedData.birth_date || null,
+          validatedData.birth_place || null,
+          validatedData.birth_country || null,
+          validatedData.address || null,
+          validatedData.address_country_code || null,
+          validatedData.state_or_province || null,
+          validatedData.city || null,
+          validatedData.postal_code || null,
+          validatedData.id_type || null,
+          validatedData.id_country_code || null,
+          validatedData.id_issue_date || null,
+          validatedData.id_expiration_date || null,
+          validatedData.tax_id || null,
+          validatedData.tax_id_name || null,
+          validatedData.occupation || null,
+          validatedData.employer_name || null,
+          validatedData.employer_address || null,
+          senderId,
+        ]);
+        
+        return res.json({
+          id: senderId,
+          status: "ACCEPTED",
+          message: "Sender information updated successfully",
+        });
+      }
+    }
+    
+    // Create new sender
+    const insertQuery = `
+      INSERT INTO sep31_senders (
+        api_key_id,
+        first_name,
+        last_name,
+        email_address,
+        mobile_number,
+        birth_date,
+        birth_place,
+        birth_country,
+        address,
+        address_country_code,
+        state_or_province,
+        city,
+        postal_code,
+        id_type,
+        id_country_code,
+        id_issue_date,
+        id_expiration_date,
+        id_number,
+        tax_id,
+        tax_id_name,
+        occupation,
+        employer_name,
+        employer_address,
+        sep12_type,
+        status
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
+      )
+      RETURNING id
+    `;
+    
+    const insertResult = await pool.query(insertQuery, [
+      apiKey,
+      validatedData.first_name,
+      validatedData.last_name,
+      validatedData.email_address,
+      validatedData.mobile_number || null,
+      validatedData.birth_date || null,
+      validatedData.birth_place || null,
+      validatedData.birth_country || null,
+      validatedData.address || null,
+      validatedData.address_country_code || null,
+      validatedData.state_or_province || null,
+      validatedData.city || null,
+      validatedData.postal_code || null,
+      validatedData.id_type || null,
+      validatedData.id_country_code || null,
+      validatedData.id_issue_date || null,
+      validatedData.id_expiration_date || null,
+      validatedData.id_number || null,
+      validatedData.tax_id || null,
+      validatedData.tax_id_name || null,
+      validatedData.occupation || null,
+      validatedData.employer_name || null,
+      validatedData.employer_address || null,
+      "sep31-sender",
+      "ACCEPTED",
+    ]);
+    
+    senderId = insertResult.rows[0].id;
+    
+    return res.status(201).json({
+      id: senderId,
+      status: "ACCEPTED",
+      message: "Sender registered successfully",
+    });
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      throw createError(ERROR_CODES.INVALID_INPUT, "Validation failed", {
+        error: "invalid_request",
+        message: error.errors[0]?.message || "Validation failed",
+        details: error.errors,
+      });
+    }
+    
+    console.error("SEP-31 PUT /customer/sender error:", error);
+    throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error", {
+      error: "server_error",
+      message: "Failed to register sender",
+    });
+  }
+});
+
+/**
+ * GET /customer/sender/:id
+ *
+ * Retrieves sender information by ID.
+ */
+router.get("/customer/sender/:id", requireAuth, sep31ReadLimiter, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    
+    if (!isValidUUID(id)) {
+      throw createError(ERROR_CODES.INVALID_INPUT, "Invalid sender ID format", {
+        error: "invalid_request",
+        message: "Invalid sender ID format",
+      });
+    }
+    
+    const apiKey = req.header("X-API-Key");
+    if (!apiKey) {
+      throw createError(ERROR_CODES.UNAUTHORIZED, "API key required", {
+        error: "unauthorized",
+        message: "API key required",
+      });
+    }
+    
+    const query = `
+      SELECT 
+        id, first_name, last_name, email_address, mobile_number,
+        birth_date, birth_place, birth_country,
+        address, address_country_code, state_or_province, city, postal_code,
+        id_type, id_country_code, id_issue_date, id_expiration_date, id_number,
+        tax_id, tax_id_name, occupation, employer_name, employer_address,
+        sep12_type, status, created_at, updated_at
+      FROM sep31_senders
+      WHERE id = $1 AND api_key_id = $2
+      LIMIT 1
+    `;
+    
+    const result = await pool.query(query, [id, apiKey]);
+    
+    if (result.rows.length === 0) {
+      throw createError(ERROR_CODES.NOT_FOUND, "Sender not found", {
+        error: "not_found",
+        message: "Sender not found",
+      });
+    }
+    
+    const sender = result.rows[0];
+    
+    return res.json({
+      id: sender.id,
+      first_name: sender.first_name,
+      last_name: sender.last_name,
+      email_address: sender.email_address,
+      mobile_number: sender.mobile_number,
+      birth_date: sender.birth_date,
+      birth_place: sender.birth_place,
+      birth_country: sender.birth_country,
+      address: sender.address,
+      address_country_code: sender.address_country_code,
+      state_or_province: sender.state_or_province,
+      city: sender.city,
+      postal_code: sender.postal_code,
+      id_type: sender.id_type,
+      id_country_code: sender.id_country_code,
+      id_issue_date: sender.id_issue_date,
+      id_expiration_date: sender.id_expiration_date,
+      id_number: sender.id_number,
+      tax_id: sender.tax_id,
+      tax_id_name: sender.tax_id_name,
+      occupation: sender.occupation,
+      employer_name: sender.employer_name,
+      employer_address: sender.employer_address,
+      sep12_type: sender.sep12_type,
+      status: sender.status,
+      created_at: sender.created_at,
+      updated_at: sender.updated_at,
+    });
+  } catch (error: any) {
+    console.error("SEP-31 GET /customer/sender/:id error:", error);
+    throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error", {
+      error: "server_error",
+      message: "Failed to retrieve sender",
+    });
   }
 });
 

@@ -1,5 +1,4 @@
 import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
-import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
 import { dbReplicaLagSeconds, dbReplicaReadEnabled } from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
@@ -168,36 +167,6 @@ const originalPoolQuery = pool.query.bind(pool);
     const durationMs = Number(endTime - startTime) / 1e6;
     if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
       logSlowQuery(queryString, durationMs, queryParams);
-    }
-
-    // PII Audit Interceptor
-    if (queryString.toUpperCase().includes("FROM USERS") || queryString.toUpperCase().includes("UPDATE USERS")) {
-      const isSelect = queryString.toUpperCase().startsWith("SELECT");
-      const isUpdate = queryString.toUpperCase().startsWith("UPDATE");
-
-      if (isSelect || isUpdate) {
-        // Attempt to extract targetId from query or params
-        let targetId = "unknown";
-        if (queryParams && queryParams.length > 0) {
-          // Typically the first or last param in findById or UPDATE ... WHERE id = $X
-          targetId = queryParams[queryParams.length - 1]; 
-        }
-
-        // Trigger asynchronous audit logging
-        // Note: Real admin context would be passed here in a production environment via AsyncLocalStorage or similar.
-        // For this task, we log the access attempt to ensure visibility.
-        setImmediate(() => {
-          auditService.logPIIAccess({
-            adminId: "system-admin", // Placeholder for actual admin context extraction
-            targetId: String(targetId),
-            resource: "users",
-            metadata: {
-              query: sanitizeQuery(queryString),
-              isUpdate,
-            }
-          }).catch(err => console.error("[PII Audit Interceptor] Failed:", err));
-        });
-      }
     }
 
     return result;
@@ -474,10 +443,10 @@ export async function getPgBouncerStats(): Promise<{
  * It routes queries based on:
  * 1. HTTP method context (if provided) - GET requests go to replica
  * 2. SQL query type (fallback) - SELECT queries go to replica
- * 
+ *
  * Usage in route handlers:
  *   const result = await queryWithContext(req, "SELECT * FROM users", []);
- * 
+ *
  * @param req - Express Request object (with dbRouting context from middleware)
  * @param text - SQL query string
  * @param params - Query parameters
@@ -502,9 +471,9 @@ export async function queryWithContext<
 /**
  * Batch query execution with request context.
  * Executes multiple queries with proper pool routing based on HTTP method.
- * 
+ *
  * All read operations (GET) use replica, all writes use primary.
- * 
+ *
  * @param req - Express Request object
  * @param queries - Array of { text, params } query configurations
  * @returns Array of query results

@@ -8,10 +8,12 @@
  *  - Approving / rejecting upgrade requests (updates users.kyc_level)
  */
 
-import { queryRead, queryWrite, pool } from "../config/database";
+import { queryRead, queryWrite } from "../config/database";
 import { KYCLevel, TRANSACTION_LIMITS } from "../config/limits";
 import { EmailService } from "./email";
 import { pushNotificationService } from "./push";
+import { AuditContext } from "../middleware/auditContext";
+import { withAuditTransaction } from "./auditTransaction";
 
 // Fraction of the daily limit that triggers an upgrade flag (80%)
 const UPGRADE_THRESHOLD_PCT = parseFloat(
@@ -240,6 +242,7 @@ export interface ApproveUpgradeOptions {
   requestId: string;
   reviewedBy: string;
   notes?: string;
+  auditContext?: AuditContext;
 }
 
 /**
@@ -255,11 +258,8 @@ export async function approveKycUpgrade(
 ): Promise<{ userId: string; newKycLevel: KYCLevel }> {
   const { requestId, reviewedBy, notes } = options;
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // Fetch and lock the request row
+  const context = options.auditContext ?? { userId: reviewedBy };
+  const result = await withAuditTransaction(context, async (client) => {
     const reqResult = await client.query<{
       id: string;
       user_id: string;
@@ -267,9 +267,9 @@ export async function approveKycUpgrade(
       status: string;
     }>(
       `SELECT id, user_id, requested_level, status
-       FROM kyc_tier_upgrade_requests
-       WHERE id = $1
-       FOR UPDATE`,
+         FROM kyc_tier_upgrade_requests
+        WHERE id = $1
+        FOR UPDATE`,
       [requestId],
     );
 
@@ -278,49 +278,63 @@ export async function approveKycUpgrade(
     }
 
     const req = reqResult.rows[0];
-
     if (!["pending", "notified"].includes(req.status)) {
       throw new Error(
         `Upgrade request ${requestId} is already in terminal state: ${req.status}`,
       );
     }
 
+    const userResult = await client.query(
+      "SELECT id, kyc_level FROM users WHERE id = $1 FOR UPDATE",
+      [req.user_id],
+    );
+    const before = { request: req, user: userResult.rows[0] };
     const newKycLevel = req.requested_level as KYCLevel;
 
-    // Update the user's KYC level
     await client.query(
       `UPDATE users
-       SET kyc_level = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2`,
+          SET kyc_level = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2`,
       [newKycLevel, req.user_id],
     );
 
-    // Mark the request as approved
-    await client.query(
+    const updatedRequest = await client.query(
       `UPDATE kyc_tier_upgrade_requests
-       SET status       = 'approved',
-           reviewed_by  = $1,
-           reviewed_at  = CURRENT_TIMESTAMP,
-           review_notes = $2,
-           rejection_reason = NULL
-       WHERE id = $3`,
+          SET status = 'approved',
+              reviewed_by = $1,
+              reviewed_at = CURRENT_TIMESTAMP,
+              review_notes = $2,
+              rejection_reason = NULL
+        WHERE id = $3
+        RETURNING id, user_id, requested_level, status, reviewed_by,
+                  reviewed_at, review_notes, rejection_reason`,
       [reviewedBy, notes ?? null, requestId],
     );
-
-    await client.query("COMMIT");
-
-    console.log(
-      `[kyc-tier-upgrade] Approved request ${requestId}: ` +
-        `user ${req.user_id} → ${newKycLevel} (by ${reviewedBy})`,
+    const updatedUser = await client.query(
+      "SELECT id, kyc_level FROM users WHERE id = $1",
+      [req.user_id],
     );
 
-    return { userId: req.user_id, newKycLevel };
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+    return {
+      value: { userId: req.user_id, newKycLevel },
+      audit: {
+        action: "kyc.approve",
+        entityType: "kyc_upgrade_request",
+        entityId: requestId,
+        beforeState: before,
+        afterState: {
+          request: updatedRequest.rows[0],
+          user: updatedUser.rows[0],
+        },
+      },
+    };
+  });
+
+  console.log(
+    `[kyc-tier-upgrade] Approved request ${requestId}: ` +
+      `user ${result.userId} → ${result.newKycLevel} (by ${reviewedBy})`,
+  );
+  return result;
 }
 
 export interface RejectUpgradeOptions {
@@ -328,6 +342,7 @@ export interface RejectUpgradeOptions {
   reviewedBy: string;
   notes?: string;
   rejectionReason: string;
+  auditContext?: AuditContext;
 }
 
 /**
@@ -342,23 +357,47 @@ export async function rejectKycUpgrade(
     throw new Error("Rejection reason is required when rejecting KYC");
   }
 
-  const result = await queryWrite(
-    `UPDATE kyc_tier_upgrade_requests
-     SET status           = 'rejected',
-         reviewed_by      = $1,
-         reviewed_at      = CURRENT_TIMESTAMP,
-         review_notes     = $2,
-         rejection_reason = $3
-     WHERE id = $4
-       AND status IN ('pending', 'notified')`,
-    [reviewedBy, notes ?? null, rejectionReason ?? null, requestId],
-  );
-
-  if ((result.rowCount ?? 0) === 0) {
-    throw new Error(
-      `Upgrade request ${requestId} not found or already in terminal state`,
+  const context = options.auditContext ?? { userId: reviewedBy };
+  await withAuditTransaction(context, async (client) => {
+    const current = await client.query(
+      `SELECT id, user_id, requested_level, status, reviewed_by, reviewed_at,
+              review_notes, rejection_reason
+         FROM kyc_tier_upgrade_requests
+        WHERE id = $1
+        FOR UPDATE`,
+      [requestId],
     );
-  }
+    const before = current.rows[0];
+    if (!before || !["pending", "notified"].includes(before.status)) {
+      throw new Error(
+        `Upgrade request ${requestId} not found or already in terminal state`,
+      );
+    }
+
+    const result = await client.query(
+      `UPDATE kyc_tier_upgrade_requests
+          SET status = 'rejected',
+              reviewed_by = $1,
+              reviewed_at = CURRENT_TIMESTAMP,
+              review_notes = $2,
+              rejection_reason = $3
+        WHERE id = $4
+        RETURNING id, user_id, requested_level, status, reviewed_by,
+                  reviewed_at, review_notes, rejection_reason`,
+      [reviewedBy, notes ?? null, rejectionReason, requestId],
+    );
+
+    return {
+      value: undefined,
+      audit: {
+        action: "kyc.reject",
+        entityType: "kyc_upgrade_request",
+        entityId: requestId,
+        beforeState: before,
+        afterState: result.rows[0],
+      },
+    };
+  });
 
   console.log(
     `[kyc-tier-upgrade] Rejected request ${requestId} (by ${reviewedBy})`,

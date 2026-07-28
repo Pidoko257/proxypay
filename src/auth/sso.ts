@@ -8,6 +8,7 @@ import { Request, Response, NextFunction, Router } from "express";
 import { pool } from "../config/database";
 import { generateToken, generateRefreshToken } from "./jwt";
 import { redisClient } from "../config/redis";
+import { appendAuditLog } from "../services/auditlogService";
 
 // SSO Configuration Interface
 export interface SSOConfig {
@@ -361,6 +362,14 @@ export class SSOService {
 
     // Update user's role
     if (assignedRoleId) {
+      const currentRoleResult = await client.query(
+        `SELECT r.id AS role_id, r.name AS role_name
+           FROM users u
+           LEFT JOIN roles r ON r.id = u.role_id
+          WHERE u.id = $1`,
+        [userId],
+      );
+
       await client.query("UPDATE users SET role_id = $1 WHERE id = $2", [
         assignedRoleId,
         userId,
@@ -380,6 +389,20 @@ export class SSOService {
           }),
         ],
       );
+
+      await appendAuditLog(client, {
+        userId: "system:sso",
+        action: "user.role.change",
+        entityType: "user",
+        entityId: userId,
+        beforeState: currentRoleResult.rows[0] ?? null,
+        afterState: {
+          role_id: assignedRoleId,
+          role_name: assignedRole,
+          provider_id: providerId,
+          sso_groups: groups,
+        },
+      });
 
       console.log(
         `[SSO] Synced groups to role for user ${userId}: ${assignedRole}`,

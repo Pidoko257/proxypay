@@ -22,15 +22,11 @@
 
 import { Router, Request, Response } from "express";
 import { requireAuth } from "../middleware/auth";
-import {
-  getSettings,
-  updateSettings,
-  resetSettings,
-  SETTINGS_OPTIONS,
-  PartialUserSettings,
-} from "../utils/settingsPanel";
+import { SETTINGS_OPTIONS, PartialUserSettings } from "../utils/settingsPanel";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { getAuditContext } from "../middleware/auditContext";
+import { settingsService } from "../services/settingsService";
 
 const router = Router();
 
@@ -40,7 +36,7 @@ router.use(requireAuth);
 // ---------------------------------------------------------------------------
 // GET /api/settings
 // ---------------------------------------------------------------------------
-router.get("/", (req: Request, res: Response): void => {
+router.get("/", async (req: Request, res: Response): Promise<void> => {
   const userId = (req as Request & { user?: { id: string } }).user?.id;
   if (!userId) {
     throw createError(ERROR_CODES.UNAUTHORIZED, "Unauthorized", {
@@ -48,14 +44,14 @@ router.get("/", (req: Request, res: Response): void => {
     });
   }
 
-  const settings = getSettings(userId);
+  const settings = await settingsService.get(userId);
   res.json({ settings });
 });
 
 // ---------------------------------------------------------------------------
 // PATCH /api/settings
 // ---------------------------------------------------------------------------
-router.patch("/", (req: Request, res: Response): void => {
+router.patch("/", async (req: Request, res: Response): Promise<void> => {
   const userId = (req as Request & { user?: { id: string } }).user?.id;
   if (!userId) {
     throw createError(ERROR_CODES.UNAUTHORIZED, "Unauthorized", {
@@ -64,7 +60,11 @@ router.patch("/", (req: Request, res: Response): void => {
   }
 
   const patch = req.body as PartialUserSettings;
-  const result = updateSettings(userId, patch);
+  const result = await settingsService.update(
+    userId,
+    patch,
+    getAuditContext(req, userId),
+  );
 
   if ("errors" in result) {
     throw createError(ERROR_CODES.UNPROCESSABLE_CONTENT, "Validation failed", {
@@ -78,7 +78,7 @@ router.patch("/", (req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 // DELETE /api/settings  (reset to defaults)
 // ---------------------------------------------------------------------------
-router.delete("/", (req: Request, res: Response): void => {
+router.delete("/", async (req: Request, res: Response): Promise<void> => {
   const userId = (req as Request & { user?: { id: string } }).user?.id;
   if (!userId) {
     throw createError(ERROR_CODES.UNAUTHORIZED, "Unauthorized", {
@@ -86,7 +86,10 @@ router.delete("/", (req: Request, res: Response): void => {
     });
   }
 
-  const settings = resetSettings(userId);
+  const settings = await settingsService.reset(
+    userId,
+    getAuditContext(req, userId),
+  );
   res.json({ settings });
 });
 

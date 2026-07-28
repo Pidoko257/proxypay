@@ -9,8 +9,9 @@ import {
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 import { apiKeyService } from "../services/apiKeyService";
+import { getAuditContext } from "../middleware/auditContext";
 
-const scopeNames = new Set(listAllScopeNames());
+const scopeNames = new Set<string>(listAllScopeNames());
 
 const createApiKeySchema = z.object({
   expires_in_days: z.number().int().min(1).max(365).optional(),
@@ -58,14 +59,37 @@ export class ApiKeyController {
   ): Promise<void> {
     try {
       const body = parseCreateRequest(req.body ?? {});
-      const result = await apiKeyService.createForUser(getUserId(req), {
-        expiresInDays: body.expires_in_days,
-        label: body.label,
-        permissions: body.permissions,
-        scopes: body.scopes as ApiKeyScopeName[] | undefined,
-      });
+      const userId = getUserId(req);
+      const result = await apiKeyService.createForUser(
+        userId,
+        {
+          expiresInDays: body.expires_in_days,
+          label: body.label,
+          permissions: body.permissions,
+          scopes: body.scopes as ApiKeyScopeName[] | undefined,
+        },
+        getAuditContext(req, userId),
+      );
 
       res.status(201).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  static async revoke(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const userId = getUserId(req);
+      await apiKeyService.revokeForUser(
+        userId,
+        req.params.id,
+        getAuditContext(req, userId),
+      );
+      res.status(204).send();
     } catch (error) {
       next(error);
     }

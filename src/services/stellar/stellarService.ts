@@ -485,7 +485,8 @@ export class StellarService {
   ): Promise<void> {
     try {
       const { pool } = await import("../../config/database.js");
-      
+      const { appendAuditLog } = await import("../auditlogService.js");
+
       const auditData = {
         transaction_hash: txHash,
         from_address: fromAddress,
@@ -494,17 +495,24 @@ export class StellarService {
         error_message: error ? (error.message || String(error)) : null,
       };
 
-      await pool.query(
-        `INSERT INTO audit_logs (admin_id, action, resource, resource_id, diff, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())`,
-        [
-          adminId || "system",
-          "CLAWBACK_ASSET",
-          "stellar_clawback",
-          txHash || "failed",
-          JSON.stringify(auditData),
-        ]
-      );
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await appendAuditLog(client, {
+          userId: adminId || "system:stellar",
+          action: "stellar.clawback",
+          entityType: "stellar_clawback",
+          entityId: txHash || "failed",
+          beforeState: null,
+          afterState: auditData,
+        });
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
     } catch (auditError) {
       console.error("Failed to write clawback audit log:", auditError);
       // Don't throw - audit logging failure shouldn't break the operation

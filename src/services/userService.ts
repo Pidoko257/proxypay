@@ -4,6 +4,8 @@ import { encrypt, decrypt } from "../utils/encryption";
 import { flushUserSessions } from "../config/redis";
 import { UserModel } from "../models/users";
 import { isValidMerchantMCC, requireValidMerchantMCC } from "../utils/merchantMcc";
+import { AuditContext } from "../middleware/auditContext";
+import { withAuditTransaction } from "./auditTransaction";
 
 export interface User {
   id: string;
@@ -63,7 +65,7 @@ export async function getUserByPhoneNumber(
 
   const result = await pool.query(query, [encryptedPhone]);
   if (result.rows.length === 0) return null;
-  
+
   const row = result.rows[0];
   return {
     ...row,
@@ -172,39 +174,57 @@ export async function createUser(userData: CreateUserRequest): Promise<User> {
 export async function updateUserRole(
   userId: string,
   roleName: string,
+  auditContext?: AuditContext,
 ): Promise<User> {
-  // Get role ID
-  const roleQuery = "SELECT id FROM roles WHERE name = $1";
-  const roleResult = await pool.query(roleQuery, [roleName]);
+  const context = auditContext ?? { userId: "system:user-service" };
 
-  if (roleResult.rows.length === 0) {
-    throw new Error(`Role '${roleName}' not found`);
-  }
+  return withAuditTransaction(context, async (client) => {
+    const roleResult = await client.query(
+      "SELECT id FROM roles WHERE name = $1",
+      [roleName],
+    );
+    if (roleResult.rows.length === 0) {
+      throw new Error(`Role '${roleName}' not found`);
+    }
 
-  const roleId = roleResult.rows[0].id;
+    const currentResult = await client.query(
+      `SELECT u.id, u.role_id, r.name AS role_name
+         FROM users u
+         LEFT JOIN roles r ON r.id = u.role_id
+        WHERE u.id = $1
+        FOR UPDATE OF u`,
+      [userId],
+    );
+    const before = currentResult.rows[0];
+    if (!before) throw new Error("User not found");
 
-  const query = `
-    UPDATE users 
-    SET role_id = $1, updated_at = CURRENT_TIMESTAMP
-    WHERE id = $2
-    RETURNING id, phone_number, kyc_level, role_id, two_factor_secret, backup_codes, created_at, updated_at
-  `;
+    const result = await client.query(
+      `UPDATE users
+          SET role_id = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        RETURNING id, phone_number, kyc_level, role_id, two_factor_secret,
+                  backup_codes, created_at, updated_at`,
+      [roleResult.rows[0].id, userId],
+    );
+    const row = result.rows[0];
+    const user = {
+      ...row,
+      phone_number: decrypt(row.phone_number) as string,
+      two_factor_secret: decrypt(row.two_factor_secret),
+      role_name: roleName,
+    };
 
-  const result = await pool.query(query, [roleId, userId]);
-
-  if (result.rows.length === 0) {
-    throw new Error("User not found");
-  }
-
-  const row = result.rows[0];
-  const user = {
-    ...row,
-    phone_number: decrypt(row.phone_number) as string,
-    two_factor_secret: decrypt(row.two_factor_secret),
-    role_name: roleName
-  };
-
-  return user;
+    return {
+      value: user,
+      audit: {
+        action: "user.role.change",
+        entityType: "user",
+        entityId: userId,
+        beforeState: before,
+        afterState: { id: userId, role_id: row.role_id, role_name: roleName },
+      },
+    };
+  });
 }
 
 /**
@@ -399,7 +419,7 @@ export async function getUserPermissions(userId: string): Promise<string[]> {
 
 export async function invalidateUserOnPasswordChange(userId: string): Promise<void> {
   const userModel = new UserModel();
-  
+
   // 1. Increment DB token version (persisted invalidation)
   try {
     await userModel.incrementTokenVersion(userId);

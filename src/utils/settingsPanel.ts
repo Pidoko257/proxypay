@@ -84,7 +84,7 @@ const VALID_TOAST_DENSITIES = new Set<ToastDensity>([
  * Validates an ISO 4217 currency code (3 uppercase letters).
  * Allows lowercase input and normalises to uppercase.
  */
-function normaliseCurrency(raw: string): string | null {
+export function normaliseCurrency(raw: string): string | null {
   const upper = raw.trim().toUpperCase();
   return /^[A-Z]{3}$/.test(upper) ? upper : null;
 }

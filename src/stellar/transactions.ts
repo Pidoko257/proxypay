@@ -279,42 +279,141 @@ export const submitTransaction = async (
   envelope: string,
 ): Promise<SubmitTransactionResult> => {
   const server = getStellarServer();
+  // Retry configuration
+  const MAX_NETWORK_RETRIES = 5;
+  const MAX_FEE_RETRIES = 3;
+  const networkBackoffBaseMs = 200;
 
-  try {
-    const transaction = parseTransactionEnvelope(envelope);
-    validateEnvelopeFeeLimit(transaction);
+  let networkAttempts = 0;
+  let feeAttempts = 0;
 
-    const response = await server.submitTransaction(transaction);
+  // Parse once and keep a mutable envelope/transaction for rebuilds
+  let transaction = parseTransactionEnvelope(envelope);
 
-    if (transaction instanceof FeeBumpTransaction) {
-      await updateFeePayerSequence();
-    }
+  // Helper to decide if an error is a network/timeout transient
+  const isNetworkError = (err: any): boolean => {
+    const msg = (err?.message || "").toString().toLowerCase();
+    if (msg.includes("timeout") || msg.includes("timedout") || msg.includes("econnreset") || msg.includes("network")) return true;
+    if (err?.code === "ETIMEDOUT" || err?.code === "ECONNRESET") return true;
+    const status = err?.response?.status;
+    if (typeof status === "number" && status >= 500) return true;
+    return false;
+  };
 
-    return {
-      success: true,
-      transactionHash: response.hash,
-      envelope,
-      feeCharged: Number(
-        (response as { fee_charged?: number | string }).fee_charged ??
-          transaction.fee,
-      ),
-      resultXdr: response.result_xdr,
-    };
-  } catch (error: unknown) {
-    const err = error as { message?: string; response?: { status?: number } };
+  // Helper to extract Stellar transaction result code
+  const stellarTxCode = (err: any): string | undefined =>
+    err?.response?.data?.extras?.result_codes?.transaction;
 
-    if (err.response?.status === 400) {
-      try {
-        await updateFeePayerSequence();
-      } catch {
-        // Preserve the original submit error when sequence refresh also fails.
+  while (true) {
+    try {
+      validateEnvelopeFeeLimit(transaction);
+
+      const response = await server.submitTransaction(transaction as any);
+
+      if (transaction instanceof FeeBumpTransaction) {
+        try {
+          await updateFeePayerSequence();
+        } catch {
+          // Non-fatal if refresh fails here
+        }
       }
-    }
 
-    return {
-      success: false,
-      error: err.message || "Transaction submission failed",
-    };
+      return {
+        success: true,
+        transactionHash: response.hash,
+        envelope,
+        feeCharged: Number((response as { fee_charged?: number | string }).fee_charged ?? (transaction as any).fee),
+        resultXdr: response.result_xdr,
+      };
+    } catch (error: unknown) {
+      const err = error as any;
+
+      const txCode = stellarTxCode(err);
+
+      // Sequence mismatch: refresh fee payer sequence (for fee-bumped txs) and retry
+      if (txCode === "tx_bad_seq" || (err?.message || "").toString().includes("tx_bad_seq")) {
+        try {
+          await updateFeePayerSequence();
+        } catch {
+          // If refresh fails, fall through to return error below
+        }
+
+        // Re-parse envelope in case a rebuild was performed above
+        try {
+          transaction = parseTransactionEnvelope(envelope);
+        } catch {
+          // ignore parse errors here
+        }
+
+        // Retry once after sequence refresh
+        networkAttempts++;
+        if (networkAttempts <= MAX_NETWORK_RETRIES) {
+          continue;
+        }
+
+        return {
+          success: false,
+          error: err.message || "tx_bad_seq",
+        };
+      }
+
+      // Insufficient fee: attempt to bump fee by 20% and retry up to MAX_FEE_RETRIES
+      if (txCode === "tx_insufficient_fee" || (err?.message || "").toString().includes("tx_insufficient_fee")) {
+        // Only possible to rebuild fee-bumped transactions here
+        if (transaction instanceof FeeBumpTransaction) {
+          if (feeAttempts >= MAX_FEE_RETRIES) {
+            return { success: false, error: err.message || txCode || "tx_insufficient_fee" };
+          }
+
+          feeAttempts++;
+
+          try {
+            const inner = (transaction as any).innerTransaction as Transaction;
+            const chargedOpCount = getChargedOperationCount((inner as any).operations?.length ?? 0);
+            const currentFee = Number((transaction as any).fee ?? 0);
+            const newTotalFee = Math.ceil(currentFee * 1.2);
+            const newBaseFee = Math.ceil(newTotalFee / Math.max(1, chargedOpCount));
+
+            const feePayer = getFeePayerKeypair();
+
+            const newFeeBump = wrapInFeeBump(inner, feePayer, newBaseFee as any);
+            newFeeBump.sign(feePayer);
+
+            // Replace transaction and envelope for next submit
+            transaction = newFeeBump as any;
+            envelope = newFeeBump.toEnvelope().toXDR("base64");
+
+            // Loop to retry submission
+            continue;
+          } catch (rebuildErr) {
+            return { success: false, error: (rebuildErr as any).message || String(rebuildErr) };
+          }
+        }
+
+        // If it's not a fee-bump tx, give up
+        return { success: false, error: err.message || txCode || "tx_insufficient_fee" };
+      }
+
+      // Network/transient errors: exponential backoff retry
+      if (isNetworkError(err)) {
+        networkAttempts++;
+        if (networkAttempts > MAX_NETWORK_RETRIES) {
+          return { success: false, error: err.message || "Network error" };
+        }
+
+        const delay = networkBackoffBaseMs * Math.pow(2, networkAttempts - 1);
+        await new Promise((res) => setTimeout(res, delay));
+        continue;
+      }
+
+      // For structured Stellar errors, return immediately with code if available
+      if (txCode) {
+        return { success: false, error: txCode };
+      }
+
+      // Fallback: return the error message
+      return { success: false, error: err.message || "Transaction submission failed" };
+    }
   }
 };
 

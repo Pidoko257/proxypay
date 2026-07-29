@@ -58,40 +58,110 @@ export const auditService = {
   },
 
   /**
-   * Log PII (Personally Identifiable Information) access for compliance
-   * @param data - PII access details including admin ID, target ID, and metadata
+   * Log administrative configuration change into audit_log table with before/after values.
    */
-  logPIIAccess: async (data: {
-    adminId: string;
-    targetId: string;
+  logConfigChange: async (data: {
+    userId?: string;
+    action: string;
     resource: string;
+    resourceId?: string;
+    oldValue?: any;
+    newValue?: any;
     ipAddress?: string;
     userAgent?: string;
-    metadata?: any;
   }): Promise<void> => {
     try {
       const query = `
-        INSERT INTO pii_access_audit_logs (admin_id, target_id, resource, ip_address, user_agent, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO audit_log (user_id, action, resource, resource_id, old_value, new_value, ip_address, user_agent)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       `;
       await pool.query(query, [
-        data.adminId,
-        data.targetId,
+        data.userId || null,
+        data.action,
         data.resource,
-        data.ipAddress,
-        data.userAgent,
-        JSON.stringify(data.metadata || {}),
+        data.resourceId || null,
+        data.oldValue ? JSON.stringify(data.oldValue) : null,
+        data.newValue ? JSON.stringify(data.newValue) : null,
+        data.ipAddress || null,
+        data.userAgent || null,
       ]);
-      logger.info(
-        { 
-          adminId: data.adminId, 
-          resource: data.resource, 
-          targetId: data.targetId 
-        }, 
-        'PII access logged'
-      );
+      logger.info({ userId: data.userId, resource: data.resource, action: data.action }, 'Config change logged');
     } catch (error) {
-      logger.error({ error, adminId: data.adminId, resource: data.resource }, 'Failed to log PII access');
+      logger.error({ error, userId: data.userId, resource: data.resource }, 'Failed to log config change');
+    }
+  },
+
+  /**
+   * Fetch configuration audit logs with optional filters.
+   */
+  fetchConfigAuditLogs: async (filters: {
+    resource?: string;
+    userId?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<any[]> => {
+    try {
+      const conditions: string[] = [];
+      const values: any[] = [];
+
+      if (filters.resource) {
+        values.push(filters.resource);
+        conditions.push(`resource = $${values.length}`);
+      }
+      if (filters.userId) {
+        values.push(filters.userId);
+        conditions.push(`user_id = $${values.length}`);
+      }
+
+      const limit = filters.limit || 100;
+      const offset = filters.offset || 0;
+
+      values.push(limit, offset);
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const query = `
+        SELECT id, user_id as "userId", action, resource, resource_id as "resourceId", old_value as "oldValue", new_value as "newValue", ip_address as "ipAddress", user_agent as "userAgent", created_at as timestamp
+        FROM audit_log
+        ${whereClause}
+        ORDER BY created_at DESC
+        LIMIT $${values.length - 1} OFFSET $${values.length}
+      `;
+      const result = await pool.query(query, values);
+      return result.rows;
+    } catch (error) {
+      logger.error({ error }, 'Failed to fetch config audit logs');
+      return [];
+    }
+  },
+
+  /**
+   * Export audit logs for regulatory compliance audits in CSV or JSON format.
+   */
+  exportAuditLogs: async (format: "csv" | "json" = "json", filters?: { resource?: string; userId?: string }): Promise<string> => {
+    try {
+      const logs = await auditService.fetchConfigAuditLogs({ ...filters, limit: 5000, offset: 0 });
+      if (format === "json") {
+        return JSON.stringify(logs, null, 2);
+      }
+
+      const headers = ["id", "userId", "action", "resource", "resourceId", "oldValue", "newValue", "ipAddress", "timestamp"];
+      const rows = logs.map((log) => [
+        log.id,
+        log.userId || "",
+        log.action,
+        log.resource,
+        log.resourceId || "",
+        JSON.stringify(log.oldValue || {}).replace(/"/g, '""'),
+        JSON.stringify(log.newValue || {}).replace(/"/g, '""'),
+        log.ipAddress || "",
+        log.timestamp,
+      ].map((val) => `"${val}"`).join(","));
+
+      return [headers.join(","), ...rows].join("\n");
+    } catch (error) {
+      logger.error({ error }, 'Failed to export audit logs');
+      throw new Error("Failed to export audit logs");
     }
   },
 };
+

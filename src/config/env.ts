@@ -134,6 +134,18 @@ export const env = cleanEnv(process.env, {
     default: "http://localhost:3000/api/accounting/xero/callback",
     desc: "Xero OAuth 2.0 Redirect URI",
   }),
+  WHITELISTED_IP_CIDRS: str({
+    default: "",
+    desc: "Comma-separated list of whitelisted IP CIDR blocks (supports IPv4 and IPv6)",
+  }),
+  RATE_LIMIT_BYPASS_ENABLED: bool({
+    default: true,
+    desc: "Whether rate limiting bypass is enabled for whitelisted IP ranges",
+  }),
+  KEY_ROTATION_CRON: str({
+    default: "0 4 * * 0",
+    desc: "Cron schedule for periodic PII encryption key rotation job",
+  }),
 });
 
 // Re-export specific values for convenience
@@ -162,4 +174,8 @@ export const {
   XERO_CLIENT_ID,
   XERO_CLIENT_SECRET,
   XERO_REDIRECT_URI,
+  WHITELISTED_IP_CIDRS,
+  RATE_LIMIT_BYPASS_ENABLED,
+  KEY_ROTATION_CRON,
 } = env;
+

@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from "express";
 import ipaddr from "ipaddr.js";
 import { geolocationService } from "../services/geolocation";
 import { redisClient } from "../config/redis";
+import { WHITELISTED_IP_CIDRS } from "../config/env";
 
 const ALLOWED_PROVIDER_CIDRS = [
   "41.134.0.0/16", // MTN example block
@@ -11,38 +12,71 @@ const ALLOWED_PROVIDER_CIDRS = [
 // Geofencing: Allowed ISO 3166-1 alpha-2 country codes for providers
 const ALLOWED_PROVIDER_COUNTRIES = ["CM", "UG", "RW", "GH", "KE", "ZA", "NG"];
 
-const allowedNetworks = ALLOWED_PROVIDER_CIDRS.map((cidr) =>
-  ipaddr.parseCIDR(cidr),
-);
-
-const resolveClientIp = (req: Request): string | null => {
+export const resolveClientIp = (req: Request): string | null => {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length > 0) {
     const first = forwarded.split(",")[0].trim();
     if (first) return first;
   }
 
-  return req.ip || null;
+  return req.ip || req.socket?.remoteAddress || null;
 };
 
-const isIpAllowed = (rawIp: string): boolean => {
+/**
+ * Checks if a given IP matches a single CIDR range or array of CIDR ranges.
+ * Supports IPv4 (e.g. 192.168.1.0/24) and IPv6 (e.g. 2001:db8::/32).
+ */
+export const isIpInCidrRange = (rawIp: string, cidrInput?: string | string[]): boolean => {
+  if (!rawIp) return false;
+  
+  let cidrsToMatch: string[] = [];
+  if (Array.isArray(cidrInput)) {
+    cidrsToMatch = cidrInput;
+  } else if (typeof cidrInput === "string" && cidrInput.trim().length > 0) {
+    cidrsToMatch = cidrInput.split(",").map((c) => c.trim()).filter(Boolean);
+  } else if (WHITELISTED_IP_CIDRS) {
+    cidrsToMatch = WHITELISTED_IP_CIDRS.split(",").map((c) => c.trim()).filter(Boolean);
+  }
+
+  if (cidrsToMatch.length === 0) return false;
+
   try {
     const parsed = ipaddr.process(rawIp);
 
-    return allowedNetworks.some(([network, prefix]) => {
-      if (parsed.kind() !== network.kind()) {
+    return cidrsToMatch.some((cidrStr) => {
+      try {
+        // If cidrStr is just a single IP address without mask, normalize it with default subnet prefix
+        const formattedCidr = cidrStr.includes("/")
+          ? cidrStr
+          : parsed.kind() === "ipv6"
+            ? `${cidrStr}/128`
+            : `${cidrStr}/32`;
+
+        const [network, prefix] = ipaddr.parseCIDR(formattedCidr);
+        if (parsed.kind() !== network.kind()) {
+          return false;
+        }
+
+        const matchable = parsed as unknown as {
+          match(candidate: unknown, bits: number): boolean;
+        };
+        return matchable.match(network, prefix);
+      } catch {
         return false;
       }
-
-      const matchable = parsed as unknown as {
-        match(candidate: unknown, bits: number): boolean;
-      };
-      return matchable.match(network, prefix);
     });
   } catch {
     return false;
   }
 };
+
+const isIpAllowed = (rawIp: string): boolean => {
+  if (isIpInCidrRange(rawIp, ALLOWED_PROVIDER_CIDRS)) {
+    return true;
+  }
+  return isIpInCidrRange(rawIp);
+};
+
 
 // Haversine formula to calculate distance between two coordinates in km
 function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {

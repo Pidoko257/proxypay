@@ -1,5 +1,22 @@
 import { Request, Response, NextFunction } from "express";
 import { redisClient } from "../config/redis";
+import { rateLimitBypassTotal } from "../utils/metrics";
+import { isIpInCidrRange, resolveClientIp } from "./ipWhitelist";
+import { RATE_LIMIT_BYPASS_ENABLED } from "../config/env";
+
+/**
+ * Checks if the request client IP is whitelisted and bypasses rate limiting.
+ * Emits Prometheus metric tracking bypassed requests.
+ */
+export function isRateLimitBypassed(req: Request, endpoint: string): boolean {
+  if (!RATE_LIMIT_BYPASS_ENABLED) return false;
+  const clientIp = resolveClientIp(req);
+  if (clientIp && isIpInCidrRange(clientIp)) {
+    rateLimitBypassTotal.inc({ ip: clientIp, endpoint });
+    return true;
+  }
+  return false;
+}
 
 /**
  * Rate Limit Configuration
@@ -130,7 +147,12 @@ const generateRateLimitKey = (userId: string, endpoint: string): string => {
  * Limit: 10 requests per minute per user
  */
 export const sep24RateLimiter = async (req: Request, res: Response, next: NextFunction) => {
+  if (isRateLimitBypassed(req, "SEP24")) {
+    return next();
+  }
+
   const userId = (req as any).user?.id;
+
 
   if (!userId) {
     return res.status(401).json({ message: "Unauthorized" });
@@ -269,6 +291,10 @@ export const cancelTransactionRateLimiter = async (
   res: Response,
   next: NextFunction,
 ) => {
+  if (isRateLimitBypassed(req, "CANCELLATION")) {
+    return next();
+  }
+
   const userId = req.jwtUser?.userId;
 
   if (!userId) {
@@ -310,6 +336,10 @@ export const cancelTransactionRateLimiter = async (
  * Limit: 5 requests per minute per user
  */
 export const sep31RateLimiter = async (req: Request, res: Response, next: NextFunction) => {
+  if (isRateLimitBypassed(req, "SEP31")) {
+    return next();
+  }
+
   const userId = (req as any).user?.id;
 
   if (!userId) {
@@ -354,6 +384,10 @@ export const sep31RateLimiter = async (req: Request, res: Response, next: NextFu
  * Limit: 20 requests per hour per user
  */
 export const sep12RateLimiter = async (req: Request, res: Response, next: NextFunction) => {
+  if (isRateLimitBypassed(req, "SEP12")) {
+    return next();
+  }
+
   const userId = (req as any).user?.id;
 
   if (!userId) {
@@ -403,7 +437,12 @@ export const rateLimitExport = async (
   res: Response,
   next: NextFunction,
 ) => {
+  if (isRateLimitBypassed(req, "EXPORT")) {
+    return next();
+  }
+
   const userId = (req as any).user?.id;
+
 
   if (!userId) {
     return res.status(401).json({ message: "Unauthorized" });

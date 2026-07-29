@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { RateLimiterRedis } from "rate-limiter-flexible";
 import { redisClient } from "../config/redis";
+import { isRateLimitBypassed } from "./rateLimit";
 
 // Define tiers
 const freeTier = {
@@ -32,6 +33,10 @@ function getTier(req: Request) {
 }
 
 export async function rateLimitMiddleware(req: Request, res: Response, next: NextFunction) {
+  if (isRateLimitBypassed(req, "GENERAL")) {
+    return next();
+  }
+
   const ip = req.ip;
   const userId = req.jwtUser?.userId || req.user?.id;
   const tier = getTier(req);
@@ -41,8 +46,8 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
   try {
     await limiter.consume(key);
     next();
-  } catch (rejRes) {
-    const retrySecs = Math.round(rejRes.msBeforeNext / 1000) || 1;
+  } catch (rejRes: any) {
+    const retrySecs = Math.round((rejRes?.msBeforeNext || 1000) / 1000) || 1;
     res.set("Retry-After", String(retrySecs));
     res.status(429).json({
       error: "Too Many Requests",
@@ -50,3 +55,4 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
     });
   }
 }
+

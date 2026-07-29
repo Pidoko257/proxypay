@@ -217,3 +217,12 @@ export const systemHeartbeat = new Gauge({
   labelNames: ["service"],
   registers: [register],
 });
+
+// Rate Limit Bypass Metric (Issue #230)
+export const rateLimitBypassTotal = new Counter({
+  name: "rate_limit_bypass_total",
+  help: "Total number of rate limit bypasses for whitelisted IPs",
+  labelNames: ["ip", "endpoint"],
+  registers: [register],
+});
+

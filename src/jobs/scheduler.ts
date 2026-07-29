@@ -23,10 +23,13 @@ import { runDatabaseBackupVerifyJob } from "./databaseBackupVerifyJob";
 import {
   INDEX_REINDEX_CRON,
   INDEX_REINDEX_JOB_ENABLED,
+  KEY_ROTATION_CRON,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
+import { runKeyRotationJob } from "./keyRotationJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+
 
 interface JobConfig {
   name: string;
@@ -150,7 +153,14 @@ const JOBS: JobConfig[] = [
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
   },
+  {
+    name: "key-rotation",
+    // Periodic key rotation for AES-256-GCM encrypted PII data at rest
+    schedule: KEY_ROTATION_CRON || "0 4 * * 0",
+    handler: runKeyRotationJob,
+  },
 ];
+
 
 async function runJob(job: JobConfig): Promise<void> {
   console.log(`[${job.name}] Starting job`);

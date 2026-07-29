@@ -41,7 +41,7 @@ export async function startApolloServer(
 
   const server = new ApolloServer({
     schema,
-    context: ({ req }: { req: Request }) => buildGraphqlContext(req),
+    context: async ({ req }: { req: Request }) => buildGraphqlContext(req),
 
     // ---------------------------------------------------------------------------
     // Automatic Persisted Queries (APQ)
@@ -96,11 +96,11 @@ export async function startApolloServer(
   const serverCleanup = useServer(
     {
       schema,
-      context: (ctx: any) => {
+      context: async (ctx: any) => {
         const req = ctx.extra.request as Request | undefined;
         const jwtClaims = ctx.extra.jwtClaims;
         // Build base context from HTTP request, then overlay WS auth
-        const base = buildGraphqlContext(req as Request);
+        const base = await buildGraphqlContext(req as Request);
         if (jwtClaims) {
           base.auth = { authenticated: true, subject: jwtClaims.userId };
         }

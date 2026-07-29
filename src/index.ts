@@ -87,6 +87,7 @@ import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
+import { costAllocationRoutes } from "./routes/costAllocation";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 
@@ -392,6 +393,7 @@ app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
+app.use("/api/admin/cost-allocation", requireAuth, costAllocationRoutes);
 app.use("/api/admin/auth", createAdminSep10Router());
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);

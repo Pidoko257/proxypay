@@ -4,6 +4,7 @@ import {
   providerCircuitBreakerTransitionsTotal,
 } from "./metrics";
 import { checkMobileMoneyHealth } from "../services/mobilemoney/providers/healthCheck";
+import { providerMetricsService } from "../services/providerMetricsService";
 
 export interface CircuitBreakerActionResult<T> {
   success: boolean;
@@ -160,7 +161,29 @@ export async function executeWithCircuitBreaker<T>(
     options.operation,
   );
 
-  return breaker.fire(options.execute, options.fallback);
+  const startTime = Date.now();
+  try {
+    const result = await breaker.fire(options.execute, options.fallback);
+    const durationMs = Date.now() - startTime;
+    providerMetricsService.recordProviderCall(
+      options.provider,
+      options.operation,
+      durationMs,
+      result.success,
+      result.error ? String(result.error) : undefined,
+    );
+    return result;
+  } catch (err) {
+    const durationMs = Date.now() - startTime;
+    providerMetricsService.recordProviderCall(
+      options.provider,
+      options.operation,
+      durationMs,
+      false,
+      String(err),
+    );
+    throw err;
+  }
 }
 
 export function isCircuitBreakerOpenError(error: unknown): boolean {

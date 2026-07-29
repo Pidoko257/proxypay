@@ -170,6 +170,96 @@ export const dbReplicaReadEnabled = new Gauge({
   registers: [register],
 });
 
+// Lock Metrics (#250)
+export const lockAcquisitionTotal = new Counter({
+  name: "lock_acquisition_total",
+  help: "Total distributed lock acquisition attempts",
+  labelNames: ["resource_type", "status"],
+  registers: [register],
+});
+
+export const lockContentionTotal = new Counter({
+  name: "lock_contention_total",
+  help: "Total lock contention events recorded when acquisition fails or retries",
+  labelNames: ["resource_type"],
+  registers: [register],
+});
+
+export const lockAcquisitionDurationSeconds = new Histogram({
+  name: "lock_acquisition_duration_seconds",
+  help: "Duration of distributed lock acquisitions in seconds",
+  labelNames: ["resource_type"],
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5],
+  registers: [register],
+});
+
+// Synthetic Monitoring Metrics (#259)
+export const syntheticTestTotal = new Counter({
+  name: "synthetic_test_total",
+  help: "Total synthetic transaction monitoring runs",
+  labelNames: ["flow", "status"],
+  registers: [register],
+});
+
+export const syntheticTestDurationSeconds = new Histogram({
+  name: "synthetic_test_duration_seconds",
+  help: "Synthetic flow execution duration in seconds",
+  labelNames: ["flow"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10],
+  registers: [register],
+});
+
+export const syntheticTestSuccessGauge = new Gauge({
+  name: "synthetic_test_success",
+  help: "Synthetic test status per flow (1=pass, 0=fail)",
+  labelNames: ["flow"],
+  registers: [register],
+});
+
+export const syntheticConsecutiveFailures = new Gauge({
+  name: "synthetic_consecutive_failures",
+  help: "Consecutive synthetic test failures per flow",
+  labelNames: ["flow"],
+  registers: [register],
+});
+
+// Provider Performance Metrics (#258)
+export const providerSuccessRateGauge = new Gauge({
+  name: "provider_success_rate",
+  help: "Mobile money provider success rate percentage (0-100%)",
+  labelNames: ["provider", "operation"],
+  registers: [register],
+});
+
+export const providerRequestsTotal = new Counter({
+  name: "provider_requests_total",
+  help: "Total provider requests by provider, operation, and status",
+  labelNames: ["provider", "operation", "status"],
+  registers: [register],
+});
+
+export const providerDegradationAlertTotal = new Counter({
+  name: "provider_degradation_alerts_total",
+  help: "Total provider degradation alerts triggered",
+  labelNames: ["provider", "reason"],
+  registers: [register],
+});
+
+// Distributed Tracing Metrics (#257)
+export const traceSpansTotal = new Counter({
+  name: "trace_spans_total",
+  help: "Total distributed trace spans generated",
+  labelNames: ["service", "operation"],
+  registers: [register],
+});
+
+export const activeTracesGauge = new Gauge({
+  name: "active_traces",
+  help: "Number of currently active distributed request traces",
+  labelNames: ["service"],
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics

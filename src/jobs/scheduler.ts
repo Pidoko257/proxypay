@@ -150,6 +150,15 @@ const JOBS: JobConfig[] = [
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
   },
+  {
+    name: "synthetic-monitoring",
+    // Every minute - runs synthetic transaction flows (deposit, withdraw, dispute) and alerts on failure
+    schedule: process.env.SYNTHETIC_MONITORING_CRON || "* * * * *",
+    handler: async () => {
+      const { runSyntheticMonitoringJob } = await import("./syntheticMonitoringJob.js");
+      return runSyntheticMonitoringJob();
+    },
+  },
 ];
 
 async function runJob(job: JobConfig): Promise<void> {

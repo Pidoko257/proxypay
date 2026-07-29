@@ -47,6 +47,37 @@ export const env = cleanEnv(process.env, {
     default: 5,
     desc: "Maximum active queries allowed in the database before the automatic index reindex job is skipped",
   }),
+  VACUUM_ANALYZE_JOB_ENABLED: bool({
+    default: true,
+    desc: "Whether the automated vacuum and analyze maintenance job should run",
+  }),
+  VACUUM_ANALYZE_CRON: str({
+    default: "30 3 * * *",
+    desc: "Cron schedule for the automated vacuum and analyze maintenance job (off-peak)",
+    example: "30 3 * * *",
+  }),
+  VACUUM_ANALYZE_MAX_CONNECTIONS: num({
+    default: 10,
+    desc: "Maximum active connections allowed before vacuum/analyze job is skipped to prevent performance impact",
+  }),
+  LP_BALANCE_VERIFICATION_CRON: str({
+    default: "0 2 * * *",
+    desc: "Cron schedule for nightly liquidity pool balance verification job",
+    example: "0 2 * * *",
+  }),
+  LP_BALANCE_MISMATCH_THRESHOLD: num({
+    default: 0.01,
+    desc: "Threshold discrepancy in XLM above which liquidity balance alert is triggered",
+  }),
+  PURGE_SOFT_DELETED_RECORDS_CRON: str({
+    default: "0 4 * * *",
+    desc: "Cron schedule for purging soft deleted records past retention period",
+    example: "0 4 * * *",
+  }),
+  SOFT_DELETE_RETENTION_DAYS: num({
+    default: 90,
+    desc: "Retention period in days before soft-deleted records are hard purged",
+  }),
   STELLAR_ISSUER_SECRET: str({
     desc: "Stellar secret key for the issuer account",
     example: "S...",

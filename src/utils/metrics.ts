@@ -217,3 +217,34 @@ export const systemHeartbeat = new Gauge({
   labelNames: ["service"],
   registers: [register],
 });
+
+// Database Query Performance Baseline Metrics (Issue #255)
+export const dbQueryExecutionTimeGauge = new Gauge({
+  name: "db_query_execution_time_ms",
+  help: "Execution duration of monitored database queries in milliseconds",
+  labelNames: ["query_name"],
+  registers: [register],
+});
+
+export const dbQueryBaselineTimeGauge = new Gauge({
+  name: "db_query_baseline_time_ms",
+  help: "Established baseline duration of monitored database queries in milliseconds",
+  labelNames: ["query_name"],
+  registers: [register],
+});
+
+export const dbQuerySlowdownAlertsTotal = new Counter({
+  name: "db_query_slowdown_alerts_total",
+  help: "Total count of 2x+ database query execution slowdown alerts triggered",
+  labelNames: ["query_name"],
+  registers: [register],
+});
+
+export const dbQueryExecutionHistogram = new Histogram({
+  name: "db_query_duration_seconds",
+  help: "Histogram of database query execution durations in seconds",
+  labelNames: ["query_name"],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [register],
+});
+

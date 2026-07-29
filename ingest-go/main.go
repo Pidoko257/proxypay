@@ -227,7 +227,7 @@ func initMessaging() error {
 	return nil
 }
 
-func publish(p *CallbackPayload) error {
+func publish(p *CallbackPayload, traceID string) error {
 	data, err := json.Marshal(p)
 	if err != nil {
 		return err
@@ -242,6 +242,7 @@ func publish(p *CallbackPayload) error {
 				"event_type": p.EventType,
 				"provider":   p.Provider,
 				"reference":  p.Reference,
+				"trace_id":   traceID,
 				"data":       string(data),
 			},
 		}).Err(); err != nil {
@@ -268,6 +269,16 @@ func handleIngest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	// Distributed trace ID extraction / generation
+	traceID := string(ctx.Request.Header.Peek("X-Trace-Id"))
+	if traceID == "" {
+		traceID = string(ctx.Request.Header.Peek("X-Datadog-Trace-Id"))
+	}
+	if traceID == "" {
+		traceID = fmt.Sprintf("go-%d", time.Now().UnixNano())
+	}
+	ctx.Response.Header.Set("X-Trace-Id", traceID)
+
 	payload, err := parseCallbackPayload(ctx.PostBody())
 	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
@@ -281,16 +292,16 @@ func handleIngest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := publish(&payload); err != nil {
+	if err := publish(payload, traceID); err != nil {
 		sentry.CaptureException(err)
-		log.Printf("[ingest] publish error: %v", err)
+		log.Printf("[ingest] [trace_id=%s] publish error: %v", traceID, err)
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.SetBodyString(`{"error":"publish failed"}`)
 		return
 	}
 
 	ctx.SetStatusCode(fasthttp.StatusAccepted)
-	fmt.Fprintf(ctx, `{"status":"accepted","reference":%q}`, payload.Reference)
+	fmt.Fprintf(ctx, `{"status":"accepted","reference":%q,"trace_id":%q}`, payload.Reference, traceID)
 }
 
 func handleHealth(ctx *fasthttp.RequestCtx) {

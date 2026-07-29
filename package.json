@@ -26,6 +26,8 @@
     "test:e2e:ci": "npx playwright install --with-deps && npx playwright test --project=chromium --workers=2 --retries=1 --reporter=dot",
     "test:mutation:dry": "stryker run stryker.conf.json --dryRunOnly",
     "test:mutation": "stryker run stryker.conf.json",
+    "test:mutation:track": "npm run test:mutation && npx tsx scripts/track-mutation-score.ts",
+    "test:mutation:score": "npx tsx scripts/track-mutation-score.ts",
     "type-check": "tsc --noEmit",
     "migrate:up": "tsx src/scripts/migrate.ts up",
     "migrate:down": "tsx src/scripts/migrate.ts down",

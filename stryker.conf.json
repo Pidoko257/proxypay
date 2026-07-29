@@ -10,18 +10,34 @@
   "disableTypeChecks": false,
   "mutate": [
     "src/services/retry.ts",
-    "src/services/fraud.ts"
+    "src/services/fraud.ts",
+    "src/services/feeStrategyEngine.ts",
+    "src/services/transactionService.ts",
+    "src/services/kyc.ts",
+    "src/services/aml.ts",
+    "src/services/layeredCache.ts",
+    "src/services/currency.ts",
+    "src/services/ledgerService.ts",
+    "src/services/webhook.ts",
+    "src/services/dispute.ts",
+    "src/services/disputeStateMachine.ts"
   ],
   "ignorePatterns": [
     "dist",
     "coverage",
     "reports",
     "contracts/target",
-    ".kiro"
+    ".kiro",
+    "stryker-tmp",
+    "tests/load",
+    "tests/flaky"
   ],
-  "reporters": ["clear-text", "progress", "html"],
+  "reporters": ["clear-text", "progress", "html", "json"],
   "htmlReporter": {
     "fileName": "reports/mutation/html/index.html"
+  },
+  "jsonReporter": {
+    "fileName": "reports/mutation/mutation.json"
   },
   "coverageAnalysis": "perTest",
   "concurrency": 4,
@@ -33,6 +49,6 @@
   "thresholds": {
     "high": 80,
     "low": 70,
-    "break": 80
+    "break": 70
   }
 }

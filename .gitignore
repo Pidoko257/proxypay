@@ -23,6 +23,19 @@ coverage/
 .nyc_output/
 stryker-tmp/
 
+# Test snapshots
+**/__snapshots__/
+*.snap
+
+# Pact generated files (keep .gitkeep, ignore generated JSONs)
+pacts/*.json
+
+# Scratch / local experiments
+scratch/
+
+# Pull request bundles / local PR artifacts
+.pull_request/
+
 # Logs
 *.log
 pact.log
@@ -34,9 +47,7 @@ pact.log
 .vscode/settings.json
 
 # Kiro
-.kiro/
-
-
+.kilo/
 
 # Load test output
 tests/load/results/*.json
@@ -48,3 +59,11 @@ benchmarks/results/*.json
 .cache/
 
 secret.yaml
+
+# Playwright test artifacts
+test-results/
+playwright-report/
+
+# Stryker mutation testing output
+.stryker-tmp/
+reports/mutation/

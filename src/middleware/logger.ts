@@ -78,13 +78,20 @@ export function requestLogger(
     const durationNs = process.hrtime.bigint() - start;
     const responseTimeMs = Number(durationNs) / 1e6;
 
-    // Propagate trace_id from the incoming request header when available so
-    // all log lines for a single request share the same distributed trace id.
+    // Propagate correlation_id / trace_id from the request so all log lines
+    // for a single request share the same distributed trace context.
+    // Priority: correlationId set by correlationId middleware (which already
+    // resolved x-correlation-id > x-trace-id > x-request-id) — then fall
+    // back to the raw headers for requests that bypass the middleware.
     const traceId =
+      (req as Request & { correlationId?: string }).correlationId ??
+      (req.headers["x-correlation-id"] as string | undefined) ??
       (req.headers["x-trace-id"] as string | undefined) ??
       (req.headers["x-request-id"] as string | undefined);
 
-    const reqLogger = traceId ? childLogger(traceId) : logger;
+    const reqLogger = traceId
+      ? childLogger(traceId, { correlation_id: traceId })
+      : logger;
 
     reqLogger.info({
       event: { dataset: "http.request" },

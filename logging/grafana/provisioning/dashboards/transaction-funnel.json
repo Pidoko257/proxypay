@@ -1,0 +1,319 @@
+{
+  "__inputs": [],
+  "__requires": [
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "loki",
+      "name": "Loki",
+      "version": "1.0.0"
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "description": "Transaction conversion funnel — initiated → verified → processing → completed, with drop-off analysis and drill-down by provider and type",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, type) (transaction_funnel_stage_current{stage=\"initiated\"})",
+          "legendFormat": "{{provider}}/{{type}} — Initiated",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, type) (transaction_funnel_stage_current{stage=\"completed\"})",
+          "legendFormat": "{{provider}}/{{type}} — Completed",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, type) (transaction_funnel_stage_current{stage=\"failed\"})",
+          "legendFormat": "{{provider}}/{{type}} — Failed",
+          "refId": "C"
+        }
+      ],
+      "title": "Funnel Stage Counts (real-time)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 0.6 },
+              { "color": "green",  "value": 0.85 }
+            ]
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "id": 2,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "text": {},
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "avg(transaction_funnel_conversion_rate{provider=~\"$provider\", type=~\"$txn_type\"})",
+          "legendFormat": "Overall Conversion",
+          "refId": "A"
+        }
+      ],
+      "title": "Overall Conversion Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green",  "value": 0 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 8 },
+      "id": 3,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(transaction_funnel_drop_off_total{provider=~\"$provider\", type=~\"$txn_type\"}[$__interval]))",
+          "legendFormat": "Drop-offs",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Drop-offs (interval)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red",    "value": 25 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 },
+      "id": 4,
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(transaction_funnel_stage_current{stage=\"failed\", provider=~\"$provider\", type=~\"$txn_type\"})",
+          "legendFormat": "Currently Failed",
+          "refId": "A"
+        }
+      ],
+      "title": "Transactions Currently Failed",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2 },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 5,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "transaction_funnel_conversion_rate{provider=~\"$provider\", type=~\"$txn_type\"}",
+          "legendFormat": "{{provider}}/{{type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Conversion Rate by Provider & Type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 6,
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, type, stage) (rate(transaction_funnel_drop_off_total{provider=~\"$provider\", type=~\"$txn_type\"}[$__rate_interval]))",
+          "legendFormat": "{{provider}}/{{type}} drop at {{stage}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Drop-off Rate by Stage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "opacity"
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
+      "id": 7,
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (from_stage, to_stage) (rate(transaction_funnel_stage_transitions_total{provider=~\"$provider\", type=~\"$txn_type\"}[$__rate_interval]))",
+          "legendFormat": "{{from_stage}} → {{to_stage}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Stage Transition Rates",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "id": 8,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showTime": true,
+        "wrapLogMessage": false
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{service=\"proxypay-api\"} | json | status =~ \"failed|cancelled\" | provider =~ \"$provider\"",
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "title": "Failed / Cancelled Transaction Logs (drill-down)",
+      "type": "logs"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 38,
+  "tags": ["mobile-money", "funnel", "transactions", "conversion"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(transaction_funnel_conversion_rate, provider)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "provider",
+        "options": [],
+        "query": "label_values(transaction_funnel_conversion_rate, provider)",
+        "refresh": 2,
+        "type": "query",
+        "label": "Provider"
+      },
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "definition": "label_values(transaction_funnel_conversion_rate, type)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "txn_type",
+        "options": [],
+        "query": "label_values(transaction_funnel_conversion_rate, type)",
+        "refresh": 2,
+        "type": "query",
+        "label": "Transaction Type"
+      }
+    ]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Transaction Funnel Analysis",
+  "uid": "proxypay-txn-funnel",
+  "version": 1
+}

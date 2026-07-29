@@ -27,6 +27,11 @@ import {
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+import { runDbVacuumAnalyzeJob } from "./dbVacuumAnalyzeJob";
+import { runQueryBaselineJob } from "./queryBaselineJob";
+import { runPurgeSoftDeletedRecordsJob } from "./purgeSoftDeletedRecordsJob";
+import { runLiquidityPoolBalanceVerificationJob } from "./liquidityBalanceVerificationJob";
+import { env } from "../config/env";
 
 interface JobConfig {
   name: string;
@@ -149,6 +154,34 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
+  },
+  {
+    name: "db-vacuum-analyze",
+    // Off-peak daily at 3:30 AM - optimizes PostgreSQL vacuum settings and updates query stats
+    schedule: env.VACUUM_ANALYZE_CRON || "30 3 * * *",
+    handler: async () => {
+      await runDbVacuumAnalyzeJob();
+    },
+  },
+  {
+    name: "query-baseline-tracking",
+    // Hourly query performance baseline tracking and 2x+ slowdown detection
+    schedule: process.env.QUERY_BASELINE_CRON || "0 * * * *",
+    handler: runQueryBaselineJob,
+  },
+  {
+    name: "purge-soft-deleted-records",
+    // Daily at 4:00 AM - purge soft deleted records past retention period
+    schedule: env.PURGE_SOFT_DELETED_RECORDS_CRON || "0 4 * * *",
+    handler: runPurgeSoftDeletedRecordsJob,
+  },
+  {
+    name: "lp-balance-verification",
+    // Nightly at 2:00 AM - verify vault balances on-chain vs in-database
+    schedule: env.LP_BALANCE_VERIFICATION_CRON || "0 2 * * *",
+    handler: async () => {
+      await runLiquidityPoolBalanceVerificationJob();
+    },
   },
 ];
 

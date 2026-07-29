@@ -49,6 +49,7 @@ import { providerSettingsService } from "../services/providerSettingsService";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { auditService } from "../services/auditlogService";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -57,7 +58,42 @@ const READ_ONLY_IMPERSONATION_MESSAGE = "Read-only mode active";
 
 router.use(auditInterceptor(pool));
 
+// GET /api/admin/audit-logs/export
+router.get(
+  "/audit-logs/export",
+  requireAdmin,
+  rateLimitExport,
+  async (req: Request, res: Response) => {
+    try {
+      const format = req.query.format === "csv" ? "csv" : "json";
+      const resource = typeof req.query.resource === "string" ? req.query.resource : undefined;
+      const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
+
+      const content = await auditService.exportAuditLogs(format, { resource, userId });
+      const filename = `audit-logs-${new Date().toISOString().slice(0, 10)}.${format}`;
+
+      res.setHeader(
+        "Content-Type",
+        format === "json" ? "application/json" : "text/csv; charset=utf-8",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${filename}"`,
+      );
+      res.status(200).send(content);
+    } catch (err) {
+      console.error("Error exporting audit logs:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to export audit logs",
+        { message: err instanceof Error ? err.message : "Unknown error" }
+      );
+    }
+  }
+);
+
 // Multer configuration for CSV uploads
+
 const csvUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit

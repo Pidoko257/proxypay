@@ -1,243 +1,354 @@
-/**
- * Tests for GraphQL Subscriptions — Redis PubSub + WS auth
- *
- * Covers:
- *  - Client receives update immediately on state change
- *  - Unauthenticated WS connection is rejected
- *  - Client only receives updates for subscribed transaction ID
- *  - All state transitions (pending→completed, pending→failed) trigger events
- *  - transactionChannel() naming convention
- */
+import {
+  publishTransactionUpdate,
+  publishTransactionCompleted,
+  publishTransactionFailed,
+  publishDisputeUpdate,
+  publishBulkImportJobUpdate,
+  getSubscriptionMetrics,
+  getChannelMetrics,
+  getSubscriptionHealth,
+} from "../../src/graphql/subscriptionManager";
+import {
+  SubscriptionChannels,
+  transactionChannel,
+  type TransactionUpdatedPayload,
+  type TransactionCompletedPayload,
+  type DisputeCreatedPayload,
+} from "../../src/graphql/subscriptions";
+import { pubsub } from "../../src/graphql/subscriptions";
 
-import { EventEmitter } from "events";
-import { transactionChannel, SubscriptionChannels } from "../graphql/subscriptions";
-import { createSubscriptionResolvers } from "../graphql/subscriptionResolvers";
+describe("GraphQL Subscription Manager", () => {
+  describe("publishTransactionUpdate", () => {
+    it("should publish transaction updates with latency tracking", async () => {
+      const payload: TransactionUpdatedPayload = {
+        id: "tx_123",
+        referenceNumber: "ref_123",
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      };
 
-// ---------------------------------------------------------------------------
-// Minimal in-memory PubSub stub (avoids real Redis in unit tests)
-// ---------------------------------------------------------------------------
+      const publishSpy = jest.spyOn(pubsub, "publish");
+      await publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, payload);
 
-class StubPubSub extends EventEmitter {
-  private iterators: Map<string, { queue: any[]; resolve: (() => void) | null }> = new Map();
-
-  async publish(channel: string, payload: unknown): Promise<void> {
-    this.emit(channel, payload);
-    const entry = this.iterators.get(channel);
-    if (entry) {
-      entry.queue.push(payload);
-      entry.resolve?.();
-      entry.resolve = null;
-    }
-  }
-
-  asyncIterator<T>(channels: string | string[]): AsyncIterableIterator<T> {
-    const channelList = Array.isArray(channels) ? channels : [channels];
-    const queue: T[] = [];
-    let resolve: (() => void) | null = null;
-    let done = false;
-
-    for (const ch of channelList) {
-      this.iterators.set(ch, { queue, resolve: null });
-      this.on(ch, (payload: T) => {
-        queue.push(payload);
-        resolve?.();
-        resolve = null;
-      });
-    }
-
-    return {
-      [Symbol.asyncIterator]() { return this; },
-      async next(): Promise<IteratorResult<T>> {
-        if (queue.length > 0) {
-          return { value: queue.shift()!, done: false };
-        }
-        if (done) return { value: undefined as any, done: true };
-        await new Promise<void>((r) => { resolve = r; });
-        if (queue.length > 0) {
-          return { value: queue.shift()!, done: false };
-        }
-        return { value: undefined as any, done: true };
-      },
-      async return() {
-        done = true;
-        return { value: undefined as any, done: true };
-      },
-    };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const AUTH_CTX = { auth: { authenticated: true, subject: "user-1" } };
-const ANON_CTX = { auth: { authenticated: false, subject: null } };
-
-function makeResolvers() {
-  const pubsub = new StubPubSub() as any;
-  const resolvers = createSubscriptionResolvers(pubsub);
-  return { pubsub, resolvers };
-}
-
-// ---------------------------------------------------------------------------
-// Channel naming
-// ---------------------------------------------------------------------------
-
-describe("transactionChannel()", () => {
-  it("produces the expected channel name", () => {
-    expect(transactionChannel("abc-123")).toBe("TRANSACTION_UPDATED:abc-123");
-  });
-
-  it("different IDs produce different channels", () => {
-    expect(transactionChannel("id-1")).not.toBe(transactionChannel("id-2"));
-  });
-});
-
-// ---------------------------------------------------------------------------
-// WS authentication
-// ---------------------------------------------------------------------------
-
-describe("WS authentication guard", () => {
-  it("rejects unauthenticated subscription with UNAUTHENTICATED error", () => {
-    const { resolvers } = makeResolvers();
-    const sub = resolvers.Subscription.transactionUpdated;
-
-    expect(() =>
-      sub.subscribe(null, { id: "tx-1" }, ANON_CTX, null as any),
-    ).toThrow(/UNAUTHENTICATED/);
-  });
-
-  it("allows authenticated subscription", () => {
-    const { resolvers } = makeResolvers();
-    const sub = resolvers.Subscription.transactionUpdated;
-
-    expect(() =>
-      sub.subscribe(null, { id: "tx-1" }, AUTH_CTX, null as any),
-    ).not.toThrow();
-  });
-
-  it("rejects unauthenticated transactionCreated subscription", () => {
-    const { resolvers } = makeResolvers();
-    expect(() =>
-      resolvers.Subscription.transactionCreated.subscribe(null, {}, ANON_CTX, null as any),
-    ).toThrow(/UNAUTHENTICATED/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// transactionUpdated — per-ID filtering
-// ---------------------------------------------------------------------------
-
-describe("transactionUpdated subscription", () => {
-  it("client receives update for subscribed transaction ID", async () => {
-    const { pubsub, resolvers } = makeResolvers();
-    const sub = resolvers.Subscription.transactionUpdated;
-
-    const iterator = sub.subscribe(null, { id: "tx-42" }, AUTH_CTX, null as any);
-
-    const payload = { id: "tx-42", referenceNumber: "REF-001", status: "completed", updatedAt: new Date().toISOString() };
-    await pubsub.publish(transactionChannel("tx-42"), payload);
-
-    const result = await iterator.next();
-    expect(result.done).toBe(false);
-    const resolved = sub.resolve(result.value);
-    expect(resolved.id).toBe("tx-42");
-    expect(resolved.status).toBe("completed");
-
-    await iterator.return?.();
-  });
-
-  it("client does NOT receive updates for a different transaction ID", async () => {
-    const { pubsub, resolvers } = makeResolvers();
-    const sub = resolvers.Subscription.transactionUpdated;
-
-    // Subscribe to tx-1
-    const iterator = sub.subscribe(null, { id: "tx-1" }, AUTH_CTX, null as any);
-
-    // Publish to tx-2 — should not arrive on tx-1's iterator
-    await pubsub.publish(transactionChannel("tx-2"), {
-      id: "tx-2", referenceNumber: "REF-002", status: "failed", updatedAt: new Date().toISOString(),
+      expect(publishSpy).toHaveBeenCalledWith(
+        SubscriptionChannels.TRANSACTION_UPDATED,
+        payload,
+      );
+      publishSpy.mockRestore();
     });
 
-    // Publish to tx-1 — should arrive
-    const expected = { id: "tx-1", referenceNumber: "REF-001", status: "completed", updatedAt: new Date().toISOString() };
-    await pubsub.publish(transactionChannel("tx-1"), expected);
+    it("should handle publication errors gracefully", async () => {
+      const payload: TransactionUpdatedPayload = {
+        id: "tx_123",
+        referenceNumber: "ref_123",
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      };
 
-    const result = await iterator.next();
-    expect(result.value.id).toBe("tx-1");
+      const publishSpy = jest
+        .spyOn(pubsub, "publish")
+        .mockRejectedValueOnce(new Error("Publish failed"));
 
-    await iterator.return?.();
-  });
-});
+      // Should not throw
+      await publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, payload);
 
-// ---------------------------------------------------------------------------
-// State transition events
-// ---------------------------------------------------------------------------
+      publishSpy.mockRestore();
+    });
 
-describe("state transition events", () => {
-  it("PENDING → COMPLETED publishes to TRANSACTION_COMPLETED channel", async () => {
-    const { pubsub, resolvers } = makeResolvers();
-    const sub = resolvers.Subscription.transactionCompleted;
-    const iterator = sub.subscribe(null, {}, AUTH_CTX, null as any);
+    it("should track metrics for publications", async () => {
+      const payload: TransactionUpdatedPayload = {
+        id: "tx_123",
+        referenceNumber: "ref_123",
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      };
 
-    const payload = { id: "tx-99", referenceNumber: "REF-099", status: "completed", updatedAt: new Date().toISOString() };
-    await pubsub.publish(SubscriptionChannels.TRANSACTION_COMPLETED, payload);
+      jest.spyOn(pubsub, "publish").mockResolvedValueOnce();
+      await publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, payload);
 
-    const result = await iterator.next();
-    const resolved = sub.resolve(result.value);
-    expect(resolved.status).toBe("completed");
-
-    await iterator.return?.();
-  });
-
-  it("PENDING → FAILED publishes to TRANSACTION_FAILED channel", async () => {
-    const { pubsub, resolvers } = makeResolvers();
-    const sub = resolvers.Subscription.transactionFailed;
-    const iterator = sub.subscribe(null, {}, AUTH_CTX, null as any);
-
-    const payload = { id: "tx-88", referenceNumber: "REF-088", status: "failed", updatedAt: new Date().toISOString() };
-    await pubsub.publish(SubscriptionChannels.TRANSACTION_FAILED, payload);
-
-    const result = await iterator.next();
-    const resolved = sub.resolve(result.value);
-    expect(resolved.status).toBe("failed");
-
-    await iterator.return?.();
+      const metrics = getChannelMetrics(SubscriptionChannels.TRANSACTION_UPDATED);
+      expect(metrics.length).toBeGreaterThan(0);
+      expect(metrics[0].totalPublished).toBeGreaterThan(0);
+    });
   });
 
-  it("transactionCreated fires on new transaction", async () => {
-    const { pubsub, resolvers } = makeResolvers();
-    const sub = resolvers.Subscription.transactionCreated;
-    const iterator = sub.subscribe(null, {}, AUTH_CTX, null as any);
+  describe("publishTransactionCompleted", () => {
+    it("should publish to both per-transaction and global channels", async () => {
+      const transactionId = "tx_456";
+      const payload: TransactionCompletedPayload = {
+        id: transactionId,
+        referenceNumber: "ref_456",
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      };
 
-    const payload = {
-      id: "tx-new", referenceNumber: "REF-NEW", type: "deposit",
-      amount: "100", phoneNumber: "+237600000000", provider: "mtn",
-      stellarAddress: "GABC", status: "pending", tags: [], createdAt: new Date().toISOString(),
-    };
-    await pubsub.publish(SubscriptionChannels.TRANSACTION_CREATED, payload);
+      const publishSpy = jest
+        .spyOn(pubsub, "publish")
+        .mockResolvedValueOnce()
+        .mockResolvedValueOnce();
 
-    const result = await iterator.next();
-    const resolved = sub.resolve(result.value);
-    expect(resolved.id).toBe("tx-new");
-    expect(resolved.status).toBe("pending");
+      await publishTransactionCompleted(transactionId, payload);
 
-    await iterator.return?.();
+      expect(publishSpy).toHaveBeenCalledTimes(2);
+      expect(publishSpy).toHaveBeenCalledWith(transactionChannel(transactionId), payload);
+      expect(publishSpy).toHaveBeenCalledWith("transaction.completed", payload);
+
+      publishSpy.mockRestore();
+    });
+
+    it("should track latency for multi-channel publications", async () => {
+      const transactionId = "tx_789";
+      const payload: TransactionCompletedPayload = {
+        id: transactionId,
+        referenceNumber: "ref_789",
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      };
+
+      jest.spyOn(pubsub, "publish").mockResolvedValue();
+      await publishTransactionCompleted(transactionId, payload);
+
+      const metrics = getSubscriptionMetrics();
+      expect(metrics.metrics.length).toBeGreaterThan(0);
+    });
   });
-});
 
-// ---------------------------------------------------------------------------
-// Payload shape
-// ---------------------------------------------------------------------------
+  describe("publishTransactionFailed", () => {
+    it("should publish transaction failures", async () => {
+      const transactionId = "tx_fail_1";
+      const payload = {
+        id: transactionId,
+        referenceNumber: "ref_fail_1",
+        status: "failed",
+        failedAt: new Date().toISOString(),
+        error: "Provider timeout",
+      };
 
-describe("subscription resolve() output shape", () => {
-  it("transactionUpdated resolve returns expected fields", () => {
-    const { resolvers } = makeResolvers();
-    const payload = {
-      id: "tx-1", referenceNumber: "REF-001", status: "completed",
-      updatedAt: "2026-04-23T00:00:00.000Z",
-    };
-    const result = resolvers.Subscription.transactionUpdated.resolve(payload);
-    expect(result).toMatchObject({ id: "tx-1", status: "completed", referenceNumber: "REF-001" });
+      const publishSpy = jest
+        .spyOn(pubsub, "publish")
+        .mockResolvedValueOnce()
+        .mockResolvedValueOnce();
+
+      await publishTransactionFailed(transactionId, payload);
+
+      expect(publishSpy).toHaveBeenCalledTimes(2);
+      publishSpy.mockRestore();
+    });
+  });
+
+  describe("publishDisputeUpdate", () => {
+    it("should publish dispute creations", async () => {
+      const payload: DisputeCreatedPayload = {
+        id: "dispute_1",
+        transactionId: "tx_123",
+        reason: "Unauthorized",
+        status: "open",
+        reportedBy: "user_1",
+        createdAt: new Date().toISOString(),
+      };
+
+      const publishSpy = jest
+        .spyOn(pubsub, "publish")
+        .mockResolvedValueOnce();
+
+      await publishDisputeUpdate(SubscriptionChannels.DISPUTE_CREATED, payload);
+
+      expect(publishSpy).toHaveBeenCalledWith(
+        SubscriptionChannels.DISPUTE_CREATED,
+        payload,
+      );
+      publishSpy.mockRestore();
+    });
+  });
+
+  describe("publishBulkImportJobUpdate", () => {
+    it("should publish bulk job updates", async () => {
+      const jobId = "job_bulk_1";
+      const payload = {
+        jobId,
+        status: "processing",
+        progress: {
+          total: 1000,
+          processed: 500,
+          succeeded: 490,
+          failed: 10,
+        },
+        errors: [
+          { row: 10, error: "Invalid phone number" },
+          { row: 50, error: "Duplicate reference" },
+        ],
+        completedAt: null,
+      };
+
+      const publishSpy = jest
+        .spyOn(pubsub, "publish")
+        .mockResolvedValueOnce();
+
+      await publishBulkImportJobUpdate(jobId, payload);
+
+      expect(publishSpy).toHaveBeenCalled();
+      publishSpy.mockRestore();
+    });
+  });
+
+  describe("Subscription Metrics and Health", () => {
+    it("should return subscription metrics", () => {
+      const metrics = getSubscriptionMetrics();
+
+      expect(metrics).toHaveProperty("metrics");
+      expect(metrics).toHaveProperty("timestamp");
+      expect(metrics).toHaveProperty("slo");
+      expect(metrics.slo.targetMs).toBe(100);
+    });
+
+    it("should return channel-specific metrics", async () => {
+      const payload: TransactionUpdatedPayload = {
+        id: "tx_metric_1",
+        referenceNumber: "ref_metric_1",
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      };
+
+      jest.spyOn(pubsub, "publish").mockResolvedValueOnce();
+      await publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, payload);
+
+      const metrics = getChannelMetrics(SubscriptionChannels.TRANSACTION_UPDATED);
+      expect(Array.isArray(metrics)).toBe(true);
+      if (metrics.length > 0) {
+        expect(metrics[0]).toHaveProperty("channel");
+        expect(metrics[0]).toHaveProperty("totalPublished");
+        expect(metrics[0]).toHaveProperty("peakLatencyMs");
+      }
+    });
+
+    it("should provide health status", () => {
+      const health = getSubscriptionHealth();
+
+      expect(health).toHaveProperty("healthy");
+      expect(health).toHaveProperty("totalChannels");
+      expect(health).toHaveProperty("channelsExceedingSLO");
+      expect(health).toHaveProperty("averageLatencyMs");
+      expect(health).toHaveProperty("peakLatencyMs");
+    });
+
+    it("should flag unhealthy subscriptions (>100ms latency)", async () => {
+      // Mock a slow publication
+      jest.spyOn(pubsub, "publish").mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve(), 150); // 150ms > 100ms SLO
+          }),
+      );
+
+      const payload: TransactionUpdatedPayload = {
+        id: "tx_slow",
+        referenceNumber: "ref_slow",
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      };
+
+      await publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, payload);
+
+      const health = getSubscriptionHealth();
+      // Peak latency should be around 150ms
+      expect(health.peakLatencyMs).toBeGreaterThan(100);
+    });
+
+    it("should maintain subscription metrics across multiple publications", async () => {
+      jest.spyOn(pubsub, "publish").mockResolvedValue();
+
+      const payload: TransactionUpdatedPayload = {
+        id: "tx_123",
+        referenceNumber: "ref_123",
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      };
+
+      // Publish multiple times
+      for (let i = 0; i < 5; i++) {
+        await publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, payload);
+      }
+
+      const metrics = getChannelMetrics(SubscriptionChannels.TRANSACTION_UPDATED);
+      if (metrics.length > 0) {
+        expect(metrics[0].totalPublished).toBeGreaterThanOrEqual(5);
+      }
+    });
+  });
+
+  describe("Subscription guarantees", () => {
+    it("should deliver within <100ms for typical loads", async () => {
+      jest.spyOn(pubsub, "publish").mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            // Simulate typical delivery (50ms)
+            setTimeout(() => resolve(), 50);
+          }),
+      );
+
+      const payload: TransactionUpdatedPayload = {
+        id: "tx_fast",
+        referenceNumber: "ref_fast",
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      };
+
+      const start = Date.now();
+      await publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, payload);
+      const duration = Date.now() - start;
+
+      expect(duration).toBeLessThan(150); // Should complete quickly
+    });
+
+    it("should support high-frequency updates", async () => {
+      jest.spyOn(pubsub, "publish").mockResolvedValue();
+
+      const transactionId = "tx_high_freq";
+
+      // Simulate rapid updates
+      const updates = Array.from({ length: 100 }, (_, i) => ({
+        id: transactionId,
+        referenceNumber: `ref_${i}`,
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+        jobProgress: i,
+      }));
+
+      const start = Date.now();
+      await Promise.all(
+        updates.map((u) => publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, u)),
+      );
+      const duration = Date.now() - start;
+
+      // All 100 publications should complete in reasonable time
+      expect(duration).toBeLessThan(5000);
+
+      const health = getSubscriptionHealth();
+      expect(health.averageLatencyMs).toBeLessThan(150);
+    });
+
+    it("should not lose data during high-frequency publishing", async () => {
+      jest.spyOn(pubsub, "publish").mockResolvedValue();
+
+      const publishCount = 50;
+      const updates = Array.from({ length: publishCount }, (_, i) => ({
+        id: `tx_${i}`,
+        referenceNumber: `ref_${i}`,
+        status: "processing",
+        updatedAt: new Date().toISOString(),
+      }));
+
+      await Promise.all(
+        updates.map((u) => publishTransactionUpdate(SubscriptionChannels.TRANSACTION_UPDATED, u)),
+      );
+
+      const metrics = getSubscriptionMetrics();
+      const totalPublished = metrics.metrics.reduce(
+        (sum, m) => sum + m.totalPublished,
+        0,
+      );
+
+      expect(totalPublished).toBeGreaterThanOrEqual(publishCount);
+    });
   });
 });

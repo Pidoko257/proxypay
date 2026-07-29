@@ -3,6 +3,11 @@ import { webhookPayloadSchema, flatWebhookPayloadSchema } from "./webhookSchema"
 import { gzip } from "zlib";
 import { promisify } from "util";
 import { Transaction, WebhookDeliveryUpdate } from "../models/transaction";
+import {
+  signPayloadEd25519,
+  verifySignatureEd25519,
+  getPublicKeyFromPrivateEd25519,
+} from "../crypto/ed25519Webhook";
 
 const gzipAsync = promisify(gzip);
 
@@ -82,6 +87,7 @@ interface WebhookServiceOptions {
   fetchImpl?: typeof fetch;
   webhookUrl?: string;
   webhookSecret?: string;
+  webhookPrivateKeyEd25519?: string; // Ed25519 private key in hex format
   maxAttempts?: number;
   baseDelayMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -89,6 +95,8 @@ interface WebhookServiceOptions {
   logger?: WebhookLogger;
   /** When true, payloads are Gzip-compressed before sending (Content-Encoding: gzip) */
   compress?: boolean;
+  /** When true, use Ed25519 for signing instead of HMAC-SHA256 (default: false, for backward compatibility) */
+  useEd25519?: boolean;
 }
 
 interface WebhookTransactionModel {
@@ -158,6 +166,7 @@ export class WebhookService {
   private readonly fetchImpl: typeof fetch;
   private readonly webhookUrl: string;
   private readonly webhookSecret: string;
+  private readonly webhookPrivateKeyEd25519?: string;
   private readonly maxAttempts: number;
   private readonly baseDelayMs: number;
   private readonly sleepImpl: (ms: number) => Promise<void>;
@@ -165,18 +174,36 @@ export class WebhookService {
   private readonly logger: WebhookLogger;
   /** Whether to Gzip-compress outgoing webhook payloads */
   readonly compress: boolean;
+  /** Whether to use Ed25519 instead of HMAC-SHA256 */
+  readonly useEd25519: boolean;
+  /** Public key for Ed25519 (cached from private key) */
+  private readonly publicKeyEd25519?: string;
 
   constructor(options: WebhookServiceOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.webhookUrl = options.webhookUrl ?? process.env.WEBHOOK_URL ?? "";
     this.webhookSecret =
       options.webhookSecret ?? process.env.WEBHOOK_SECRET ?? "";
+    this.webhookPrivateKeyEd25519 =
+      options.webhookPrivateKeyEd25519 ?? process.env.WEBHOOK_PRIVATE_KEY_ED25519;
     this.maxAttempts = options.maxAttempts ?? 3;
     this.baseDelayMs = options.baseDelayMs ?? 500;
     this.sleepImpl = options.sleep ?? wait;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
     this.compress = options.compress ?? (process.env.WEBHOOK_COMPRESSION === "true");
+    this.useEd25519 = options.useEd25519 ?? (process.env.WEBHOOK_USE_ED25519 === "true");
+
+    // Derive public key from private key if Ed25519 is enabled
+    if (this.useEd25519 && this.webhookPrivateKeyEd25519) {
+      try {
+        this.publicKeyEd25519 = getPublicKeyFromPrivateEd25519(
+          this.webhookPrivateKeyEd25519,
+        );
+      } catch (err) {
+        this.logger.error(`Failed to derive Ed25519 public key: ${err}`);
+      }
+    }
     // Zod schemas for payload validation
     // Imported lazily to avoid circular dependencies
   }
@@ -230,7 +257,28 @@ export class WebhookService {
   }
 
   signPayload(rawPayload: string): string {
+    if (this.useEd25519) {
+      if (!this.webhookPrivateKeyEd25519) {
+        this.logger.error(
+          "[webhook] Ed25519 enabled but WEBHOOK_PRIVATE_KEY_ED25519 not configured",
+        );
+        throw new Error("Ed25519 private key not configured");
+      }
+      // Ed25519 signature format: ed25519:<base64-signature>
+      const signature = signPayloadEd25519(rawPayload, this.webhookPrivateKeyEd25519);
+      return `ed25519:${signature}`;
+    }
+
+    // Fallback to HMAC-SHA256 for backward compatibility
     return `sha256=${createHmac("sha256", this.webhookSecret).update(rawPayload).digest("hex")}`;
+  }
+
+  /**
+   * Get the public key for Ed25519 verification.
+   * Clients can use this to verify webhooks without storing the private key.
+   */
+  getEd25519PublicKey(): string | undefined {
+    return this.publicKeyEd25519;
   }
 
   async sendTransactionEvent(
@@ -583,4 +631,64 @@ export async function notifyFlatTransactionWebhook(
     });
   }
   return result;
+}
+
+/**
+ * Verify webhook signature — use this on the receiving end to validate webhook authenticity.
+ *
+ * Supports both HMAC-SHA256 and Ed25519 signatures.
+ * Format:
+ * - HMAC: "sha256=<hex-encoded-signature>"
+ * - Ed25519: "ed25519:<base64-encoded-signature>"
+ *
+ * @param payload - The raw payload body (string or Buffer)
+ * @param signatureHeader - The X-Webhook-Signature header value
+ * @param secret - For HMAC: the webhook secret. For Ed25519: the public key (hex).
+ * @returns true if signature is valid, false otherwise
+ */
+export function verifyWebhookSignature(
+  payload: string | Buffer,
+  signatureHeader: string,
+  secret: string,
+): boolean {
+  try {
+    // Ed25519 signature format: "ed25519:<base64>"
+    if (signatureHeader.startsWith("ed25519:")) {
+      const signature = signatureHeader.substring(8); // Remove "ed25519:" prefix
+      return verifySignatureEd25519(payload, signature, secret);
+    }
+
+    // HMAC-SHA256 format: "sha256=<hex>"
+    if (signatureHeader.startsWith("sha256=")) {
+      const incomingSignature = signatureHeader.substring(7); // Remove "sha256=" prefix
+      const expectedSignature = createHmac("sha256", secret)
+        .update(typeof payload === "string" ? payload : payload.toString())
+        .digest("hex");
+
+      // Constant-time comparison to prevent timing attacks
+      if (incomingSignature.length !== expectedSignature.length) {
+        return false;
+      }
+
+      const crypto = require("crypto");
+      if (crypto.timingSafeEqual) {
+        try {
+          return crypto.timingSafeEqual(
+            Buffer.from(incomingSignature),
+            Buffer.from(expectedSignature),
+          );
+        } catch {
+          return false;
+        }
+      }
+
+      // Fallback for older Node versions
+      return incomingSignature === expectedSignature;
+    }
+
+    return false;
+  } catch (err) {
+    // Verification errors return false rather than throwing
+    return false;
+  }
 }

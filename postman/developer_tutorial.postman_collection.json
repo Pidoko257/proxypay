@@ -1,0 +1,747 @@
+{
+	"info": {
+		"_postman_id": "f1e2d3c4-b5a6-4789-9abc-def012345678",
+		"name": "ProxyPay API Tutorial — New Developer Onboarding",
+		"description": "# 🚀 ProxyPay Interactive API Tutorial\n\nWelcome! This collection walks you through the complete developer journey in under 30 minutes.\n\n## What you'll learn\n1. **Register & Authenticate** — get a JWT token\n2. **KYC Verification** — submit identity documents to unlock transactions\n3. **Deposit** — fund your mobile money wallet\n4. **Withdraw** — cash out to a mobile money number\n\n## Before you start\n- Import the companion environment file `mobile_money.postman_environment.json`\n- Make sure the API server is running locally: `npm run dev` (default: http://localhost:3000)\n- Run requests **in order** — each step stores data that the next step needs\n\n## Estimated time: ~20 minutes",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Step 1 — Register & Authenticate",
+			"description": "## Step 1: Register & Authenticate\n\nAuthentication in ProxyPay is phone-number based. You send your phone number and receive a JWT token.\n\nThe test script below **automatically saves** the returned token into the `token` environment variable so every subsequent request uses it without any copy-pasting.\n\n**Expected result:** HTTP 200 with a `token` field in the response.",
+			"item": [
+				{
+					"name": "1.1 — Login (get JWT token)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Auto-save the JWT token for all subsequent requests",
+									"// The test tab runs automatically after every response.",
+									"// We grab the token from the response and store it in the environment.",
+									"",
+									"var jsonData = pm.response.json();",
+									"",
+									"pm.test('Login successful — status 200', function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test('Response contains a token', function () {",
+									"    pm.expect(jsonData).to.have.property('token');",
+									"});",
+									"",
+									"if (jsonData.token) {",
+									"    pm.environment.set('token', jsonData.token);",
+									"    console.log('✅ Token saved to environment variable: token');",
+									"}",
+									"",
+									"if (jsonData.userId) {",
+									"    pm.environment.set('userId', jsonData.userId);",
+									"    console.log('✅ User ID saved:', jsonData.userId);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    // 📝 Replace with your own phone number in E.164 format\n    // E.164 format: +[country code][number], e.g. +237 is Cameroon\n    \"phone_number\": \"+237670000001\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/login",
+							"host": ["{{base_url}}"],
+							"path": ["api", "auth", "login"]
+						},
+						"description": "Sends a phone number to get a JWT access token.\n\n**How it works:**\n- ProxyPay uses phone-number-based auth (no passwords).\n- The server returns a signed JWT token valid for 1 hour.\n- The **Tests** tab script automatically saves the token to the `token` environment variable.\n\n**What to check in the response:**\n```json\n{\n  \"token\": \"eyJhbGci...\",\n  \"userId\": \"uuid-here\"\n}\n```"
+					}
+				},
+				{
+					"name": "1.2 — Verify token is valid",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Confirm the token we saved is actually valid",
+									"pm.test('Token verification — status 200', function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"pm.test('Token is valid', function () {",
+									"    var json = pm.response.json();",
+									"    pm.expect(json.valid).to.eql(true);",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    // The {{token}} variable was saved automatically by step 1.1\n    \"token\": \"{{token}}\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/verify",
+							"host": ["{{base_url}}"],
+							"path": ["api", "auth", "verify"]
+						},
+						"description": "Validates the JWT token you received.\n\n**Why this matters:** Before making any protected API calls, it is good practice to confirm your token is active. If this returns `valid: false`, go back to step 1.1 and re-login.\n\n**Expected response:**\n```json\n{ \"valid\": true }\n```"
+					}
+				},
+				{
+					"name": "1.3 — Get current user profile (Me)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Confirm authentication works for protected routes",
+									"pm.test('Get profile — status 200', function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"// Save stellar address if available — needed for deposit/withdraw",
+									"var json = pm.response.json();",
+									"if (json.stellarAddress) {",
+									"    pm.environment.set('stellarAddress', json.stellarAddress);",
+									"    console.log('✅ Stellar address saved:', json.stellarAddress);",
+									"}",
+									"if (json.id) {",
+									"    pm.environment.set('userId', json.id);",
+									"    console.log('✅ User ID confirmed:', json.id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text",
+								"description": "JWT token automatically inserted from the environment variable saved in step 1.1"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/auth/me",
+							"host": ["{{base_url}}"],
+							"path": ["api", "auth", "me"]
+						},
+						"description": "Fetches your authenticated user profile.\n\n**Notice** the `Authorization: Bearer {{token}}` header — this is the pattern used by every protected endpoint in ProxyPay.\n\nThe Tests script also saves your `stellarAddress` and `userId` for later steps."
+					}
+				}
+			]
+		},
+		{
+			"name": "Step 2 — KYC Verification",
+			"description": "## Step 2: KYC (Know Your Customer) Verification\n\nProxyPay enforces KYC before allowing outbound transactions. There are three levels:\n\n| Level  | Daily Limit (XAF) | Requirements |\n|--------|-------------------|--------------|\n| None   | 0 XAF             | No verification — receive-only |\n| Basic  | 100,000 XAF       | ID document |\n| Full   | 10,000,000 XAF    | ID + address + biometrics |\n\nIn this tutorial we complete **Basic KYC** (sufficient to run the deposit/withdraw steps).\n\n**Steps:**\n1. Create an applicant record with your personal details\n2. Upload a document (passport / ID / driving licence)\n3. Start a verification workflow run\n4. Check the verification status",
+			"item": [
+				{
+					"name": "2.1 — Create KYC applicant",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Save the applicant ID returned by the KYC provider",
+									"pm.test('Create applicant — status 200 or 201', function () {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"",
+									"// The applicant ID is used in subsequent KYC steps",
+									"if (json.applicantId || (json.data && json.data.applicant_id)) {",
+									"    var applicantId = json.applicantId || json.data.applicant_id;",
+									"    pm.environment.set('applicantId', applicantId);",
+									"    console.log('✅ Applicant ID saved:', applicantId);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    // 📝 Replace these fields with realistic test data\n    // In sandbox mode, any valid-looking data is accepted\n    \"first_name\": \"Jane\",\n    \"last_name\": \"Doe\",\n    \"email\": \"jane.doe.tutorial@example.com\",\n    \"phone_number\": \"+237670000001\",\n    \"address\": {\n        \"street\": \"45 Rue de la Paix\",\n        \"town\": \"Douala\",\n        \"postcode\": \"00237\",\n        // ISO 3166-1 alpha-3 country code (CMR = Cameroon)\n        \"country\": \"CMR\"\n    }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/api/kyc/applicants",
+							"host": ["{{base_url}}"],
+							"path": ["api", "kyc", "applicants"]
+						},
+						"description": "Creates a KYC applicant record linked to your user account.\n\n**Behind the scenes:** ProxyPay forwards this data to the Entrust Identity Verification provider and stores the returned `applicant_id` in the `kyc_applicants` table.\n\n**The Tests script** saves the `applicantId` to your environment automatically."
+					}
+				},
+				{
+					"name": "2.2 — Upload identity document",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Pre-request: make sure applicantId exists before sending",
+									"var applicantId = pm.environment.get('applicantId');",
+									"if (!applicantId) {",
+									"    console.warn('⚠️  applicantId not set. Did you run step 2.1 first?');",
+									"}"
+								]
+							}
+						},
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Document upload confirmation",
+									"pm.test('Document upload — status 200 or 201', function () {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+									"});",
+									"console.log('📄 Document uploaded. Proceed to step 2.3 to start the verification workflow.');"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    // applicantId is filled automatically from the environment variable saved in step 2.1\n    \"applicant_id\": \"{{applicantId}}\",\n\n    // Supported types: passport | national_identity_card | driving_licence\n    \"type\": \"passport\",\n\n    \"filename\": \"passport_sample.jpg\",\n\n    // In a real integration this is a base64-encoded image.\n    // For sandbox testing, Entrust accepts a small placeholder string.\n    \"data\": \"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/api/kyc/documents",
+							"host": ["{{base_url}}"],
+							"path": ["api", "kyc", "documents"]
+						},
+						"description": "Uploads a base64-encoded identity document image to the KYC provider.\n\n**Supported document types:** `passport`, `national_identity_card`, `driving_licence`\n\n**Sandbox tip:** Entrust provides pre-approved test document images in their sandbox dashboard. For this tutorial the placeholder base64 string above is sufficient to progress through the flow.\n\n**File size limit:** Max 10 MB per the API global payload limit."
+					}
+				},
+				{
+					"name": "2.3 — Start verification workflow",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Save the workflow run ID for status polling",
+									"pm.test('Workflow created — status 200 or 201', function () {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"var workflowRunId = json.workflowRunId || (json.data && json.data.id);",
+									"if (workflowRunId) {",
+									"    pm.environment.set('workflowRunId', workflowRunId);",
+									"    console.log('✅ Workflow run ID saved:', workflowRunId);",
+									"}",
+									"console.log('⏳ Verification is now processing. Run step 2.4 to check status.');"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    // applicantId saved from step 2.1\n    \"applicant_id\": \"{{applicantId}}\",\n\n    // workflow_id is configured in your .env as KYC_DEFAULT_WORKFLOW_ID\n    // Leave blank to use the default workflow, or provide a specific one\n    \"workflow_id\": \"{{kyc_workflow_id}}\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/api/kyc/workflow-runs",
+							"host": ["{{base_url}}"],
+							"path": ["api", "kyc", "workflow-runs"]
+						},
+						"description": "Triggers the verification workflow for the applicant.\n\n**What happens:** The KYC provider runs automated checks (liveness, document authenticity, data matching) and asynchronously updates the applicant's status via webhook.\n\n**In sandbox mode** verification typically completes within seconds. In production it can take minutes to hours.\n\n**Next:** Poll step 2.4 until you see `verification_status: approved`."
+					}
+				},
+				{
+					"name": "2.4 — Check KYC status",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Display current KYC level and transaction limits",
+									"pm.test('KYC status check — status 200', function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"var data = json.data || json;",
+									"",
+									"console.log('🔍 KYC Level:', data.current_kyc_level);",
+									"console.log('💰 Daily Limit:', data.transaction_limits && data.transaction_limits.dailyLimit, 'XAF');",
+									"",
+									"// Warn the user if KYC is still pending",
+									"if (data.current_kyc_level === 'none') {",
+									"    console.warn('⚠️  KYC level is still \"none\". Verification may still be processing.');",
+									"    console.warn('   Wait a moment and re-run this request, or check step 2.3.');",
+									"} else {",
+									"    console.log('✅ KYC approved! You can now proceed to Step 3 (Deposit).');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/kyc/status",
+							"host": ["{{base_url}}"],
+							"path": ["api", "kyc", "status"]
+						},
+						"description": "Checks your current KYC verification level and the resulting transaction limits.\n\n**Response breakdown:**\n- `current_kyc_level`: `none` | `basic` | `full`\n- `transaction_limits.dailyLimit`: Maximum XAF you can transact per day\n- `latest_verification.verification_status`: `pending` | `approved` | `rejected`\n\n**Expected response when approved:**\n```json\n{\n  \"data\": {\n    \"current_kyc_level\": \"basic\",\n    \"transaction_limits\": { \"dailyLimit\": 100000 }\n  }\n}\n```\n\n⚠️  **If status is still `none`:** Re-run this request after a few seconds (sandbox processing is fast)."
+					}
+				}
+			]
+		},
+		{
+			"name": "Step 3 — Deposit",
+			"description": "## Step 3: Deposit Funds\n\nNow that your account is KYC-verified, you can deposit funds from a mobile money number into your ProxyPay wallet.\n\n**How it works:**\n1. ProxyPay initiates a mobile money pull request from the specified phone number\n2. The mobile money provider (MTN, Orange, Airtel, etc.) processes the payment\n3. Funds are credited to the linked Stellar wallet address\n4. A transaction record is created and can be queried\n\n**Idempotency:** Every deposit/withdraw request requires a unique `Idempotency-Key` header. Postman's `{{$guid}}` variable generates a new UUID automatically for each request — preventing accidental duplicate transactions.",
+			"item": [
+				{
+					"name": "3.1 — Deposit funds",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Pre-flight checks before sending",
+									"var token = pm.environment.get('token');",
+									"var userId = pm.environment.get('userId');",
+									"",
+									"if (!token) {",
+									"    console.error('❌ No token found. Go back to step 1.1 and login first.');",
+									"}",
+									"if (!userId) {",
+									"    console.warn('⚠️  userId not set. Make sure step 1.3 ran successfully.');",
+									"}"
+								]
+							}
+						},
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Save the transaction ID for step 3.2",
+									"pm.test('Deposit accepted — status 200 or 201', function () {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 201, 202]);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"var txId = json.transactionId || json.id || (json.data && json.data.id);",
+									"",
+									"if (txId) {",
+									"    pm.environment.set('transactionId', txId);",
+									"    console.log('✅ Transaction ID saved:', txId);",
+									"    console.log('   Run step 3.2 to check transaction status.');",
+									"} else {",
+									"    console.warn('⚠️  Could not extract transactionId from response. Check the response body.');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							},
+							{
+								"key": "Idempotency-Key",
+								"value": "{{$guid}}",
+								"type": "text",
+								"description": "IMPORTANT: A unique key per request. Postman generates a new UUID automatically via {{$guid}}. This prevents duplicate transactions if the request is retried."
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    // Amount in XAF (Central African Franc)\n    // Must be between 100 and 1,000,000 XAF for Basic KYC\n    \"amount\": 500.00,\n\n    // The mobile money number to pull funds FROM\n    \"phoneNumber\": \"+237670000001\",\n\n    // Mobile money provider: \"mtn\" | \"orange\" | \"airtel\"\n    \"provider\": \"mtn\",\n\n    // Your Stellar wallet address (saved automatically from step 1.3)\n    // Funds are credited here on the Stellar network\n    \"stellarAddress\": \"{{stellarAddress}}\",\n\n    // Your user ID (saved automatically from step 1.1 / 1.3)\n    \"userId\": \"{{userId}}\",\n\n    // Optional: a human-readable note attached to the transaction\n    \"notes\": \"Tutorial deposit — Step 3\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/api/transactions/deposit",
+							"host": ["{{base_url}}"],
+							"path": ["api", "transactions", "deposit"]
+						},
+						"description": "Initiates a deposit from a mobile money number to your ProxyPay wallet.\n\n**Key concepts:**\n- `amount`: In XAF. Basic KYC allows up to 100,000 XAF/day.\n- `provider`: The mobile money operator (`mtn`, `orange`, `airtel`).\n- `Idempotency-Key`: Prevents duplicate transactions — always unique per request.\n- `stellarAddress`: The on-chain address that receives the funds.\n\n**What to expect:**\n- Status `202 Accepted` — transaction is queued and being processed\n- Status `200 OK` — transaction completed immediately (sandbox)\n- The `transactionId` in the response is saved automatically for step 3.2"
+					}
+				},
+				{
+					"name": "3.2 — Check transaction status",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Read the transaction status",
+									"pm.test('Get transaction — status 200', function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"var tx = json.data || json;",
+									"",
+									"console.log('📊 Transaction Status:', tx.status);",
+									"console.log('💵 Amount:', tx.amount, 'XAF');",
+									"console.log('📅 Created:', tx.createdAt || tx.created_at);",
+									"",
+									"if (tx.status === 'completed') {",
+									"    console.log('✅ Deposit confirmed! Proceed to Step 4 (Withdraw).');",
+									"} else if (tx.status === 'pending') {",
+									"    console.log('⏳ Still processing. Re-run in a moment.');",
+									"} else if (tx.status === 'failed') {",
+									"    console.error('❌ Transaction failed:', tx.failureReason || 'Unknown reason');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/transactions/{{transactionId}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "transactions", "{{transactionId}}"]
+						},
+						"description": "Fetches the details and current status of the deposit transaction.\n\n**Transaction statuses:**\n- `pending` — being processed by the mobile money operator\n- `completed` — funds successfully credited\n- `failed` — transaction could not be completed (check `failureReason`)\n- `cancelled` — manually cancelled before processing\n\n**Re-run this request** until you see `completed` before moving to the withdrawal step."
+					}
+				}
+			]
+		},
+		{
+			"name": "Step 4 — Withdraw",
+			"description": "## Step 4: Withdraw Funds\n\nWithdrawal sends funds FROM your ProxyPay wallet TO a mobile money number.\n\n**This is the reverse of deposit:**\n- Funds are debited from your Stellar wallet\n- The equivalent XAF amount is pushed to the target mobile money number\n\n**Prerequisites:**\n- KYC level must be `basic` or `full`\n- Your wallet must have sufficient balance (deposited in Step 3)\n- Same `Idempotency-Key` requirement as deposits",
+			"item": [
+				{
+					"name": "4.1 — Withdraw funds",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Guard: confirm a deposit was completed before withdrawing",
+									"var token = pm.environment.get('token');",
+									"if (!token) {",
+									"    console.error('❌ No token. Start from step 1.1.');",
+									"}"
+								]
+							}
+						},
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Save withdraw transaction ID",
+									"pm.test('Withdrawal accepted — status 200, 201, or 202', function () {",
+									"    pm.expect(pm.response.code).to.be.oneOf([200, 201, 202]);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"var txId = json.transactionId || json.id || (json.data && json.data.id);",
+									"",
+									"if (txId) {",
+									"    pm.environment.set('withdrawTransactionId', txId);",
+									"    console.log('✅ Withdraw transaction ID saved:', txId);",
+									"    console.log('   Run step 4.2 to verify it completed.');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							},
+							{
+								"key": "Idempotency-Key",
+								"value": "{{$guid}}",
+								"type": "text",
+								"description": "Unique per request — prevents duplicate withdrawals"
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    // Amount to withdraw in XAF — must be less than or equal to deposited balance\n    // Keep this ≤ the amount deposited in step 3.1 (500 XAF in the tutorial)\n    \"amount\": 200.00,\n\n    // The mobile money number to send funds TO\n    \"phoneNumber\": \"+237670000001\",\n\n    // Mobile money provider for the destination number\n    \"provider\": \"mtn\",\n\n    // Your Stellar wallet address — funds are debited from here\n    \"stellarAddress\": \"{{stellarAddress}}\",\n\n    // Your user ID\n    \"userId\": \"{{userId}}\",\n\n    // Optional note\n    \"notes\": \"Tutorial withdrawal — Step 4\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/api/transactions/withdraw",
+							"host": ["{{base_url}}"],
+							"path": ["api", "transactions", "withdraw"]
+						},
+						"description": "Initiates a withdrawal from your ProxyPay wallet to a mobile money number.\n\n**Important notes:**\n- `amount` must not exceed your wallet balance or your daily KYC limit\n- The `Idempotency-Key` header is required — a new UUID is generated per send via `{{$guid}}`\n- `provider` must match the mobile network of the destination `phoneNumber`\n\n**Failure reasons to watch for:**\n- `INSUFFICIENT_BALANCE` — deposit more first\n- `KYC_LIMIT_EXCEEDED` — amount exceeds daily KYC limit\n- `INVALID_PHONE` — phone number format is incorrect"
+					}
+				},
+				{
+					"name": "4.2 — Confirm withdrawal status",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Final confirmation step",
+									"pm.test('Get withdrawal — status 200', function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"var tx = json.data || json;",
+									"",
+									"console.log('📊 Withdrawal Status:', tx.status);",
+									"console.log('💵 Amount:', tx.amount, 'XAF');",
+									"",
+									"if (tx.status === 'completed') {",
+									"    console.log('🎉 Congratulations! You have completed the ProxyPay developer tutorial.');",
+									"    console.log('   You successfully: registered → verified KYC → deposited → withdrew.');",
+									"} else {",
+									"    console.log('⏳ Still processing. Re-run in a moment.');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/transactions/{{withdrawTransactionId}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "transactions", "{{withdrawTransactionId}}"]
+						},
+						"description": "Polls the withdrawal transaction until it reaches a terminal state.\n\n**When you see `status: completed`** — you have successfully completed the full ProxyPay developer flow:\n\n✅ Registered → ✅ KYC verified → ✅ Deposited → ✅ Withdrawn\n\n**Next steps:**\n- Explore the `mobile_money_core` collection for advanced endpoints (bulk transactions, vaults, contacts)\n- Read `docs/KYC_INTEGRATION.md` for full KYC documentation\n- Check `docs/JWT_AUTHENTICATION.md` for token refresh patterns"
+					}
+				}
+			]
+		},
+		{
+			"name": "Bonus — View Transaction History",
+			"description": "## Bonus: Explore Your Transaction History\n\nOnce you have completed Steps 1–4, use these requests to explore the transactions you created.",
+			"item": [
+				{
+					"name": "List all my transactions",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// ✅ TUTORIAL — Show a summary of all transactions",
+									"pm.test('List transactions — status 200', function () {",
+									"    pm.response.to.have.status(200);",
+									"});",
+									"",
+									"var json = pm.response.json();",
+									"var txs = json.data || json.transactions || json;",
+									"if (Array.isArray(txs)) {",
+									"    console.log('📋 Total transactions found:', txs.length);",
+									"    txs.forEach(function(tx, i) {",
+									"        console.log(i+1 + '.', tx.type || tx.transactionType, '|', tx.amount, 'XAF |', tx.status);",
+									"    });",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer {{token}}",
+								"type": "text"
+							}
+						],
+						"url": {
+							"raw": "{{base_url}}/api/transactions?limit=20&offset=0",
+							"host": ["{{base_url}}"],
+							"path": ["api", "transactions"],
+							"query": [
+								{
+									"key": "limit",
+									"value": "20",
+									"description": "Number of transactions to return (max 100)"
+								},
+								{
+									"key": "offset",
+									"value": "0",
+									"description": "Pagination offset — increment by limit to get next page"
+								}
+							]
+						},
+						"description": "Returns a paginated list of your transactions.\n\n**Pagination:** Use `limit` and `offset` to page through results.\n- Page 1: `?limit=20&offset=0`\n- Page 2: `?limit=20&offset=20`\n\n**The Tests script** logs a summary table of all transactions to the Postman console."
+					}
+				}
+			]
+		}
+	],
+	"auth": {
+		"type": "noauth"
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:3000",
+			"type": "default",
+			"description": "Override this in the environment file"
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Global pre-request: runs before EVERY request in this collection",
+					"// Logs the request name to the console for easy tracking",
+					"console.log('▶️  Sending:', pm.info.requestName);"
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Global test: runs after EVERY request in this collection",
+					"// Catches unexpected server errors early",
+					"pm.test('No 5xx server error', function () {",
+					"    pm.expect(pm.response.code).to.not.be.within(500, 599);",
+					"});"
+				]
+			}
+		}
+	]
+}

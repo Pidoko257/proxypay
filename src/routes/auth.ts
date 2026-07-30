@@ -22,6 +22,7 @@ import {
 import { getLockoutStatus, recordFailedAttempt } from "../auth/lockout";
 import { verifyTOTPToken, verifyBackupCode, is2FAEnabled } from "../auth/2fa";
 import { evaluateAdminLoginAnomaly } from "../services/loginAnomaly";
+import { recordDeviceFingerprint } from "../middleware/fingerprint";
 import { validateRequest } from "../middleware/validation";
 import { hashPassword } from "../utils/password";
 import { redisClient } from "../config/redis";
@@ -167,16 +168,19 @@ authRoutes.post(
       }
 
       const anomaly = await evaluateAdminLoginAnomaly(req, user);
+      const fingerprintCheck = await recordDeviceFingerprint(user.id, req);
 
-      if (anomaly.suspicious) {
+      if (anomaly.suspicious || fingerprintCheck.requiresStepUp) {
+        const reason = anomaly.reason ?? "repeated_device_fingerprint_mismatch";
+
         if (!is2FAEnabled(user)) {
           throw createError(
             ERROR_CODES.FORBIDDEN,
-            "Anomalous admin login was blocked. Enable two-factor authentication and retry.",
+            "Anomalous login was blocked. Enable two-factor authentication and retry.",
             {
-              error: "Suspicious admin login detected",
+              error: "Suspicious login detected",
               requiresTwoFactor: true,
-              anomaly: anomaly.reason,
+              anomaly: reason,
             },
           );
         }
@@ -208,11 +212,11 @@ authRoutes.post(
         if (!verified2fa) {
           throw createError(
             ERROR_CODES.FORBIDDEN,
-            "Suspicious admin login detected. Provide X-2FA-Token header or backupCode to continue.",
+            "Suspicious login detected. Provide X-2FA-Token header or backupCode to continue.",
             {
               error: "Two-factor authentication required",
               requiresTwoFactor: true,
-              anomaly: anomaly.reason,
+              anomaly: reason,
             },
           );
         }

@@ -1,6 +1,7 @@
 import pino, { Logger, TransportTargetOptions } from 'pino';
 import os from 'os';
 import { REDACT_KEYS } from './redact';
+import { maskPii } from './piiMask';
 
 /**
  * Centralized Pino Logger — feature/centralized-logging
@@ -127,6 +128,16 @@ const logger: Logger = pino(
 
     // ISO-8601 timestamps
     timestamp: pino.stdTimeFunctions.isoTime,
+
+    // Mask PII (emails, phone numbers) found in log message content — the
+    // `redact` option above only strips values by known field name, this
+    // catches PII embedded in free-text messages and arbitrary fields.
+    hooks: {
+      logMethod(args, method) {
+        const maskedArgs = args.map((arg) => maskPii(arg)) as Parameters<typeof method>;
+        return method.apply(this, maskedArgs);
+      },
+    },
   },
   transport ? pino.transport(transport) : undefined,
 );

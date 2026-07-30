@@ -26,6 +26,7 @@ import {
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
+import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -149,6 +150,12 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
+  },
+  {
+    name: "travel-rule-audit-report",
+    // 1st of every month at midnight - summarizes prior month's Travel Rule coverage
+    schedule: process.env.TRAVEL_RULE_AUDIT_REPORT_CRON || "0 0 1 * *",
+    handler: runTravelRuleAuditReportJob,
   },
 ];
 

@@ -4,6 +4,7 @@ import { ERROR_CODES, getHttpStatus } from "../constants/errorCodes";
 import { getLocalizedMessage } from "../locales/messages";
 import { resolveLocale, resolveLocaleFromRequest } from "../utils/i18n";
 import logger from "../utils/logger";
+import { maskPii } from "../utils/piiMask";
 
 /**
  * Extended Error interface with error-specific properties.
@@ -182,7 +183,7 @@ export const errorHandler = (
     statusCode,
   }, 'Request Error');
 
-  const details = extractLegacyDetails(err);
+  const details = maskPii(extractLegacyDetails(err)) as Record<string, unknown>;
   const body: ErrorResponse & { statusCode: number; error?: string } = {
     code: errorCode,
     message: localizedMessage,
@@ -196,7 +197,7 @@ export const errorHandler = (
   if (details && typeof details === "object" && typeof details.error === "string") {
     body.error = details.error;
   } else if (err.message) {
-    body.error = err.message;
+    body.error = maskPii(err.message) as string;
   } else {
     body.error = englishMessage;
   }

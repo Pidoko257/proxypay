@@ -9,6 +9,12 @@ import { travelRuleService, TravelRuleRecord } from "../compliance/travelRule";
 import { createError } from "../middleware/errorHandler";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { travelRuleCheckHandler } from "../controllers/complianceController";
+import {
+  generateTravelRuleAuditReport,
+  travelRuleAuditReportToCsv,
+  travelRuleAuditReportToPdf,
+  previousMonthRange,
+} from "../reports/travelRuleAuditReport";
 
 export const travelRuleRoutes = Router();
 
@@ -16,6 +22,18 @@ function parseOptionalDate(value: unknown): Date | undefined {
   if (!value || typeof value !== "string") return undefined;
   const d = new Date(value);
   return isNaN(d.getTime()) ? undefined : d;
+}
+
+/** Parses a "YYYY-MM" query param into a [start, end) month range in UTC. */
+function resolveReportMonthRange(month: unknown): { start: Date; end: Date } {
+  if (typeof month === "string" && /^\d{4}-\d{2}$/.test(month)) {
+    const [year, mon] = month.split("-").map(Number);
+    return {
+      start: new Date(Date.UTC(year, mon - 1, 1)),
+      end: new Date(Date.UTC(year, mon, 1)),
+    };
+  }
+  return previousMonthRange(new Date());
 }
 
 function requireAdmin(req: Request, res: Response): boolean {
@@ -148,6 +166,75 @@ travelRuleRoutes.get("/export.csv", requireAuth, async (req: Request, res: Respo
     if (!res.headersSent) {
        throw createError(ERROR_CODES.INTERNAL_ERROR,"CSV export failed", {error:"CSV export failed"})
     }
+  }
+});
+
+/**
+ * GET /api/v1/compliance/travel-rule/audit-report
+ * Query params: month (YYYY-MM, defaults to previous calendar month)
+ * Returns coverage %, missed transactions, and corrective actions taken.
+ */
+travelRuleRoutes.get("/audit-report", requireAuth, async (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+
+  try {
+    const { start, end } = resolveReportMonthRange(req.query.month);
+    const report = await generateTravelRuleAuditReport(start, end);
+    res.json(report);
+  } catch (err) {
+    console.error("[travel-rule] audit report error:", err instanceof Error ? err.message : err);
+    throw createError(ERROR_CODES.INTERNAL_ERROR, "Audit report generation failed", {
+      error: "Audit report generation failed",
+    });
+  }
+});
+
+/**
+ * GET /api/v1/compliance/travel-rule/audit-report.csv
+ */
+travelRuleRoutes.get("/audit-report.csv", requireAuth, async (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+
+  try {
+    const { start, end } = resolveReportMonthRange(req.query.month);
+    const report = await generateTravelRuleAuditReport(start, end);
+    const filename = `travel-rule-audit-${start.toISOString().slice(0, 7)}.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(travelRuleAuditReportToCsv(report));
+  } catch (err) {
+    console.error(
+      "[travel-rule] audit report csv error:",
+      err instanceof Error ? err.message : err,
+    );
+    throw createError(ERROR_CODES.INTERNAL_ERROR, "Audit report CSV export failed", {
+      error: "Audit report CSV export failed",
+    });
+  }
+});
+
+/**
+ * GET /api/v1/compliance/travel-rule/audit-report.pdf
+ */
+travelRuleRoutes.get("/audit-report.pdf", requireAuth, async (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+
+  try {
+    const { start, end } = resolveReportMonthRange(req.query.month);
+    const report = await generateTravelRuleAuditReport(start, end);
+    const filename = `travel-rule-audit-${start.toISOString().slice(0, 7)}.pdf`;
+    const pdfBuffer = await travelRuleAuditReportToPdf(report);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(pdfBuffer);
+  } catch (err) {
+    console.error(
+      "[travel-rule] audit report pdf error:",
+      err instanceof Error ? err.message : err,
+    );
+    throw createError(ERROR_CODES.INTERNAL_ERROR, "Audit report PDF export failed", {
+      error: "Audit report PDF export failed",
+    });
   }
 });
 

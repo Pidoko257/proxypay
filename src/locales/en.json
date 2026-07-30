@@ -21,6 +21,7 @@
     "TRANSACTION_FAILED": "Transaction processing failed",
     "PROVIDER_ERROR": "Mobile money provider error",
     "RATE_LIMIT": "Too many requests. Please try again later",
+    "EMAIL_UNVERIFIED": "Email address is not verified",
     "INTERNAL_ERROR": "Internal server error",
     "SERVICE_UNAVAILABLE": "Service temporarily unavailable",
     "DATABASE_ERROR": "Database operation failed",

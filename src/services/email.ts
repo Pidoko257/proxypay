@@ -369,12 +369,82 @@ export class EmailService {
                 <tr><td style="color:#27ae60; padding: 4px 0;">Low:</td><td style="text-align:right;color:#27ae60;"><strong>${report.low}</strong></td></tr>
               </table>
             </div>
-            <p style="color:#999;font-size:12px;margin-top:30px;text-align:center;">
-              &copy; ${new Date().getFullYear()} Mobile Money. Automated Security Audit.
+        <p style="color:#999;font-size:12px;margin-top:30px;text-align:center;">
+            &copy; ${new Date().getFullYear()} Mobile Money. Automated Security Audit.
+          </p>
+        </div>
+      `,
+      });
+    }
+  }
+
+  async sendEmailVerification(
+    email: string,
+    options: {
+      verificationLink: string;
+      expiresInHours: number;
+      locale?: string;
+    },
+  ): Promise<void> {
+    if (process.env.NODE_ENV === "test") {
+      console.log("Skipping email verification email in test environment");
+      return;
+    }
+
+    const { verificationLink, expiresInHours } = options;
+    const resolvedLocale = resolveLocale(options.locale);
+
+    const templateId = process.env.SENDGRID_EMAIL_VERIFICATION_TEMPLATE_ID;
+    const from =
+      process.env.EMAIL_FROM || '"Mobile Money" <no-reply@mobilemoney.com>';
+
+    try {
+      if (templateId) {
+        await sgMail.send({
+          from,
+          to: email,
+          templateId,
+          dynamicTemplateData: {
+            verificationLink,
+            expiresInHours,
+            locale: resolvedLocale,
+            year: new Date().getFullYear(),
+          },
+        });
+        return;
+      }
+
+      await sgMail.send({
+        from,
+        to: email,
+        subject: "Verify your Mobile Money email address",
+        html: `
+          <div style="font-family:sans-serif;max-width:560px;margin:0 auto">
+            <h2 style="color:#2c3e50">Confirm your email address</h2>
+            <p>Welcome to Mobile Money. To finish activating your account, please verify your email address.</p>
+            <p>
+              <a href="${verificationLink}"
+                 style="display:inline-block;padding:12px 20px;background:#3498db;color:#fff;text-decoration:none;border-radius:4px">
+                Verify my email
+              </a>
+            </p>
+            <p>If the button does not work, paste this link into your browser:</p>
+            <p style="word-break:break-all;color:#666">${verificationLink}</p>
+            <p>This link expires in <strong>${expiresInHours} hour${expiresInHours === 1 ? "" : "s"}</strong>.</p>
+            <p>If you did not create this account, you can safely ignore this email.</p>
+            <hr style="border:none;border-top:1px solid #eee;margin:24px 0">
+            <p style="color:#999;font-size:12px">
+              &copy; ${new Date().getFullYear()} Mobile Money. This is an automated verification email.
             </p>
           </div>
         `,
+        text:
+          `Welcome to Mobile Money. Verify your email by visiting:\n\n${verificationLink}\n\n` +
+          `This link expires in ${expiresInHours} hour${expiresInHours === 1 ? "" : "s"}.\n\n` +
+          `If you did not create this account, ignore this email.`,
       });
+    } catch (error) {
+      console.error("[Email] Verification email delivery failed:", error);
     }
   }
 }

@@ -444,7 +444,7 @@ app.use(
 );
 
 if (process.env.SENTRY_DSN) {
-  app.use(Sentry.expressErrorHandler());
+ Sentry.expressErrorHandler()
 }
 
 app.use(timeoutErrorHandler);

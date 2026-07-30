@@ -34,6 +34,13 @@ import {
 } from "../middleware/authRateLimit";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import {
+  issueEmailVerificationToken,
+  consumeEmailVerificationToken,
+} from "../auth/emailVerification";
+import { requireVerifiedEmail } from "../middleware/emailVerified";
+import { queryWrite, queryRead } from "../config/database";
+import { encrypt } from "../utils/encryption";
 
 const emailService = new EmailService();
 
@@ -41,6 +48,7 @@ export const authRoutes = Router();
 
 export const registerSchema = z.object({
   phone_number: z.string().min(1, "phone_number is required"),
+  email: z.string().email("A valid email address is required"),
   password: z
     .string()
     .min(12, "Password must be at least 12 characters")
@@ -61,15 +69,34 @@ authRoutes.post(
   registerRateLimiter,
   validateRequest(registerSchema),
   async (req: Request, res: Response) => {
-    const { phone_number, password } = req.body as z.infer<
+    const { phone_number, email, password } = req.body as z.infer<
       typeof registerSchema
     >;
     try {
       const passwordHash = await hashPassword(password);
       const user = await createUser({
         phone_number,
+        email,
         password_hash: passwordHash,
       } as any);
+
+      const { token: verificationToken } =
+        await issueEmailVerificationToken(user.id);
+
+      const baseUrl =
+        process.env.EMAIL_VERIFICATION_BASE_URL ||
+        `${req.protocol}://${req.get("host")}`;
+      const verificationLink = `${baseUrl}/api/auth/verify-email?token=${encodeURIComponent(verificationToken)}`;
+
+      try {
+        await emailService.sendEmailVerification(email, {
+          verificationLink,
+          expiresInHours: 24,
+        });
+      } catch (emailErr) {
+        console.error("[Register] Failed to send verification email:", emailErr);
+      }
+
       res
         .status(201)
         .json({ message: "User registered successfully", userId: user.id });
@@ -364,6 +391,114 @@ authRoutes.post("/verify", (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/auth/verify-email?token=
+ *
+ * Activates a user account by consuming a time-limited email
+ * verification token. The token is a JWT with a 24-hour expiry,
+ * stored in Redis for fast single-use validation. On success the
+ * `email_verified` flag is set to `true` in the database and the
+ * Redis key is deleted.
+ */
+authRoutes.get("/verify-email", async (req: Request, res: Response) => {
+  const raw = req.query.token;
+
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw createError(ERROR_CODES.MISSING_FIELD, "Verification token is required", {
+      error: "MISSING_TOKEN",
+    });
+  }
+
+  try {
+    const { userId } = await consumeEmailVerificationToken(raw);
+
+    await queryWrite(
+      `UPDATE users
+          SET email_verified = true,
+              email_verified_at = CURRENT_TIMESTAMP,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1`,
+      [userId],
+    );
+
+    res.json({ message: "Email verified successfully", userId });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown error";
+    throw createError(ERROR_CODES.INVALID_TOKEN, message, {
+      error: "VERIFICATION_FAILED",
+      message,
+    });
+  }
+});
+
+/**
+ * POST /api/auth/resend-verification
+ *
+ * Issues and sends a new verification email to an unverified user.
+ * To avoid enumeration, the endpoint returns 200 regardless of
+ * whether the email exists or is already verified.
+ */
+authRoutes.post(
+  "/resend-verification",
+  registerRateLimiter,
+  async (req: Request, res: Response) => {
+    const { email } = req.body;
+
+    if (!email || typeof email !== "string") {
+      throw createError(ERROR_CODES.MISSING_FIELD, "Email is required", {
+        error: "MISSING_EMAIL",
+      });
+    }
+
+    try {
+      const encryptedEmail = encrypt(email);
+      const userResult = await queryRead(
+        `SELECT id, email_verified
+           FROM users
+          WHERE email = $1
+          LIMIT 1`,
+        [encryptedEmail],
+      );
+
+      if (userResult.rows.length === 0 || userResult.rows[0].email_verified === true) {
+        res.json({ message: "If the account exists and is unverified, a new verification email has been sent." });
+        return;
+      }
+
+      const { id: userId } = userResult.rows[0] as { id: string };
+
+      const { token: verificationToken } =
+        await issueEmailVerificationToken(userId);
+
+      const baseUrl =
+        process.env.EMAIL_VERIFICATION_BASE_URL ||
+        `${req.protocol}://${req.get("host")}`;
+      const verificationLink = `${baseUrl}/api/auth/verify-email?token=${encodeURIComponent(verificationToken)}`;
+
+      try {
+        await emailService.sendEmailVerification(email, {
+          verificationLink,
+          expiresInHours: 24,
+        });
+      } catch (emailErr) {
+        console.error("[Resend] Failed to send verification email:", emailErr);
+      }
+
+      res.json({ message: "If your account exists and is unverified, a new verification email has been sent." });
+    } catch (error) {
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Unable to resend verification",
+        {
+          error: "RESEND_FAILED",
+          message: error instanceof Error ? error.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
+
+/**
  * GET /api/auth/me
  *
  * Protected route that returns current user information
@@ -372,6 +507,7 @@ authRoutes.post("/verify", (req: Request, res: Response) => {
 authRoutes.get(
   "/me",
   authenticateToken,
+  requireVerifiedEmail,
   async (req: Request, res: Response) => {
     const payload = req.jwtUser as JWTPayload;
 

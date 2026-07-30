@@ -87,6 +87,10 @@ import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
+import providerLoadBalancerRouter from "./routes/providerLoadBalancer";
+import providerFeesRouter from "./routes/providerFees";
+import dataExportsRouter from "./routes/dataExports";
+import { advancedReportsRouter } from "./routes/advancedReports";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
 
@@ -377,6 +381,14 @@ app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
 app.use("/api/fee-strategies", feeStrategiesRouter);
+// Issue #200 — Provider Fee Configuration (provider-specific fees, versioning, simulation, analytics)
+app.use("/api/fees", providerFeesRouter);
+// Issue #202 — Data Export (PDF, scheduled, GDPR, access logging)
+app.use("/api/exports", dataExportsRouter);
+// Issue #203 — Provider Load Balancing
+app.use("/api/providers/load-balancer", providerLoadBalancerRouter);
+// Issue #205 — Advanced Reporting (P&L, settlement, KYC compliance, custom builder, archive)
+app.use("/api/reports", advancedReportsRouter);
 app.use("/api/cross-chain", crossChainRouter);
 app.use("/api/stellar", stellarRouter);
 app.use("/api/reconciliation", reconciliationRoutes);

@@ -12,9 +12,9 @@ The depth limiter is configured in the Apollo Server validation rules:
 
 ```typescript
 validationRules: [
-  depthLimit(5),
+  depthLimit(4),
   createComplexityRule({
-    maximumComplexity: 1000,
+    maximumComplexity: 300,
     estimators: [
       fieldExtensionsEstimator(),
       simpleEstimator({ defaultComplexity: 1 }),
@@ -25,7 +25,8 @@ validationRules: [
 
 ## Configuration
 
-- **Maximum Depth**: 5 levels
+- **Maximum Depth**: 4 levels
+- **Maximum Complexity**: 300 points per request
 - **Package**: `graphql-depth-limit@1.1.0`
 
 ## How It Works
@@ -69,7 +70,7 @@ query {
 }
 ```
 
-**Error Response**: `"exceeds maximum operation depth of 5"`
+**Error Response**: `"exceeds maximum operation depth of 4"`
 
 ## Testing
 
@@ -88,7 +89,7 @@ Comprehensive tests are located in `src/tests/graphql-depth-complexity.test.ts`:
 
 ## Related
 
-- Query Complexity Limiting (max 1000 complexity points)
+- Query Complexity Limiting (max 300 complexity points)
 - Automatic Persisted Queries (APQ)
 - GraphQL validation rules
 

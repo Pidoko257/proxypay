@@ -27,6 +27,9 @@ const mergedResolvers = {
   ...subscriptionResolvers,
 };
 
+const MAX_GRAPHQL_DEPTH = 4;
+const MAX_GRAPHQL_COMPLEXITY = 300;
+
 export async function startApolloServer(
   app: Application,
   httpServer: Server,
@@ -55,10 +58,10 @@ export async function startApolloServer(
     },
 
     validationRules: [
-      depthLimit(5),
-        // Enforce strict query complexity limit of 500 points per request
+      depthLimit(MAX_GRAPHQL_DEPTH),
+      // Keep the API responsive for normal clients while blocking deep fan-out queries.
       createComplexityRule({
-        maximumComplexity: 500,
+        maximumComplexity: MAX_GRAPHQL_COMPLEXITY,
         estimators: [
           fieldExtensionsEstimator(),
           simpleEstimator({ defaultComplexity: 1 }),

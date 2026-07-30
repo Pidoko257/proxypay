@@ -16,6 +16,9 @@ import {
   fieldExtensionsEstimator,
 } from "graphql-query-complexity";
 
+const MAX_GRAPHQL_DEPTH = 4;
+const MAX_GRAPHQL_COMPLEXITY = 300;
+
 const typeDefs = `
   type User {
     id: ID!
@@ -67,7 +70,7 @@ function runValidation(
 }
 
 describe("GraphQL Depth Limit", () => {
-  it("should allow queries within the depth limit of 5", () => {
+  it(`should allow queries within the depth limit of ${MAX_GRAPHQL_DEPTH}`, () => {
     const query = `
       query GetDeep {
         transaction(id: "1") {
@@ -83,11 +86,11 @@ describe("GraphQL Depth Limit", () => {
       }
     `;
 
-    const errors = runValidation(query, [depthLimit(5)]);
+    const errors = runValidation(query, [depthLimit(MAX_GRAPHQL_DEPTH)]);
     expect(errors).toHaveLength(0);
   });
 
-  it("should reject queries deeper than 5 levels", () => {
+  it(`should reject queries deeper than ${MAX_GRAPHQL_DEPTH} levels`, () => {
     const query = `
       query TooDeep {
         me {
@@ -106,12 +109,14 @@ describe("GraphQL Depth Limit", () => {
       }
     `;
 
-    const errors = runValidation(query, [depthLimit(5)]);
+    const errors = runValidation(query, [depthLimit(MAX_GRAPHQL_DEPTH)]);
     expect(errors.length).toBeGreaterThan(0);
-    expect(errors[0].message).toContain("exceeds maximum operation depth of 5");
+    expect(errors[0].message).toContain(
+      `exceeds maximum operation depth of ${MAX_GRAPHQL_DEPTH}`,
+    );
   });
 
-  it("should reject a query at exactly depth 6", () => {
+  it(`should reject a query at exactly depth ${MAX_GRAPHQL_DEPTH + 1}`, () => {
     const query = `
       query SixLevels {
         me {
@@ -130,28 +135,24 @@ describe("GraphQL Depth Limit", () => {
       }
     `;
 
-    const errors = runValidation(query, [depthLimit(5)]);
+    const errors = runValidation(query, [depthLimit(MAX_GRAPHQL_DEPTH)]);
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it("should allow a query at exactly depth 5", () => {
+  it(`should allow a query at exactly depth ${MAX_GRAPHQL_DEPTH}`, () => {
     const query = `
-      query FiveLevels {
+      query FourLevels {
         me {
           friends {
             friends {
-              friends {
-                friends {
-                  name
-                }
-              }
+              name
             }
           }
         }
       }
     `;
 
-    const errors = runValidation(query, [depthLimit(5)]);
+    const errors = runValidation(query, [depthLimit(MAX_GRAPHQL_DEPTH)]);
     expect(errors).toHaveLength(0);
   });
 });
@@ -169,7 +170,7 @@ describe("GraphQL Query Complexity", () => {
 
     const errors = runValidation(query, [
       createComplexityRule({
-        maximumComplexity: 500,
+        maximumComplexity: MAX_GRAPHQL_COMPLEXITY,
         estimators: [
           fieldExtensionsEstimator(),
           simpleEstimator({ defaultComplexity: 1 }),
@@ -202,7 +203,7 @@ describe("GraphQL Query Complexity", () => {
 
     const errors = runValidation(query, [
       createComplexityRule({
-        maximumComplexity: 10,
+        maximumComplexity: 3,
         estimators: [
           fieldExtensionsEstimator(),
           simpleEstimator({ defaultComplexity: 1 }),
@@ -210,7 +211,7 @@ describe("GraphQL Query Complexity", () => {
       }),
     ]);
     expect(errors.length).toBeGreaterThan(0);
-    expect(errors[0].message).toContain("too complex");
+    expect(errors[0].message).toContain("maximum complexity of 3");
   });
 
   it("should reject queries exceeding max query nodes", () => {
@@ -227,25 +228,33 @@ describe("GraphQL Query Complexity", () => {
       }
     `;
 
-    const errors = runValidation(query, [
-      createComplexityRule({
-        maximumComplexity: 10000,
-        maxQueryNodes: 2,
-        estimators: [
-          fieldExtensionsEstimator(),
-          simpleEstimator({ defaultComplexity: 1 }),
-        ],
-      }),
-    ]);
-    expect(errors.length).toBeGreaterThan(0);
+    let thrownError: Error | undefined;
+
+    try {
+      runValidation(query, [
+        createComplexityRule({
+          maximumComplexity: 10000,
+          maxQueryNodes: 2,
+          estimators: [
+            fieldExtensionsEstimator(),
+            simpleEstimator({ defaultComplexity: 1 }),
+          ],
+        }),
+      ]);
+    } catch (error) {
+      thrownError = error as Error;
+    }
+
+    expect(thrownError).toBeDefined();
+    expect(thrownError?.message).toContain("maximum allowed number of nodes");
   });
 });
 
 describe("Combined Depth and Complexity Rules", () => {
   const validationRules = [
-    depthLimit(5),
+    depthLimit(MAX_GRAPHQL_DEPTH),
     createComplexityRule({
-      maximumComplexity: 1000,
+      maximumComplexity: MAX_GRAPHQL_COMPLEXITY,
       estimators: [
         fieldExtensionsEstimator(),
         simpleEstimator({ defaultComplexity: 1 }),

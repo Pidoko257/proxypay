@@ -210,6 +210,25 @@ export const crossChainAnomalyTotal = new Counter({
   registers: [register],
 });
 
+// Sanctions List Sync Metrics
+export const sanctionsListLastUpdateTimestamp = new Gauge({
+  name: "sanctions_list_last_update_timestamp_seconds",
+  help: "Unix timestamp (seconds) of the last successful sanctions list sync",
+  registers: [register],
+});
+
+export const sanctionsListRecordCount = new Gauge({
+  name: "sanctions_list_record_count",
+  help: "Number of entities in the sanctions list as of the last successful sync",
+  registers: [register],
+});
+
+export const sanctionsSyncFailuresTotal = new Counter({
+  name: "sanctions_sync_failures_total",
+  help: "Total number of failed sanctions list sync attempts",
+  registers: [register],
+});
+
 // System Heartbeat Metric
 export const systemHeartbeat = new Gauge({
   name: "system_heartbeat",

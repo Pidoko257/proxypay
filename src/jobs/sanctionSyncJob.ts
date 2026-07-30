@@ -1,4 +1,9 @@
 import { sanctionService } from "../services/sanctionService";
+import {
+  sanctionsListLastUpdateTimestamp,
+  sanctionsListRecordCount,
+  sanctionsSyncFailuresTotal,
+} from "../utils/metrics";
 
 /**
  * Background job to fetch and sync global sanction lists.
@@ -6,14 +11,18 @@ import { sanctionService } from "../services/sanctionService";
  */
 export async function runSanctionSyncJob(): Promise<void> {
   console.log("[sanction-sync] Starting daily sanction list synchronization...");
-  
+
   try {
     const updates = await sanctionService.fetchSanctionUpdates();
     console.log(`[sanction-sync] Fetched ${updates.length} entities from global lists.`);
-    
+
     await sanctionService.updateSanctionList(updates);
     console.log("[sanction-sync] Successfully updated internal sanction blacklist.");
+
+    sanctionsListLastUpdateTimestamp.set(Date.now() / 1000);
+    sanctionsListRecordCount.set(updates.length);
   } catch (error) {
+    sanctionsSyncFailuresTotal.inc();
     console.error("[sanction-sync] Critical failure during sanction sync:", error);
     throw error;
   }

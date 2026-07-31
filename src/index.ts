@@ -66,6 +66,7 @@ import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
 import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
+import { runDependencyHealthChecks } from "./services/dependencyHealth";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
@@ -225,13 +226,15 @@ app.use(
 );
 app.use(sessionAnomalyLogger);
 
-app.get("/health", (_req: Request, res: Response) => {
+app.get("/health", async (_req: Request, res: Response) => {
+  const report = await runDependencyHealthChecks();
   const body: HealthCheckResponse = {
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    gitHash: process.env.BUILD_HASH,
+    status: report.status,
+    timestamp: report.timestamp,
+    dependencies: report.dependencies,
+    gitHash: report.gitHash,
   };
-  res.json(body);
+  res.status(report.status === "ok" ? 200 : 503).json(body);
 });
 
 app.get("/ready", async (_req: Request, res: Response) => {

@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import request from "supertest";
+import bcrypt from "bcrypt";
 import { requireAuth } from "../auth";
 import { ApiKeyScope, ScopeGroup } from "../../auth/apikeys";
 import { checkApiKeyScope } from "../rbac";
@@ -44,10 +45,14 @@ function makeApp(requiredScope?: number) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const dbRow = (overrides: Partial<{ permissions: number; is_active: boolean; expires_at: Date | null }> = {}) => ({
+const dbRow = (
+  overrides: Partial<{ permissions: number; is_active: boolean; expires_at: Date | null; key_hash: string }> = {},
+  key = "valid-key",
+) => ({
   permissions: ScopeGroup.READ_ONLY,
   is_active: true,
   expires_at: null,
+  key_hash: bcrypt.hashSync(key, 10),
   ...overrides,
 });
 
@@ -61,21 +66,21 @@ beforeEach(() => jest.clearAllMocks());
 
 describe("requireAuth – API key DB lookup", () => {
   it("grants access and attaches DB permissions for a valid active key", async () => {
-    mockDb(dbRow({ permissions: ScopeGroup.READ_ONLY }));
+    mockDb(dbRow({ permissions: ScopeGroup.READ_ONLY }, "valid-key"));
     const res = await request(makeApp()).get("/protected").set("X-API-Key", "valid-key");
     expect(res.status).toBe(200);
     expect(mockQueryRead).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an inactive key", async () => {
-    mockDb(dbRow({ is_active: false }));
+    mockDb(dbRow({ is_active: false }, "inactive-key"));
     const res = await request(makeApp()).get("/protected").set("X-API-Key", "inactive-key");
     expect(res.status).toBe(401);
     expect(res.body.message).toMatch(/inactive/i);
   });
 
   it("rejects an expired key", async () => {
-    mockDb(dbRow({ expires_at: new Date("2000-01-01") }));
+    mockDb(dbRow({ expires_at: new Date("2000-01-01") }, "expired-key"));
     const res = await request(makeApp()).get("/protected").set("X-API-Key", "expired-key");
     expect(res.status).toBe(401);
     expect(res.body.message).toMatch(/expired/i);
@@ -115,7 +120,7 @@ describe("requireAuth – API key DB lookup", () => {
 
 describe("requireAuth + checkApiKeyScope – scope enforcement", () => {
   it("allows request when key has the required scope bit", async () => {
-    mockDb(dbRow({ permissions: ApiKeyScope.TRANSACTIONS_READ }));
+    mockDb(dbRow({ permissions: ApiKeyScope.TRANSACTIONS_READ }, "read-key"));
     const app = makeApp(ApiKeyScope.TRANSACTIONS_READ);
     const res = await request(app).get("/protected").set("X-API-Key", "read-key");
     expect(res.status).toBe(200);
@@ -123,7 +128,7 @@ describe("requireAuth + checkApiKeyScope – scope enforcement", () => {
 
   it("blocks request when key lacks the required scope bit", async () => {
     // Key has only READ, but route needs ADMIN
-    mockDb(dbRow({ permissions: ScopeGroup.READ_ONLY }));
+    mockDb(dbRow({ permissions: ScopeGroup.READ_ONLY }, "read-only-key"));
     const app = makeApp(ApiKeyScope.ADMIN);
     const res = await request(app).get("/protected").set("X-API-Key", "read-only-key");
     expect(res.status).toBe(403);
@@ -132,7 +137,7 @@ describe("requireAuth + checkApiKeyScope – scope enforcement", () => {
 
   it("allows request with combined scopes when key has all required bits", async () => {
     const perms = ApiKeyScope.DEPOSITS_INITIATE | ApiKeyScope.DEPOSITS_READ;
-    mockDb(dbRow({ permissions: perms }));
+    mockDb(dbRow({ permissions: perms }, "deposit-key"));
     const app = makeApp(ApiKeyScope.DEPOSITS_INITIATE);
     const res = await request(app).get("/protected").set("X-API-Key", "deposit-key");
     expect(res.status).toBe(200);

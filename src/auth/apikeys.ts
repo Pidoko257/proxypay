@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import bcrypt from "bcrypt";
 
 // ─── Permission Scope Definitions ────────────────────────────────────────────
 
@@ -173,7 +174,11 @@ export interface TimeWindow {
 
 export interface ApiKey {
   /** The raw secret value (shown only once at creation) */
-  key: string;
+  key?: string;
+  /** First 8 characters of the API key */
+  keyPrefix: string;
+  /** Bcrypt hash (cost factor 12) of the API key */
+  keyHash: string;
   createdAt: Date;
   expiresAt: Date;
   isActive: boolean;
@@ -213,11 +218,13 @@ export interface ApiKey {
 
 // ─── Factory & Helpers ────────────────────────────────────────────────────────
 
-export function generateApiKey(): string {
-  return crypto.randomBytes(32).toString("hex");
+export function generateApiKey(env: string = process.env.NODE_ENV || "development"): string {
+  return `pk_${env}_${crypto.randomBytes(32).toString("hex")}`;
 }
 
 export interface CreateApiKeyOptions {
+  /** Environment tag for key generation (default: process.env.NODE_ENV || "development") */
+  env?: string;
   /** Bitmask OR named scope array – one must be supplied */
   permissions?: number;
   scopes?: ApiKeyScopeName[];
@@ -243,8 +250,14 @@ export function createApiKey(
   const permissions = resolvePermissions(options);
   const scopes = describeScopes(permissions);
 
+  const rawKey = generateApiKey(options.env);
+  const keyPrefix = rawKey.slice(0, 8);
+  const keyHash = bcrypt.hashSync(rawKey, 12);
+
   const newKey: ApiKey = {
-    key: generateApiKey(),
+    key: rawKey,
+    keyPrefix,
+    keyHash,
     createdAt: new Date(),
     expiresAt: new Date(
       Date.now() + (options.expiresInDays ?? 30) * 24 * 60 * 60 * 1000,
@@ -267,11 +280,21 @@ export function validateApiKey(
   key: string,
 ): ApiKey | null {
   if (!user.apiKeys) return null;
+  const prefix = key.slice(0, 8);
 
   return (
-    user.apiKeys.find(
-      (k) => k.key === key && k.isActive && new Date(k.expiresAt) > new Date(),
-    ) ?? null
+    user.apiKeys.find((k) => {
+      if (!k.isActive || new Date(k.expiresAt) <= new Date()) {
+        return false;
+      }
+      if (k.keyPrefix && k.keyPrefix !== prefix) {
+        return false;
+      }
+      if (k.keyHash) {
+        return bcrypt.compareSync(key, k.keyHash);
+      }
+      return k.key === key;
+    }) ?? null
   );
 }
 
@@ -349,11 +372,18 @@ export function validateTimeWindow(tw: TimeWindow): string | null {
 export function rotateApiKey(
   user: { apiKeys?: ApiKey[] },
   sourceKey?: ApiKey,
+  env?: string,
 ): ApiKey {
   if (!user.apiKeys) user.apiKeys = [];
 
+  const rawKey = generateApiKey(env);
+  const keyPrefix = rawKey.slice(0, 8);
+  const keyHash = bcrypt.hashSync(rawKey, 12);
+
   const newKey: ApiKey = {
-    key: generateApiKey(),
+    key: rawKey,
+    keyPrefix,
+    keyHash,
     createdAt: new Date(),
     expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     isActive: true,

@@ -5,6 +5,7 @@ import {
   WebhookDeliveryLog,
 } from "../models/merchantWebhook";
 import { SAMPLE_WEBHOOK_PAYLOAD } from "../routes/webhooks";
+import { matchesWebhookFilters } from "./webhookFilters";
 
 const model = new MerchantWebhookModel();
 
@@ -122,7 +123,8 @@ export class MerchantWebhookService {
 
   /**
    * Deliver a real event to all active webhooks for a user that subscribe to the event.
-   * Called by the transaction worker after status changes.
+   * Topic filters (amount_min, currency, provider, status) are checked with AND logic
+   * before queuing delivery. Subscriptions without filters still receive all events.
    */
   async dispatchEvent(
     userId: string,
@@ -130,7 +132,12 @@ export class MerchantWebhookService {
     payload: Record<string, unknown>,
   ): Promise<void> {
     const webhooks = await model.findByUserId(userId);
-    const active = webhooks.filter((w) => w.isActive && w.events.includes(eventType));
+    const active = webhooks.filter(
+      (w) =>
+        w.isActive &&
+        w.events.includes(eventType) &&
+        matchesWebhookFilters(w.filters, payload),
+    );
 
     await Promise.allSettled(
       active.map(async (webhook) => {

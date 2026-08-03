@@ -1,5 +1,7 @@
 import { queryRead, queryWrite } from "../config/database";
 import { encrypt, decrypt } from "../utils/encryption";
+import type { WebhookSubscriptionFilters } from "../services/webhookFilters";
+import { parseWebhookFilters } from "../services/webhookFilters";
 
 export interface MerchantWebhook {
   id: string;
@@ -8,6 +10,8 @@ export interface MerchantWebhook {
   secret: string;
   description?: string;
   events: string[];
+  /** Optional topic filters; null/undefined = deliver all subscribed events */
+  filters: WebhookSubscriptionFilters | null;
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -33,6 +37,7 @@ export interface CreateWebhookInput {
   secret: string;
   description?: string;
   events?: string[];
+  filters?: WebhookSubscriptionFilters | null;
 }
 
 export interface UpdateWebhookInput {
@@ -40,6 +45,7 @@ export interface UpdateWebhookInput {
   secret?: string;
   description?: string;
   events?: string[];
+  filters?: WebhookSubscriptionFilters | null;
   isActive?: boolean;
 }
 
@@ -60,6 +66,14 @@ function validateEvents(events: string[]): void {
   }
 }
 
+function normalizeFilters(
+  filters: WebhookSubscriptionFilters | null | undefined,
+): WebhookSubscriptionFilters | null {
+  // null clears filters; undefined is treated as "no filters" on create
+  if (filters === undefined || filters === null) return null;
+  return parseWebhookFilters(filters);
+}
+
 function mapRow(row: any): MerchantWebhook {
   return {
     id: row.id,
@@ -68,6 +82,7 @@ function mapRow(row: any): MerchantWebhook {
     secret: decrypt(row.secret) as string,
     description: row.description ?? undefined,
     events: row.events ?? [],
+    filters: (row.filters as WebhookSubscriptionFilters | null) ?? null,
     isActive: row.is_active,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
@@ -94,6 +109,7 @@ export class MerchantWebhookModel {
   async create(input: CreateWebhookInput): Promise<MerchantWebhook> {
     const events = input.events ?? ["transaction.completed", "transaction.failed"];
     validateEvents(events);
+    const filters = normalizeFilters(input.filters);
 
     // Enforce per-user limit
     const countRes = await queryRead(
@@ -105,10 +121,17 @@ export class MerchantWebhookModel {
     }
 
     const res = await queryWrite(
-      `INSERT INTO merchant_webhooks (user_id, url, secret, description, events)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO merchant_webhooks (user_id, url, secret, description, events, filters)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [input.userId, input.url, encrypt(input.secret), input.description ?? null, events],
+      [
+        input.userId,
+        input.url,
+        encrypt(input.secret),
+        input.description ?? null,
+        events,
+        filters ? JSON.stringify(filters) : null,
+      ],
     );
     return mapRow(res.rows[0]);
   }
@@ -143,6 +166,11 @@ export class MerchantWebhookModel {
     if (input.secret !== undefined)      { fields.push(`secret = $${idx++}`);      params.push(encrypt(input.secret)); }
     if (input.description !== undefined) { fields.push(`description = $${idx++}`); params.push(input.description); }
     if (input.events !== undefined)      { fields.push(`events = $${idx++}`);      params.push(input.events); }
+    if (input.filters !== undefined) {
+      const filters = normalizeFilters(input.filters);
+      fields.push(`filters = $${idx++}`);
+      params.push(filters ? JSON.stringify(filters) : null);
+    }
     if (input.isActive !== undefined)    { fields.push(`is_active = $${idx++}`);   params.push(input.isActive); }
 
     if (fields.length === 0) return this.findById(id, userId);

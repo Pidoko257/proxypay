@@ -6,18 +6,23 @@
  *
  * Routes:
  *   GET    /api/merchant/webhooks                        — list webhooks
- *   POST   /api/merchant/webhooks                        — create webhook
+ *   POST   /api/merchant/webhooks                        — create webhook (optional filters)
  *   GET    /api/merchant/webhooks/:id                    — get single webhook
- *   PATCH  /api/merchant/webhooks/:id                    — update webhook
+ *   PATCH  /api/merchant/webhooks/:id                    — update webhook (optional filters)
  *   DELETE /api/merchant/webhooks/:id                    — delete webhook
  *   POST   /api/merchant/webhooks/:id/test               — send test delivery
  *   GET    /api/merchant/webhooks/:id/deliveries         — delivery history
+ *
+ * Optional `filters` JSON on create/update (AND logic):
+ *   { "amount_min": 100, "currency": "USD", "provider": "mtn", "status": "completed" }
+ * Omit or null filters → receive all events of the subscribed type.
  */
 
 import { Router, Request, Response } from "express";
 import { requireAuth } from "../middleware/auth";
 import { MerchantWebhookModel, CreateWebhookInput, UpdateWebhookInput } from "../models/merchantWebhook";
 import { MerchantWebhookService } from "../services/merchantWebhookService";
+import { parseWebhookFilters } from "../services/webhookFilters";
 
 const router = Router();
 const webhookModel = new MerchantWebhookModel();
@@ -53,6 +58,15 @@ function validateCreateBody(body: unknown): { data: CreateWebhookInput; error?: 
     return { error: "description must be a string" };
   }
 
+  let filters = undefined as CreateWebhookInput["filters"];
+  if (b.filters !== undefined) {
+    try {
+      filters = parseWebhookFilters(b.filters);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Invalid filters" };
+    }
+  }
+
   return {
     data: {
       userId: "", // filled in by route handler
@@ -60,6 +74,7 @@ function validateCreateBody(body: unknown): { data: CreateWebhookInput; error?: 
       secret: b.secret,
       description: typeof b.description === "string" ? b.description : undefined,
       events: Array.isArray(b.events) ? (b.events as string[]) : undefined,
+      filters,
     },
   };
 }
@@ -96,7 +111,13 @@ router.post("/", async (req: Request, res: Response) => {
     return res.status(201).json({ webhook: safe });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Internal server error";
-    const status = msg.startsWith("Maximum") || msg.startsWith("Unknown event") ? 400 : 500;
+    const status =
+      msg.startsWith("Maximum") ||
+      msg.startsWith("Unknown event") ||
+      msg.startsWith("filters") ||
+      msg.startsWith("Unknown filter")
+        ? 400
+        : 500;
     return res.status(status).json({ error: msg });
   }
 });
@@ -147,6 +168,16 @@ router.patch("/:id", async (req: Request, res: Response) => {
     if (!Array.isArray(b.events)) return res.status(400).json({ error: "events must be an array" });
     input.events = b.events as string[];
   }
+  if (b.filters !== undefined) {
+    try {
+      // Allow null to clear filters
+      input.filters = b.filters === null ? null : parseWebhookFilters(b.filters);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : "Invalid filters",
+      });
+    }
+  }
   if (b.is_active !== undefined) {
     if (typeof b.is_active !== "boolean") return res.status(400).json({ error: "is_active must be a boolean" });
     input.isActive = b.is_active;
@@ -159,7 +190,12 @@ router.patch("/:id", async (req: Request, res: Response) => {
     return res.json({ webhook: safe });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Internal server error";
-    const status = msg.startsWith("Unknown event") ? 400 : 500;
+    const status =
+      msg.startsWith("Unknown event") ||
+      msg.startsWith("filters") ||
+      msg.startsWith("Unknown filter")
+        ? 400
+        : 500;
     return res.status(status).json({ error: msg });
   }
 });

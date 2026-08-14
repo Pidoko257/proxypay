@@ -22,6 +22,8 @@ export enum SubscriptionChannels {
   DISPUTE_NOTE_ADDED     = "dispute.note_added",
 
   BULK_IMPORT_JOB_UPDATED = "bulk_import_job.updated",
+
+  EXCHANGE_RATE_UPDATED  = "exchange_rate.updated",
 }
 
 /**
@@ -119,3 +121,10 @@ export type TypedPubSub = PubSub & {
   asyncIterator<T>(eventPaths: string | string[]): AsyncIterableIterator<T>;
   publish<T>(eventPath: string, payload: T): Promise<void>;
 };
+
+export interface ExchangeRateUpdatedPayload {
+  currency: string;
+  rate: string;
+  previousRate?: string;
+  updatedAt: string;
+}

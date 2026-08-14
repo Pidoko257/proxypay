@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { withFilter } from "graphql-subscriptions";
 import {
   SubscriptionChannels,
@@ -8,6 +9,7 @@ import {
   type DisputeUpdatedPayload,
   type DisputeNoteAddedPayload,
   type BulkImportJobUpdatedPayload,
+  type ExchangeRateUpdatedPayload,
   type TypedPubSub,
 } from "./subscriptions";
 
@@ -225,6 +227,30 @@ export function createSubscriptionResolvers(pubsub: TypedPubSub) {
         ),
         resolve: (payload: BulkImportJobUpdatedPayload) =>
           formatBulkImportJobPayload(payload),
+      },
+
+      // ── exchangeRateUpdated ─────────────────────────────────────────────
+      exchangeRateUpdated: {
+        subscribe: withFilter(
+          (_parent: unknown, _args: unknown, context: any) => {
+            if (!context?.auth?.authenticated) {
+              throw new Error("UNAUTHENTICATED: valid authToken required");
+            }
+            return pubsub.asyncIterator<ExchangeRateUpdatedPayload>(
+              SubscriptionChannels.EXCHANGE_RATE_UPDATED,
+            );
+          },
+          (payload: ExchangeRateUpdatedPayload, variables: any) => {
+            if (!variables?.currency) return true;
+            return payload?.currency === variables.currency;
+          },
+        ),
+        resolve: (payload: ExchangeRateUpdatedPayload) => ({
+          currency: payload.currency,
+          rate: payload.rate,
+          previousRate: payload.previousRate ?? null,
+          updatedAt: payload.updatedAt,
+        }),
       },
     },
   };

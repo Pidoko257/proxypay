@@ -464,3 +464,126 @@ authRoutes.get(
     }
   },
 );
+
+// ─── Issue #166: Enhanced token rotation + device tracking ──────────────────
+import {
+  rotateRefreshToken,
+  listActiveSessions,
+  logoutSession,
+  logoutAllSessions,
+  recordInitialDeviceInfo,
+} from "../services/refreshTokenService";
+
+/**
+ * POST /api/auth/refresh/v2
+ *
+ * Enhanced refresh token rotation with device tracking.
+ * Accepts an optional `deviceId`, `deviceName` in the request body
+ * (or derives them from User-Agent / IP automatically).
+ */
+authRoutes.post("/refresh/v2", async (req: Request, res: Response) => {
+  const { refreshToken: token, deviceId, deviceName } = req.body;
+  if (!token) {
+    throw createError(ERROR_CODES.MISSING_FIELD, "refreshToken is required", {
+      error: "refreshToken is required",
+    });
+  }
+
+  try {
+    const result = await rotateRefreshToken(token, {
+      deviceId,
+      deviceName,
+      ipAddress: req.ip ?? undefined,
+      userAgent: req.headers["user-agent"],
+    });
+
+    res.json({
+      message: "Token rotation successful",
+      token: result.accessToken,
+      refreshToken: result.refreshToken,
+      expiresAt: result.expiresAt.toISOString(),
+      deviceId: result.deviceId,
+    });
+  } catch (error) {
+    throw createError(
+      ERROR_CODES.UNAUTHORIZED,
+      error instanceof Error ? error.message : "Token rotation failed",
+      { error: "Refresh failed" },
+    );
+  }
+});
+
+/**
+ * GET /api/auth/sessions
+ *
+ * List all active sessions (devices) for the authenticated user.
+ * Requires valid JWT in Authorization header.
+ */
+authRoutes.get(
+  "/sessions",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const userId = req.jwtUser!.userId;
+    try {
+      const sessions = await listActiveSessions(userId);
+      res.json({ sessions });
+    } catch (error) {
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch sessions",
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+    }
+  },
+);
+
+/**
+ * DELETE /api/auth/sessions/:familyId
+ *
+ * Logout a specific session (device) by revoking its token family.
+ */
+authRoutes.delete(
+  "/sessions/:familyId",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const userId = req.jwtUser!.userId;
+    const { familyId } = req.params;
+    try {
+      await logoutSession(userId, familyId);
+      res.json({ message: "Session logged out successfully" });
+    } catch (error) {
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to logout session",
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+    }
+  },
+);
+
+/**
+ * DELETE /api/auth/sessions
+ *
+ * Logout ALL sessions for the authenticated user.
+ * Use after a password change or suspected account compromise.
+ */
+authRoutes.delete(
+  "/sessions",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const userId = req.jwtUser!.userId;
+    try {
+      const revokedCount = await logoutAllSessions(userId);
+      res.json({
+        message: `Logged out from ${revokedCount} session(s)`,
+        revokedCount,
+      });
+    } catch (error) {
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to logout all sessions",
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+    }
+  },
+);

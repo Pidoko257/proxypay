@@ -92,6 +92,7 @@ import exchangeRateBufferRoutes from "./routes/exchangeRateBuffers";
 import adminAssetRoutes from "./routes/admin/assets";
 import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
+import subscriptionsRoutes from "./routes/subscriptions";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import providerHealthRouter from "./routes/providerHealthRoutes";
@@ -472,6 +473,7 @@ app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/statements", statementsRoutes);
+app.use("/api/subscriptions", subscriptionsRoutes);
 app.use("/", paymentLinkRoutes);
 
 // GDPR

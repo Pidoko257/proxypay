@@ -59,6 +59,21 @@ export const providerResponseTimeSummary = new Summary({
   registers: [register],
 });
 
+// Provider rate limit header tracking
+export const providerRateLimitState = new Gauge({
+  name: "provider_rate_limit_remaining",
+  help: "Remaining provider API quota as advertised via X-RateLimit-* headers",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+export const providerRateLimitHitsTotal = new Counter({
+  name: "provider_rate_limit_hits_total",
+  help: "Number of outbound provider requests throttled based on rate limit headers",
+  labelNames: ["provider", "reason"],
+  registers: [register],
+});
+
 // Failover metrics
 export const providerFailoverTotal = new Counter({
   name: "provider_failover_total",

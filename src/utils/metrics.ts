@@ -219,6 +219,12 @@ export const dbPoolConfig = new Gauge({
   registers: [register],
 });
 
+export const dbDrMode = new Gauge({
+  name: "db_dr_mode",
+  help: "Disaster recovery mode indicator (1 = failover active, 0 = standby/normal)",
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics

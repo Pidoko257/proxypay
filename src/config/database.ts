@@ -12,6 +12,7 @@ import {
   dbPoolWaitingConnections,
   dbPoolMaxConnections,
   dbPoolConfig,
+  dbDrMode,
 } from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 

@@ -59,6 +59,21 @@ export const providerResponseTimeSummary = new Summary({
   registers: [register],
 });
 
+// Provider rate limit header tracking
+export const providerRateLimitState = new Gauge({
+  name: "provider_rate_limit_remaining",
+  help: "Remaining provider API quota as advertised via X-RateLimit-* headers",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+export const providerRateLimitHitsTotal = new Counter({
+  name: "provider_rate_limit_hits_total",
+  help: "Number of outbound provider requests throttled based on rate limit headers",
+  labelNames: ["provider", "reason"],
+  registers: [register],
+});
+
 // Failover metrics
 export const providerFailoverTotal = new Counter({
   name: "provider_failover_total",
@@ -173,6 +188,55 @@ export const dbReplicaReadEnabled = new Gauge({
 export const dbReplicaFailoversTotal = new Counter({
   name: "db_replica_failovers_total",
   help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
+// Connection Pool Utilization Metrics
+export const dbPoolUtilization = new Gauge({
+  name: "db_pool_utilization",
+  help: "Fraction of the connection pool currently in use (0–1)",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolTotalConnections = new Gauge({
+  name: "db_pool_total_connections",
+  help: "Total number of connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolIdleConnections = new Gauge({
+  name: "db_pool_idle_connections",
+  help: "Number of idle connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolWaitingConnections = new Gauge({
+  name: "db_pool_waiting_connections",
+  help: "Number of queries waiting for a free connection from the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolMaxConnections = new Gauge({
+  name: "db_pool_max_connections",
+  help: "Configured maximum number of connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolConfig = new Gauge({
+  name: "db_pool_config",
+  help: "Configured connection pool parameters (idle timeout, connection timeout, min)",
+  labelNames: ["pool", "role", "param"],
+  registers: [register],
+});
+
+export const dbDrMode = new Gauge({
+  name: "db_dr_mode",
+  help: "Disaster recovery mode indicator (1 = failover active, 0 = standby/normal)",
   registers: [register],
 });
 
@@ -372,5 +436,13 @@ export const webhookBackoffDelaySeconds = new Histogram({
   help: "Backoff delay applied between webhook retry attempts in seconds",
   labelNames: ["event_type", "attempt"],
   buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
+  registers: [register],
+});
+
+// Deprecated API Endpoint Usage Metrics (#393)
+export const deprecatedEndpointRequestsTotal = new Counter({
+  name: "deprecated_endpoint_requests_total",
+  help: "Total number of requests to deprecated API endpoints",
+  labelNames: ["method", "route", "replacement", "sunset"],
   registers: [register],
 });

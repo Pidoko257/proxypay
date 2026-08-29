@@ -19,6 +19,9 @@ import {
   validateVersionMiddleware,
   VersionedRequest,
 } from "./middleware/apiVersion";
+import { deprecationMiddleware } from "./middleware/deprecation";
+import { seedDeprecations } from "./middleware/deprecationSeed";
+import { adminDeprecationRoutes } from "./routes/admin/deprecations";
 import {
   bulkRoutesV1,
   disputeRoutesV1,
@@ -100,22 +103,24 @@ import exchangeRateBufferRoutes from "./routes/exchangeRateBuffers";
 import adminAssetRoutes from "./routes/admin/assets";
 import settingsRoutes from "./routes/settings";
 import { statementsRoutes } from "./routes/statements";
+import subscriptionsRoutes from "./routes/subscriptions";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import providerHealthRouter from "./routes/providerHealthRoutes";
 import kycWebhookRouter from "./routes/kycWebhookRoutes";
 import twoFactorRouter from "./routes/twoFactorRoutes";
-import transactionMetadataRouter from "./routes/transactionMetadataRoutes";
+import { transactionMetadataRouter } from "./routes/transactionMetadataRoutes";
 import healthProvidersRouter from "./routes/healthProviders";
 import adminReplicasRouter from "./routes/adminReplicas";
 import connectionDashboardRouter from "./routes/connectionDashboard";
 import { transactionStreamRoutes } from "./routes/stream";
-import { receiptTemplateRoutes } from "./routes/receiptTemplates";
+import { batchOperationRoutes } from "./routes/batchOperations";
 import {
   startHeartbeatService,
   stopHeartbeatService,
 } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { slidingWindowRateLimit } from "./middleware/slidingWindowRateLimit";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -432,8 +437,9 @@ app.use(haltOnTimedout);
 
 app.use(apiVersionMiddleware);
 app.use(validateVersionMiddleware);
+// #393 – Add Deprecation / Sunset / Link headers to registered legacy endpoints
+app.use(deprecationMiddleware);
 app.use("/oauth", createOAuthRouter());
-app.use("/api/auth", authRoutes);
 
 // Replay retried mutations instead of processing them twice (Idempotency-Key)
 app.use("/api/v1/transactions", idempotency());
@@ -492,6 +498,7 @@ app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/statements", statementsRoutes);
+app.use("/api/subscriptions", subscriptionsRoutes);
 app.use("/", paymentLinkRoutes);
 
 // GDPR
@@ -501,6 +508,8 @@ app.use("/api/admin", requireAuth, adminRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 // #405 – Provider Health Dashboard
 app.use("/api/admin/providers/health", requireAuth, providerHealthRouter);
+// #393 – Deprecation timeline & usage monitoring
+app.use("/api/admin/deprecations", requireAuth, adminDeprecationRoutes);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
 app.use("/api/admin/analytics", requireAuth, analyticsRouter);
 app.use("/api/admin/auth", createAdminSep10Router());
@@ -512,6 +521,8 @@ app.use("/api/transactions/metadata", transactionMetadataRouter);
 app.use("/api/fraud", fraudRoutes);
 // #404 – 2FA Multi-method
 app.use("/api/auth/2fa", twoFactorRouter);
+// #392 – Batch Import Status Tracking
+app.use("/api/batch-operations", batchOperationRoutes);
 // #358 – Provider Health Aggregation
 app.use("/api/health", healthProvidersRouter);
 // #356 – Read Replica Health Admin
@@ -655,6 +666,9 @@ async function initializeRuntime(): Promise<void> {
   if (process.env.NODE_ENV === "test") {
     return;
   }
+
+  // #393 – Populate the deprecation registry with legacy endpoint notices.
+  seedDeprecations();
 
   // Initialize background jobs and monitoring
   const { startJobs } = await import("./jobs/scheduler.js");

@@ -115,6 +115,7 @@
     "geoip-lite": "^2.0.1",
     "graphql": "^16.13.2",
     "graphql-depth-limit": "^1.1.0",
+    "handlebars": "^4.7.9",
     "graphql-query-complexity": "^1.1.0",
     "graphql-redis-subscriptions": "^2.6.1",
     "graphql-subscriptions": "^3.0.0",

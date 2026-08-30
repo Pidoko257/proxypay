@@ -38,7 +38,7 @@ describe("ProviderPerformanceService (#371)", () => {
 
   beforeEach(() => {
     service = new ProviderPerformanceService();
-    jest.clearAllMocks();
+    mockPool.query.mockReset();
   });
 
   afterEach(() => {

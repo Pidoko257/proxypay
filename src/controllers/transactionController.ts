@@ -498,6 +498,7 @@ async function processTransactionRequest(
     const limitCheck = await transactionLimitService.checkTransactionLimit(
       userId,
       requestAmount,
+      provider,
     );
 
     if (!limitCheck.allowed) {

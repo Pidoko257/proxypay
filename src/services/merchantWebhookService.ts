@@ -4,6 +4,7 @@ import {
   MerchantWebhook,
   WebhookDeliveryLog,
 } from "../models/merchantWebhook";
+import { capturePersistentFailure } from "../queue/dlq";
 import { SAMPLE_WEBHOOK_PAYLOAD } from "../routes/webhooks";
 import {
   checkWebhookRateLimit,
@@ -112,6 +113,14 @@ async function deliverWithRetry(
     jitterFactor?: number;
     backoffMultiplier?: number;
     retryableStatusCodes?: number[];
+    dlq?: {
+      originalJobId?: string;
+      queueName?: string;
+      jobName?: string;
+      userId?: string;
+      webhookId?: string;
+      eventType?: string;
+    };
   } = {},
 ): Promise<DeliveryResult> {
   const body = JSON.stringify(payload);
@@ -122,10 +131,50 @@ async function deliverWithRetry(
   const jitterFactor = options.jitterFactor ?? DEFAULT_JITTER_FACTOR;
   const backoffMultiplier = options.backoffMultiplier ?? DEFAULT_BACKOFF_MULTIPLIER;
   const retryableStatusCodes = options.retryableStatusCodes ?? DEFAULT_RETRYABLE_STATUS_CODES;
+  const dlqContext = options.dlq ?? {};
 
   let lastError: string | null = null;
   let lastStatusCode: number | undefined;
   let totalDurationMs = 0;
+
+  const finalizeFailure = async (
+    errorMessage: string,
+    statusCode?: number,
+    attemptsMade = maxAttempts,
+    durationMs = totalDurationMs,
+  ): Promise<DeliveryResult> => {
+    const finalFailureReason = errorMessage || `Webhook delivery failed after ${maxAttempts} attempts`;
+
+    await Promise.resolve(
+      capturePersistentFailure({
+        originalJobId: dlqContext.originalJobId ?? url,
+        queueName: dlqContext.queueName ?? "merchant-webhooks",
+        jobName: dlqContext.jobName ?? "deliver-webhook",
+        jobData: {
+          url,
+          webhookId: dlqContext.webhookId,
+          userId: dlqContext.userId,
+          eventType: dlqContext.eventType,
+          payload,
+          attemptsMade,
+          lastStatusCode: statusCode,
+          errorMessage: finalFailureReason,
+        },
+        failureReason: finalFailureReason,
+        attemptsMade,
+      }),
+    ).catch((err) => {
+      console.warn("[MerchantWebhookService] failed to persist webhook delivery to DLQ", err);
+    });
+
+    return {
+      status: "failed",
+      httpStatus: statusCode,
+      errorMessage: finalFailureReason,
+      durationMs,
+      attempts: attemptsMade,
+    };
+  };
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const start = Date.now();
@@ -185,14 +234,12 @@ async function deliverWithRetry(
         continue;
       }
 
-      return {
-        status: "failed",
-        httpStatus: response.status,
-        responseBody,
-        errorMessage: lastError,
-        durationMs: totalDurationMs,
-        attempts: attempt + 1,
-      };
+      return await finalizeFailure(
+        lastError ?? `HTTP ${response.status}`,
+        response.status,
+        attempt + 1,
+        totalDurationMs,
+      );
     } catch (err: unknown) {
       const durationMs = Date.now() - start;
       totalDurationMs += durationMs;
@@ -220,23 +267,21 @@ async function deliverWithRetry(
         continue;
       }
 
-      return {
-        status: "failed",
+      return await finalizeFailure(
         errorMessage,
-        durationMs: totalDurationMs,
-        attempts: attempt + 1,
-      };
+        undefined,
+        attempt + 1,
+        totalDurationMs,
+      );
     }
   }
 
-  // Should not reach here, but just in case
-  return {
-    status: "failed",
-    httpStatus: lastStatusCode,
-    errorMessage: lastError,
-    durationMs: totalDurationMs,
-    attempts: maxAttempts,
-  };
+  return await finalizeFailure(
+    lastError ?? `Webhook delivery failed after ${maxAttempts} attempts`,
+    lastStatusCode,
+    maxAttempts,
+    totalDurationMs,
+  );
 }
 
 export interface MerchantWebhookServiceOptions {
@@ -303,6 +348,14 @@ export class MerchantWebhookService {
         jitterFactor: this.jitterFactor,
         backoffMultiplier: this.backoffMultiplier,
         retryableStatusCodes: this.retryableStatusCodes,
+        dlq: {
+          originalJobId: webhook.id,
+          queueName: "merchant-webhooks",
+          jobName: "deliver-webhook",
+          userId,
+          webhookId: webhook.id,
+          eventType: "transaction.completed",
+        },
       },
     );
 
@@ -362,6 +415,14 @@ export class MerchantWebhookService {
             jitterFactor: this.jitterFactor,
             backoffMultiplier: this.backoffMultiplier,
             retryableStatusCodes: this.retryableStatusCodes,
+            dlq: {
+              originalJobId: webhook.id,
+              queueName: "merchant-webhooks",
+              jobName: "deliver-webhook",
+              userId,
+              webhookId: webhook.id,
+              eventType,
+            },
           },
         );
 

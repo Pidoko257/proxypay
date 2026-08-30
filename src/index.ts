@@ -529,6 +529,7 @@ app.use("/api/health", healthProvidersRouter);
 app.use("/api/admin/replicas", requireAuth, adminReplicasRouter);
 // #355 – Connection Pool Dashboard
 app.use("/api/admin/connections", requireAuth, connectionDashboardRouter);
+app.use("/api/receipt-templates", receiptTemplateRoutes);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);

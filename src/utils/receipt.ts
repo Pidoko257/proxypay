@@ -21,10 +21,50 @@ export interface ReceiptTransaction {
   currency?: string;
 }
 
+export interface ReceiptBrandingView {
+  businessName?: string;
+  logoUrl?: string;
+  primaryColor?: string;
+  accentColor?: string;
+  footerText?: string;
+  address?: string;
+  phoneNumber?: string;
+  website?: string;
+  [key: string]: unknown;
+}
+
 export interface ReceiptOptions {
   generatedAt?: ReceiptDateInput;
   receiptNumber?: string;
+  branding?: ReceiptBrandingView;
 }
+
+export interface ReceiptViewModel {
+  receiptNumber: string;
+  receiptDate: string;
+  amount: string;
+  fee: string;
+  total: string;
+  provider: string;
+  status: string;
+  sender: string;
+  receiver: string;
+  transactionId: string;
+  referenceNumber?: string;
+  transactionHash?: string;
+  branding: Record<string, unknown>;
+  transaction: Record<string, unknown>;
+  receipt: Record<string, unknown>;
+  amountRaw: number;
+  feeRaw: number;
+  totalRaw: number;
+  currency: string;
+  createdDate: string;
+  year: number;
+  locale: string;
+}
+
+export interface GenerateReceiptHtmlOptions extends ReceiptOptions {}
 
 const RECEIPT_COUNTERS = new Map<string, number>();
 
@@ -136,6 +176,16 @@ function buildReceiptViewModel(
     transactionId: transaction.id,
     referenceNumber: transaction.referenceNumber,
     transactionHash: transaction.transactionHash,
+    branding: options.branding ?? {},
+    transaction: {},
+    receipt: {},
+    amountRaw: amountValue,
+    feeRaw: feeValue,
+    totalRaw: totalValue,
+    currency,
+    createdDate: formatDate(generatedAt),
+    year: generatedAt.getFullYear(),
+    locale: "en",
   };
 }
 
@@ -211,25 +261,93 @@ export function generateReceipt(
 }
 
 /**
- * Generates an HTML receipt for email delivery.
+ * Generates a plain-text transaction receipt from a pre-built view model.
+ * Used both by the built-in path and as the plain-text fallback for
+ * custom Handlebars receipts.
  *
  * @example
- * const html = generateReceiptHtml(transaction);
+ * const text = generatePlainTextReceipt(viewModel, branding);
+ */
+export function generatePlainTextReceipt(
+  receipt: ReceiptViewModel,
+  branding: ReceiptBrandingView = {},
+): string {
+  const lines = [
+    "========================================",
+    "        TRANSACTION RECEIPT",
+    "========================================",
+  ];
+
+  const businessName = branding.businessName || "Mobile Money";
+  if (businessName) lines.push(businessName);
+
+  lines.push(
+    `Receipt No: ${receipt.receiptNumber}`,
+    `Date: ${receipt.receiptDate}`,
+    "",
+    "Transaction Details:",
+    `- Amount: ${receipt.amount}`,
+    `- Fee: ${receipt.fee}`,
+    `- Total: ${receipt.total}`,
+    `- Provider: ${receipt.provider}`,
+    `- Status: ${receipt.status}`,
+    "",
+    `From: ${receipt.sender}`,
+    `To: ${receipt.receiver}`,
+    "",
+    `Transaction ID: ${receipt.transactionId}`,
+  );
+
+  if (receipt.referenceNumber) {
+    lines.push(`Reference No: ${receipt.referenceNumber}`);
+  }
+
+  if (receipt.transactionHash) {
+    lines.push(`Stellar Hash: ${receipt.transactionHash}`);
+  }
+
+  lines.push(
+    "",
+    branding.footerText || "Thank you for using our service!",
+    "========================================",
+  );
+
+  return lines.join("\n");
+}
+
+/**
+ * Generates an HTML receipt for email delivery. Supports business branding
+ * (logo, business name, primary color) passed through ReceiptOptions.branding.
+ *
+ * @example
+ * const html = generateReceiptHtml(transaction, { branding: { businessName: "Acme", logoUrl: "...", primaryColor: "#123456" } });
  */
 export function generateReceiptHtml(
   transaction: ReceiptTransaction,
-  options: ReceiptOptions = {},
+  options: GenerateReceiptHtmlOptions = {},
 ): string {
   const receipt = buildReceiptViewModel(transaction, options);
+  const branding = options.branding ?? {};
+  const businessName = branding.businessName || "Mobile Money";
+  const primaryColor = branding.primaryColor || "#0f172a";
+  const headerFg =
+    primaryColor === "#ffffff" || isLightColor(primaryColor) ? "#0f172a" : "#ffffff";
+  const logoUrl = branding.logoUrl;
+
+  const logo = logoUrl
+    ? `<img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(businessName)}" style="max-height:60px;max-width:200px;margin-bottom:12px;display:block;" />`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
   <body style="margin:0;padding:24px;background:#f5f7fb;font-family:Arial,sans-serif;color:#0f172a;">
     <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #dbe4f0;border-radius:12px;overflow:hidden;">
-      <div style="padding:24px;border-bottom:1px solid #dbe4f0;">
-        <p style="margin:0 0 8px;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:#64748b;">Transaction Receipt</p>
-        <h1 style="margin:0;font-size:24px;">${escapeHtml(receipt.receiptNumber)}</h1>
-        <p style="margin:8px 0 0;color:#475569;">${escapeHtml(receipt.receiptDate)}</p>
+      <div style="padding:24px;background:${primaryColor};color:${headerFg};">
+        ${logo}
+        <p style="margin:0 0 8px;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.8;">${escapeHtml(businessName)}</p>
+        <h1 style="margin:0;font-size:24px;">Transaction Receipt</h1>
+        <p style="margin:8px 0 0;opacity:0.8;">${escapeHtml(receipt.receiptNumber)}</p>
+        <p style="margin:4px 0 0;opacity:0.8;">${escapeHtml(receipt.receiptDate)}</p>
       </div>
       <div style="padding:24px;">
         <h2 style="margin:0 0 12px;font-size:16px;">Transaction Details</h2>
@@ -253,8 +371,18 @@ export function generateReceiptHtml(
               : ""
           }
         </table>
+        <p style="margin:20px 0 0;color:#64748b;font-size:13px;">${escapeHtml(branding.footerText || "Thank you for using our service!")}</p>
       </div>
     </div>
   </body>
 </html>`;
+}
+
+function isLightColor(hex: string): boolean {
+  const match = hex.replace("#", "");
+  if (match.length !== 6) return false;
+  const r = parseInt(match.slice(0, 2), 16);
+  const g = parseInt(match.slice(2, 4), 16);
+  const b = parseInt(match.slice(4, 6), 16);
+  return 0.299 * r + 0.587 * g + 0.114 * b > 186;
 }

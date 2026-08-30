@@ -84,4 +84,22 @@ describe("receipt utilities", () => {
     expect(html).toContain("GBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX");
     expect(html).toContain("MTN &lt;strong&gt;Mobile&lt;/strong&gt; Money");
   });
+
+  it("renders HTML receipt with business branding (logo, name, color)", () => {
+    const html = generateReceiptHtml(baseTransaction, {
+      generatedAt: "2026-03-27T10:30:00Z",
+      receiptNumber: "RCP-20260327-00001",
+      branding: {
+        businessName: "Acme Coffee",
+        logoUrl: "https://example.com/acme-logo.png",
+        primaryColor: "#123456",
+        footerText: "Thanks for your business!",
+      },
+    });
+
+    expect(html).toContain("Acme Coffee");
+    expect(html).toContain("https://example.com/acme-logo.png");
+    expect(html).toContain("#123456");
+    expect(html).toContain("Thanks for your business!");
+  });
 });

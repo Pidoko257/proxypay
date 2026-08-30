@@ -2208,6 +2208,87 @@ router.get(
   },
 );
 
+router.get("/financial/dashboard/manifest.json", requireAdmin, (_req: Request, res: Response) => {
+  res.json({
+    name: "ProxyPay Financial Dashboard",
+    short_name: "ProxyPay",
+    description: "Mobile-friendly financial dashboard with offline cached transaction insights.",
+    start_url: "/api/admin/financial/dashboard",
+    display: "standalone",
+    background_color: "#020817",
+    theme_color: "#0f172a",
+    orientation: "portrait-primary",
+    scope: "/api/admin/financial/dashboard/",
+    icons: [
+      {
+        src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Crect width='128' height='128' rx='24' fill='%230f172a'/%3E%3Cpath d='M26 90h76V38H68l-10 10H26v42zm18-28h40v8H44v-8zm0 18h26v8H44v-8z' fill='%2360a5fa'/%3E%3C/svg%3E",
+        sizes: "128x128",
+        type: "image/svg+xml",
+        purpose: "any maskable",
+      },
+    ],
+  });
+});
+
+router.get("/financial/dashboard/sw.js", requireAdmin, (_req: Request, res: Response) => {
+  res.type("application/javascript");
+  res.send(`const CACHE_NAME = 'proxypay-financial-dashboard-v1';
+const APP_SHELL = [
+  '/api/admin/financial/dashboard',
+  '/api/admin/financial/dashboard/manifest.json',
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()),
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(
+      keys
+        .filter((key) => key !== CACHE_NAME)
+        .map((key) => caches.delete(key)),
+    )).then(() => self.clients.claim()),
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
+
+  const url = new URL(event.request.url);
+  const isDashboard = url.pathname === '/api/admin/financial/dashboard';
+  const isPnl = url.pathname === '/api/admin/financial/pnl';
+  const isTransactions = url.pathname === '/api/admin/transactions';
+
+  if (isDashboard || isPnl || isTransactions) {
+    event.respondWith(
+      caches.open(CACHE_NAME).then(async (cache) => {
+        try {
+          const networkResponse = await fetch(event.request);
+          if (networkResponse.ok) {
+            cache.put(event.request, networkResponse.clone());
+          }
+          return networkResponse;
+        } catch (error) {
+          const cachedResponse = await cache.match(event.request);
+          if (cachedResponse) return cachedResponse;
+          return cache.match('/api/admin/financial/dashboard');
+        }
+      }),
+    );
+    return;
+  }
+
+  if (url.origin === self.location.origin) {
+    event.respondWith(
+      caches.match(event.request).then((cached) => cached || fetch(event.request)),
+    );
+  }
+});`);
+});
+
 // GET /api/admin/financial/dashboard - self-contained HTML dashboard
 router.get(
   "/financial/dashboard",
@@ -2218,71 +2299,180 @@ router.get(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Financial Dashboard</title>
+<link rel="manifest" href="/api/admin/financial/dashboard/manifest.json">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px}
-  h1{font-size:1.4rem;font-weight:600;margin-bottom:20px;color:#f8fafc}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px}
-  .card{background:#1e293b;border-radius:10px;padding:20px}
-  .card .label{font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
-  .card .value{font-size:1.6rem;font-weight:700}
+  body{font-family:system-ui,sans-serif;background:#020817;color:#e2e8f0;padding:24px}
+  .app-shell{max-width:1100px;margin:0 auto;padding-bottom:64px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+  h1{font-size:clamp(1.3rem,2vw,1.8rem);font-weight:700;color:#f8fafc}
+  .install-button{background:#2563eb;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-weight:600;cursor:pointer;display:none}
+  .install-button.visible{display:inline-flex}
+  .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:28px}
+  .card{background:#111827;border-radius:12px;padding:18px;border:1px solid rgba(148,163,184,.15);box-shadow:0 10px 30px rgba(15,23,42,.18)}
+  .card .label{font-size:.72rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+  .card .value{font-size:clamp(1.2rem,2vw,1.8rem);font-weight:700}
   .green{color:#34d399}.red{color:#f87171}.blue{color:#60a5fa}
-  .chart-box{background:#1e293b;border-radius:10px;padding:20px}
-  .chart-box h2{font-size:.9rem;color:#94a3b8;margin-bottom:16px;font-weight:500}
+  .chart-box{background:#111827;border-radius:12px;padding:20px;border:1px solid rgba(148,163,184,.15)}
+  .chart-box h2{font-size:.9rem;color:#94a3b8;margin-bottom:16px;font-weight:600}
   #status{font-size:.75rem;color:#64748b;margin-top:14px;text-align:right}
-  .error{color:#f87171;padding:20px;background:#1e293b;border-radius:10px}
-  .copy-icon{cursor:pointer;color:#60a5fa;opacity:0.6;transition:opacity .2s}
+  .error{color:#f87171;padding:20px;background:#111827;border-radius:10px;border:1px solid rgba(248,113,113,.28)}
+  .copy-icon{cursor:pointer;color:#60a5fa;opacity:0.7;transition:opacity .2s}
   .copy-icon:hover{opacity:1}
-  .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#34d399;color:#0f172a;padding:10px 20px;border-radius:6px;font-weight:600;font-size:.85rem;z-index:1000;opacity:0;transition:opacity .3s}
+  .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#34d399;color:#0f172a;padding:10px 20px;border-radius:6px;font-weight:700;font-size:.85rem;z-index:1000;opacity:0;transition:opacity .3s}
   .toast.show{opacity:1}
+  input,button{font:inherit}
+  @media (max-width:768px){
+    body{padding:16px 12px 40px}
+    .cards{grid-template-columns:1fr}
+    .topbar{align-items:flex-start}
+    .chart-box{padding:14px}
+    .card{padding:16px}
+  }
  </style>
 </head>
 <body>
-<h1>Financial Health — Last 30 Days</h1>
-<div class="cards">
-  <div class="card"><div class="label">Fees Collected</div><div class="value green" id="totalFees">—</div></div>
-  <div class="card"><div class="label">Provider Costs</div><div class="value red" id="totalCosts">—</div></div>
-  <div class="card"><div class="label">Net Profit</div><div class="value blue" id="totalProfit">—</div></div>
-</div>
-<div class="chart-box">
-  <h2>Daily Breakdown</h2>
-  <canvas id="chart" height="90"></canvas>
-</div>
-<div class="chart-box" style="margin-top: 24px;">
-  <h2>Transaction Search</h2>
-  <div style="display:flex;gap:8px;margin-bottom:16px;">
-    <input type="text" id="txSearch" placeholder="Enter Transaction Reference..." style="flex:1;background:#0f172a;border:1px solid #334155;color:#f8fafc;padding:8px 12px;border-radius:6px;">
-    <button onclick="searchTx()" style="background:#3b82f6;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">Search</button>
+<div class="app-shell">
+  <div class="topbar">
+    <h1>Financial Health — Last 30 Days</h1>
+    <button id="installBtn" class="install-button" aria-label="Install dashboard">Install App</button>
   </div>
-  <div id="txResults" style="font-size:0.85rem;">
-    <table style="width:100%;border-collapse:collapse;display:none;margin-top:10px;" id="txTable">
-      <thead>
-        <tr style="text-align:left;color:#94a3b8;border-bottom:1px solid #334155;">
-          <th style="padding:8px 4px;">Reference</th>
-          <th style="padding:8px 4px;">Type</th>
-          <th style="padding:8px 4px;">Amount</th>
-          <th style="padding:8px 4px;">Status</th>
-          <th style="padding:8px 4px;">Date</th>
-        </tr>
-      </thead>
-      <tbody id="txBody"></tbody>
-    </table>
-    <div id="txEmpty" style="color:#64748b;text-align:center;padding:20px;">Enter a reference number to search</div>
+  <div class="cards">
+    <div class="card"><div class="label">Fees Collected</div><div class="value green" id="totalFees">—</div></div>
+    <div class="card"><div class="label">Provider Costs</div><div class="value red" id="totalCosts">—</div></div>
+    <div class="card"><div class="label">Net Profit</div><div class="value blue" id="totalProfit">—</div></div>
   </div>
+  <div class="chart-box">
+    <h2>Daily Breakdown</h2>
+    <canvas id="chart" height="90"></canvas>
+  </div>
+  <div class="chart-box" style="margin-top: 24px;">
+    <h2>Transaction Search</h2>
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <input type="text" id="txSearch" placeholder="Enter Transaction Reference..." style="flex:1;min-width:180px;background:#020817;border:1px solid #334155;color:#f8fafc;padding:10px 12px;border-radius:8px;">
+      <button onclick="searchTx()" style="background:#3b82f6;color:white;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-weight:600;">Search</button>
+    </div>
+    <div id="txResults" style="font-size:0.85rem;">
+      <table style="width:100%;border-collapse:collapse;display:none;margin-top:10px;" id="txTable">
+        <thead>
+          <tr style="text-align:left;color:#94a3b8;border-bottom:1px solid #334155;">
+            <th style="padding:8px 4px;">Reference</th>
+            <th style="padding:8px 4px;">Type</th>
+            <th style="padding:8px 4px;">Amount</th>
+            <th style="padding:8px 4px;">Status</th>
+            <th style="padding:8px 4px;">Date</th>
+          </tr>
+        </thead>
+        <tbody id="txBody"></tbody>
+      </table>
+      <div id="txEmpty" style="color:#64748b;text-align:center;padding:20px;">Enter a reference number to search</div>
+    </div>
+  </div>
+  <div id="toast" class="toast">Copied!</div>
+  <div id="status"></div>
 </div>
- <div id="toast" class="toast">Copied!</div>
- <div id="status"></div>
 <script>
 const fmt = (n) => '$' + n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const DASHBOARD_CACHE_KEY = 'proxypay-financial-dashboard-cache-v1';
+const TX_CACHE_PREFIX = 'proxypay-financial-tx-cache-v1:';
+let deferredPrompt = null;
+
+function renderCachedDashboard(cache) {
+  if (!cache || !cache.totals || !Array.isArray(cache.rows)) return;
+  const { totals, rows } = cache;
+  document.getElementById('totalFees').textContent = fmt(totals.feesCollected);
+  document.getElementById('totalCosts').textContent = fmt(totals.providerCosts);
+  document.getElementById('totalProfit').textContent = fmt(totals.netProfit);
+  document.getElementById('totalProfit').className = 'value ' + (totals.netProfit >= 0 ? 'green' : 'red');
+
+  if (window.Chart) {
+    const labels = rows.map(r => r.date);
+    new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {label:'Fees Collected', data: rows.map(r=>r.feesCollected), backgroundColor:'rgba(52,211,153,.7)', borderRadius:3},
+          {label:'Provider Costs', data: rows.map(r=>r.providerCosts), backgroundColor:'rgba(248,113,113,.7)', borderRadius:3},
+          {label:'Net Profit', data: rows.map(r=>r.netProfit), type:'line', borderColor:'#60a5fa', backgroundColor:'rgba(96,165,250,.15)', tension:.3, fill:true, pointRadius:3},
+        ]
+      },
+      options: {
+        responsive:true,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{labels:{color:'#94a3b8',font:{size:12}}}},
+        scales:{
+          x:{ticks:{color:'#64748b',maxRotation:45},grid:{color:'rgba(255,255,255,.05)'}},
+          y:{ticks:{color:'#64748b',callback:v=>'\$'+v.toLocaleString()},grid:{color:'rgba(255,255,255,.05)'}}
+        }
+      }
+    });
+  }
+
+  document.getElementById('status').textContent = 'Offline cached data • ' + new Date(cache.cachedAt).toLocaleTimeString();
+}
+
+function saveDashboardCache(data) {
+  localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({ ...data, cachedAt: Date.now() }));
+}
+
+function renderTxResults(searchKey, data) {
+  const table = document.getElementById('txTable');
+  const body = document.getElementById('txBody');
+  const empty = document.getElementById('txEmpty');
+
+  if (!data || data.length === 0) {
+    empty.textContent = 'No transaction found with reference: ' + searchKey;
+    return;
+  }
+
+  localStorage.setItem(TX_CACHE_PREFIX + searchKey.toLowerCase(), JSON.stringify({ data, cachedAt: Date.now() }));
+
+  body.innerHTML = '';
+  data.forEach(tx => {
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid #1e293b';
+    const statusBg = tx.status === 'completed' ? 'rgba(52,211,153,.2)' :
+                     tx.status === 'pending' ? 'rgba(250,204,21,.2)' :
+                     tx.status === 'failed' ? 'rgba(248,113,113,.2)' : 'rgba(148,163,184,.2)';
+    const statusColor = tx.status === 'completed' ? '#34d399' :
+                       tx.status === 'pending' ? '#fbbf24' :
+                       tx.status === 'failed' ? '#f87171' : '#94a3b8';
+
+    tr.innerHTML = \`
+      <td style="padding:12px 4px;font-family:monospace;color:#60a5fa">
+        <span class="ref-text">\${tx.referenceNumber}</span>
+        <span class="copy-icon" title="Copy reference" onclick="copyRef('\${tx.referenceNumber}')" style="margin-left:8px">📋</span>
+      </td>
+      <td style="padding:12px 4px;text-transform:capitalize;">\${tx.type}</td>
+      <td style="padding:12px 4px;font-weight:600;">\${tx.amount}</td>
+      <td style="padding:12px 4px;"><span style="padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:600;background:\${statusBg};color:\${statusColor}">\${tx.status.toUpperCase()}</span></td>
+      <td style="padding:12px 4px;color:#64748b">\${new Date(tx.createdAt).toLocaleDateString()}</td>
+    \`;
+    body.appendChild(tr);
+  });
+
+  table.style.display = 'table';
+  empty.style.display = 'none';
+}
 
 async function load() {
+  const cached = localStorage.getItem(DASHBOARD_CACHE_KEY);
+  if (cached) {
+    try { renderCachedDashboard(JSON.parse(cached)); } catch (error) { console.warn('Dashboard cache invalid', error); }
+  }
+
   try {
     const r = await fetch('/api/admin/financial/pnl', {credentials:'include'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const {rows, totals} = await r.json();
+    saveDashboardCache({ rows, totals });
 
     document.getElementById('totalFees').textContent = fmt(totals.feesCollected);
     document.getElementById('totalCosts').textContent = fmt(totals.providerCosts);
@@ -2313,6 +2503,15 @@ async function load() {
 
     document.getElementById('status').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
+    const cached = localStorage.getItem(DASHBOARD_CACHE_KEY);
+    if (cached) {
+      try {
+        renderCachedDashboard(JSON.parse(cached));
+        return;
+      } catch (error) {
+        console.warn('Unable to render offline cache', error);
+      }
+    }
     document.querySelector('.chart-box').innerHTML = '<div class="error">Failed to load data: ' + e.message + '</div>';
   }
 }
@@ -2338,49 +2537,63 @@ function copyRef(ref) {
   empty.textContent = 'Searching...';
   empty.style.display = 'block';
   table.style.display = 'none';
+
+  const cachedKey = TX_CACHE_PREFIX + ref.toLowerCase();
+  const cachedTx = localStorage.getItem(cachedKey);
+  if (cachedTx) {
+    try {
+      renderTxResults(ref, JSON.parse(cachedTx).data);
+      return;
+    } catch (error) {
+      console.warn('Tx cache invalid', error);
+    }
+  }
   
   try {
     const r = await fetch('/api/admin/transactions?reference=' + encodeURIComponent(ref), {credentials:'include'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const {data} = await r.json();
-    
-    if (!data || data.length === 0) {
-      empty.textContent = 'No transaction found with reference: ' + ref;
-      return;
-    }
-    
-    body.innerHTML = '';
-    data.forEach(tx => {
-      const tr = document.createElement('tr');
-      tr.style.borderBottom = '1px solid #1e293b';
-      const statusBg = tx.status === 'completed' ? 'rgba(52,211,153,.2)' : 
-                       tx.status === 'pending' ? 'rgba(250,204,21,.2)' : 
-                       tx.status === 'failed' ? 'rgba(248,113,113,.2)' : 'rgba(148,163,184,.2)';
-      const statusColor = tx.status === 'completed' ? '#34d399' : 
-                         tx.status === 'pending' ? '#fbbf24' : 
-                         tx.status === 'failed' ? '#f87171' : '#94a3b8';
-      
-       tr.innerHTML = \`
-         <td style="padding:12px 4px;font-family:monospace;color:#60a5fa">
-           <span class="ref-text">\${tx.referenceNumber}</span>
-           <span class="copy-icon" title="Copy reference" onclick="copyRef('\${tx.referenceNumber}')" style="margin-left:8px">📋</span>
-         </td>
-         <td style="padding:12px 4px;text-transform:capitalize;">\${tx.type}</td>
-         <td style="padding:12px 4px;font-weight:600;">\${tx.amount}</td>
-         <td style="padding:12px 4px;"><span style="padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:600;background:\${statusBg};color:\${statusColor}">\${tx.status.toUpperCase()}</span></td>
-         <td style="padding:12px 4px;color:#64748b">\${new Date(tx.createdAt).toLocaleDateString()}</td>
-       \`;
-      body.appendChild(tr);
-    });
-    
-    table.style.display = 'table';
-    empty.style.display = 'none';
+    renderTxResults(ref, data || []);
   } catch (e) {
+    const cachedTxFallback = localStorage.getItem(cachedKey);
+    if (cachedTxFallback) {
+      try {
+        renderTxResults(ref, JSON.parse(cachedTxFallback).data);
+        return;
+      } catch (error) {
+        console.warn('Cached tx fallback invalid', error);
+      }
+    }
     empty.textContent = 'Error: ' + e.message;
   }
 }
 
 document.getElementById('txSearch').onkeydown = (e) => { if(e.key === 'Enter') searchTx(); };
+
+const installBtn = document.getElementById('installBtn');
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  deferredPrompt = event;
+  installBtn.classList.add('visible');
+});
+
+installBtn.addEventListener('click', async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  const { outcome } = await deferredPrompt.userChoice;
+  if (outcome === 'accepted') {
+    installBtn.classList.remove('visible');
+  }
+  deferredPrompt = null;
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/api/admin/financial/dashboard/sw.js', { scope: '/api/admin/financial/dashboard/' }).catch((error) => {
+      console.warn('Service worker registration failed:', error);
+    });
+  });
+}
 
 load();
 setInterval(load, 60000);

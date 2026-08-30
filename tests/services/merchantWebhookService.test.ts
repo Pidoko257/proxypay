@@ -1,3 +1,8 @@
+jest.mock("../../src/queue/dlq", () => ({
+  capturePersistentFailure: jest.fn(),
+}));
+
+import { capturePersistentFailure } from "../../src/queue/dlq";
 import { 
   deliverWithRetry, 
   calculateBackoffDelay, 
@@ -117,6 +122,33 @@ describe("MerchantWebhookService - Retry Backoff", () => {
     expect(result.status).toBe("failed");
     expect(result.attempts).toBe(4);
     expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("should enqueue exhausted webhook failures to the dead-letter queue", async () => {
+    const mockFetch = createMockFetch([
+      { ok: false, status: 503 },
+      { ok: false, status: 503 },
+      { ok: false, status: 503 },
+    ]);
+
+    await deliverWithRetry(
+      "https://example.com/webhook",
+      "test-secret",
+      { test: "data" },
+      mockFetch as unknown as typeof fetch,
+      { maxAttempts: 3, baseDelayMs: 10, jitterFactor: 0 },
+    );
+
+    expect(capturePersistentFailure).toHaveBeenCalledWith(expect.objectContaining({
+      queueName: "merchant-webhooks",
+      jobName: "deliver-webhook",
+      failureReason: expect.stringContaining("HTTP 503"),
+      attemptsMade: 3,
+      jobData: expect.objectContaining({
+        url: "https://example.com/webhook",
+        payload: { test: "data" },
+      }),
+    }));
   });
 
   it("should apply jitter when enabled", () => {

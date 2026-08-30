@@ -9,6 +9,7 @@ export enum MobileMoneyProvider {
 export interface ProviderLimits {
   minAmount: number;
   maxAmount: number;
+  dailyLimit: number;
 }
 
 export interface ProviderLimitsConfig {
@@ -27,22 +28,25 @@ export function getProviderLimitsConfig(): ProviderLimitsConfig {
     [MobileMoneyProvider.MTN]: {
       minAmount: providers.mtn.minAmount,
       maxAmount: providers.mtn.maxAmount,
+      dailyLimit: providers.mtn.dailyLimit,
     },
     [MobileMoneyProvider.AIRTEL]: {
       minAmount: providers.airtel.minAmount,
       maxAmount: providers.airtel.maxAmount,
+      dailyLimit: providers.airtel.dailyLimit,
     },
     [MobileMoneyProvider.ORANGE]: {
       minAmount: providers.orange.minAmount,
       maxAmount: providers.orange.maxAmount,
+      dailyLimit: providers.orange.dailyLimit,
     },
   };
 }
 
 export const DEFAULT_PROVIDER_LIMITS: ProviderLimitsConfig = {
-  [MobileMoneyProvider.MTN]: { minAmount: 100, maxAmount: 500000 },
-  [MobileMoneyProvider.AIRTEL]: { minAmount: 100, maxAmount: 1000000 },
-  [MobileMoneyProvider.ORANGE]: { minAmount: 500, maxAmount: 750000 },
+  [MobileMoneyProvider.MTN]: { minAmount: 100, maxAmount: 500000, dailyLimit: 500000 },
+  [MobileMoneyProvider.AIRTEL]: { minAmount: 100, maxAmount: 1000000, dailyLimit: 1000000 },
+  [MobileMoneyProvider.ORANGE]: { minAmount: 500, maxAmount: 750000, dailyLimit: 750000 },
 };
 
 // PROVIDER_LIMITS is now dynamically loaded from config
@@ -101,8 +105,16 @@ function validateLimitsConfig(): void {
         `Invalid max amount for ${provider}: ${limits.maxAmount}`,
       );
     }
+    if (limits.dailyLimit <= 0 || !isFinite(limits.dailyLimit)) {
+      throw new Error(
+        `Invalid daily limit for ${provider}: ${limits.dailyLimit}`,
+      );
+    }
     if (limits.minAmount > limits.maxAmount) {
       throw new Error(`Min amount cannot exceed max amount for ${provider}`);
+    }
+    if (limits.maxAmount > limits.dailyLimit) {
+      throw new Error(`Provider daily limit cannot be below max single amount for ${provider}`);
     }
   }
 }

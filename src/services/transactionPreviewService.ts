@@ -206,6 +206,7 @@ export class TransactionPreviewService {
       const limitCheck = await this.limitService.checkTransactionLimit(
         userId,
         requestAmount,
+        normalizedProvider,
       );
       dailyLimit = {
         kycLevel: limitCheck.kycLevel,

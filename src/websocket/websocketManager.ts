@@ -329,6 +329,7 @@ export class WebSocketManager {
     clientId: string,
     client: AuthenticatedWebSocket,
   ): void {
+    if (!this.clients.has(clientId)) return;
     // Remove client from all subscription maps
     for (const transactionId of client.subscriptions) {
       this.subscriptions.get(transactionId)?.delete(clientId);

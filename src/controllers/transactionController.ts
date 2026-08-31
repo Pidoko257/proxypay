@@ -35,6 +35,7 @@ import { getConfiguredPaymentAsset } from "../services/stellar/assetService";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { travelRuleService } from "../compliance/travelRule";
 import { createError } from "../middleware/errorHandler";
+import { WebhookService } from "../services/webhook";
 
 const IDEMPOTENCY_TTL_HOURS = Number(
   process.env.IDEMPOTENCY_KEY_TTL_HOURS || 24,
@@ -771,14 +772,8 @@ export const cancelTransactionHandler = async (req: Request, res: Response) => {
 
     if (process.env.WEBHOOK_URL) {
       try {
-        await fetch(process.env.WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            event: "transaction.cancelled",
-            data: updatedTransaction,
-          }),
-        });
+        const webhookService = new WebhookService();
+        await webhookService.sendTransactionEvent("transaction.cancelled", updatedTransaction);
       } catch (webhookError) {
         console.error("Webhook notification failed", webhookError);
       }

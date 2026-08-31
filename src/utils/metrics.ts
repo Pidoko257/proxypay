@@ -59,6 +59,21 @@ export const providerResponseTimeSummary = new Summary({
   registers: [register],
 });
 
+// Provider rate limit header tracking
+export const providerRateLimitState = new Gauge({
+  name: "provider_rate_limit_remaining",
+  help: "Remaining provider API quota as advertised via X-RateLimit-* headers",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+export const providerRateLimitHitsTotal = new Counter({
+  name: "provider_rate_limit_hits_total",
+  help: "Number of outbound provider requests throttled based on rate limit headers",
+  labelNames: ["provider", "reason"],
+  registers: [register],
+});
+
 // Failover metrics
 export const providerFailoverTotal = new Counter({
   name: "provider_failover_total",
@@ -167,6 +182,61 @@ export const dbReplicaReadEnabled = new Gauge({
   name: "db_replica_read_enabled",
   help: "Whether the replica is currently enabled for read routing (1=enabled, 0=disabled)",
   labelNames: ["replica_url"],
+  registers: [register],
+});
+
+export const dbReplicaFailoversTotal = new Counter({
+  name: "db_replica_failovers_total",
+  help: "Total number of read query failovers from replica to primary",
+  registers: [register],
+});
+
+// Connection Pool Utilization Metrics
+export const dbPoolUtilization = new Gauge({
+  name: "db_pool_utilization",
+  help: "Fraction of the connection pool currently in use (0–1)",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolTotalConnections = new Gauge({
+  name: "db_pool_total_connections",
+  help: "Total number of connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolIdleConnections = new Gauge({
+  name: "db_pool_idle_connections",
+  help: "Number of idle connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolWaitingConnections = new Gauge({
+  name: "db_pool_waiting_connections",
+  help: "Number of queries waiting for a free connection from the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolMaxConnections = new Gauge({
+  name: "db_pool_max_connections",
+  help: "Configured maximum number of connections in the pool",
+  labelNames: ["pool", "role"],
+  registers: [register],
+});
+
+export const dbPoolConfig = new Gauge({
+  name: "db_pool_config",
+  help: "Configured connection pool parameters (idle timeout, connection timeout, min)",
+  labelNames: ["pool", "role", "param"],
+  registers: [register],
+});
+
+export const dbDrMode = new Gauge({
+  name: "db_dr_mode",
+  help: "Disaster recovery mode indicator (1 = failover active, 0 = standby/normal)",
   registers: [register],
 });
 
@@ -301,5 +371,78 @@ export const jobsTotal = new Counter({
   name: "bullmq_jobs_total",
   help: "Total number of BullMQ jobs processed",
   labelNames: ["queue", "job_name", "status"],
+  registers: [register],
+});
+
+// Transaction Type Classifier Metrics (ML auto-categorisation)
+export const transactionClassificationsTotal = new Counter({
+  name: "transaction_classifications_total",
+  help: "Total number of transactions classified by the ML model",
+  labelNames: ["category"],
+  registers: [register],
+});
+
+export const transactionClassificationConfidence = new Histogram({
+  name: "transaction_classification_confidence",
+  help: "Confidence scores of ML transaction classifications",
+  buckets: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99],
+  registers: [register],
+});
+
+export const transactionClassifierAccuracy = new Gauge({
+  name: "transaction_classifier_accuracy",
+  help: "Accuracy of the transaction type classifier evaluated on human-labelled samples (0–1)",
+  registers: [register],
+});
+
+export const transactionClassifierFeedbackTotal = new Counter({
+  name: "transaction_classifier_feedback_total",
+  help: "Total number of human feedback corrections submitted for the classifier",
+  labelNames: ["corrected_category"],
+  registers: [register],
+});
+
+export const transactionClassifierTrainingSamples = new Gauge({
+  name: "transaction_classifier_training_samples",
+  help: "Number of labelled training samples stored for the transaction classifier",
+  registers: [register],
+});
+
+// Webhook Retry Metrics
+export const webhookRetryAttemptsTotal = new Counter({
+  name: "webhook_retry_attempts_total",
+  help: "Total number of webhook retry attempts",
+  labelNames: ["event_type", "attempt", "status_code"],
+  registers: [register],
+});
+
+export const webhookDeliveryDurationSeconds = new Histogram({
+  name: "webhook_delivery_duration_seconds",
+  help: "Duration of webhook delivery attempts in seconds",
+  labelNames: ["event_type", "status"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
+  registers: [register],
+});
+
+export const webhookDeliveryRetriesTotal = new Counter({
+  name: "webhook_delivery_retries_total",
+  help: "Total number of webhook deliveries that required retries",
+  labelNames: ["event_type", "final_status"],
+  registers: [register],
+});
+
+export const webhookBackoffDelaySeconds = new Histogram({
+  name: "webhook_backoff_delay_seconds",
+  help: "Backoff delay applied between webhook retry attempts in seconds",
+  labelNames: ["event_type", "attempt"],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
+  registers: [register],
+});
+
+// Deprecated API Endpoint Usage Metrics (#393)
+export const deprecatedEndpointRequestsTotal = new Counter({
+  name: "deprecated_endpoint_requests_total",
+  help: "Total number of requests to deprecated API endpoints",
+  labelNames: ["method", "route", "replacement", "sunset"],
   registers: [register],
 });

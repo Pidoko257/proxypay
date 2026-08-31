@@ -31,7 +31,55 @@ export const RATE_LIMIT_CONFIG = {
 
   // Suspicious queries: more than 50 items without pagination
   SUSPICIOUS_QUERY_THRESHOLD: 50,
+
+  // Global rate limit: 200 requests per minute per IP
+  GLOBAL_LIMIT: 200,
+  GLOBAL_WINDOW_MS: 60 * 1000, // 1 minute
 };
+
+/**
+ * Tier-based Rate Limit Configuration
+ * Defines per-minute request limits for each user tier
+ */
+export const TIER_RATE_LIMITS = {
+  free: { limit: 60, windowMs: 60 * 1000 },       // 60 req/min
+  pro: { limit: 300, windowMs: 60 * 1000 },         // 300 req/min
+  enterprise: { limit: 1000, windowMs: 60 * 1000 }, // 1000 req/min
+} as const;
+
+export type UserTier = keyof typeof TIER_RATE_LIMITS;
+
+/**
+ * Factory: creates a per-tier rate limit middleware.
+ * Uses the Redis-based checkRateLimit helper with a tier-scoped key.
+ *
+ * @param tier - The user tier ('free' | 'pro' | 'enterprise')
+ * @returns Express middleware that enforces the tier's rate limit
+ */
+export function createTierRateLimitMiddleware(tier: UserTier) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const { limit, windowMs } = TIER_RATE_LIMITS[tier];
+    const key = `tier-rate-limit:${tier}:${req.ip}`;
+    const { allowed, remaining, resetTime } = await checkRateLimit(key, limit, windowMs);
+
+    res.setHeader("X-RateLimit-Limit", limit);
+    res.setHeader("X-RateLimit-Remaining", remaining);
+    res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+    if (!allowed) {
+      const retryAfter = windowMs / 1000;
+      res.setHeader("Retry-After", String(retryAfter));
+
+      return res.status(429).json({
+        error: "Rate limit exceeded",
+        tier,
+        retryAfter,
+      });
+    }
+
+    next();
+  };
+}
 
 /**
  * Interface for tracking rate limit data
@@ -124,6 +172,44 @@ const logHighSeverity = (message: string, context: Record<string, unknown>) => {
 const generateRateLimitKey = (userId: string, endpoint: string): string => {
   return `ratelimit:${userId}:${endpoint}`;
 };
+
+/**
+ * Global rate limit middleware.
+ * Applies a per-IP sliding-window limit to all requests as a safety net.
+ */
+export async function globalRateLimit(req: Request, res: Response, next: NextFunction) {
+  const key = `ratelimit:global:${req.ip}`;
+  const { allowed, remaining, resetTime } = await checkRateLimit(
+    key,
+    RATE_LIMIT_CONFIG.GLOBAL_LIMIT,
+    RATE_LIMIT_CONFIG.GLOBAL_WINDOW_MS,
+  );
+
+  res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.GLOBAL_LIMIT);
+  res.setHeader("X-RateLimit-Remaining", remaining);
+  res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  if (!allowed) {
+    const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+
+    logHighSeverity("Global rate limit exceeded", {
+      ip: req.ip,
+      limit: RATE_LIMIT_CONFIG.GLOBAL_LIMIT,
+      window: "1 minute",
+      path: req.path,
+      method: req.method,
+    });
+
+    return res.status(429).json({
+      error: "Too Many Requests",
+      message: "Global rate limit exceeded. Try again shortly.",
+      retryAfter: retryAfterSeconds,
+    });
+  }
+
+  next();
+}
 
 /**
  * Middleware: for sep24Routes (Deposit/Withdrawal)
@@ -532,3 +618,15 @@ export const cleanupRateLimitStore = () => {
 
 // Cleanup expired entries every 30 minutes
 setInterval(cleanupRateLimitStore, 30 * 60 * 1000);
+
+/**
+ * Fix: Default export corrected to use globalRateLimit instead of
+ * rateLimitAdminOperations. The global middleware registered via
+ * `app.use(rateLimitDefaultMiddleware)` in src/index.ts is intended as a
+ * safety-net for ALL incoming requests, enforcing RATE_LIMIT_CONFIG.GLOBAL_LIMIT
+ * (200 req/min per IP) with RATE_LIMIT_CONFIG.GLOBAL_WINDOW_MS (60 000 ms).
+ * Previously, rateLimitAdminOperations was exported as default, which only
+ * applied list-query checks and did not enforce the global window limit,
+ * leaving the application without effective global rate limiting.
+ */
+export default globalRateLimit;

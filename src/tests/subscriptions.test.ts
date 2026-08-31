@@ -2,16 +2,26 @@
  * Tests for GraphQL Subscriptions — Redis PubSub + WS auth
  *
  * Covers:
+ *  - paymentStatusUpdated(id) delivers status changes in real time
  *  - Client receives update immediately on state change
  *  - Unauthenticated WS connection is rejected
  *  - Client only receives updates for subscribed transaction ID
  *  - All state transitions (pending→completed, pending→failed) trigger events
- *  - transactionChannel() naming convention
+ *  - transactionChannel() / paymentStatusChannel() naming conventions
  */
 
 import { EventEmitter } from "events";
-import { transactionChannel, SubscriptionChannels } from "../graphql/subscriptions";
+import {
+  transactionChannel,
+  paymentStatusChannel,
+  SubscriptionChannels,
+} from "../graphql/subscriptions";
 import { createSubscriptionResolvers } from "../graphql/subscriptionResolvers";
+import {
+  authenticateWsConnection,
+  shouldRequireWsAuth,
+} from "../graphql/wsAuth";
+import { generateToken } from "../auth/jwt";
 
 // ---------------------------------------------------------------------------
 // Minimal in-memory PubSub stub (avoids real Redis in unit tests)
@@ -93,9 +103,92 @@ describe("transactionChannel()", () => {
   });
 });
 
+describe("paymentStatusChannel()", () => {
+  it("produces the expected channel name", () => {
+    expect(paymentStatusChannel("pay-123")).toBe(
+      "PAYMENT_STATUS_UPDATED:pay-123",
+    );
+  });
+
+  it("different IDs produce different channels", () => {
+    expect(paymentStatusChannel("id-1")).not.toBe(paymentStatusChannel("id-2"));
+  });
+});
+
 // ---------------------------------------------------------------------------
-// WS authentication
+// WS authentication (connection params JWT)
 // ---------------------------------------------------------------------------
+
+describe("authenticateWsConnection()", () => {
+  const originalSecret = process.env.JWT_SECRET;
+
+  beforeAll(() => {
+    process.env.JWT_SECRET = "test-ws-auth-secret";
+  });
+
+  afterAll(() => {
+    if (originalSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalSecret;
+  });
+
+  it("rejects missing authToken when auth is required", () => {
+    const result = authenticateWsConnection(
+      {},
+      { NODE_ENV: "production" } as NodeJS.ProcessEnv,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/missing authToken/);
+  });
+
+  it("allows missing authToken in local/dev without GRAPHQL_API_KEY", () => {
+    const result = authenticateWsConnection(
+      {},
+      { NODE_ENV: "development" } as NodeJS.ProcessEnv,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.claims).toBeNull();
+  });
+
+  it("rejects invalid JWT without throwing", () => {
+    const result = authenticateWsConnection(
+      { authToken: "not-a-real-jwt" },
+      { NODE_ENV: "development" } as NodeJS.ProcessEnv,
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("accepts a valid JWT from connectionParams.authToken", () => {
+    const token = generateToken({
+      userId: "user-42",
+      email: "user@example.com",
+    });
+    const result = authenticateWsConnection(
+      { authToken: token },
+      { NODE_ENV: "production" } as NodeJS.ProcessEnv,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.claims?.userId).toBe("user-42");
+  });
+
+  it("accepts Bearer Authorization connection param", () => {
+    const token = generateToken({
+      userId: "user-99",
+      email: "u99@example.com",
+    });
+    const result = authenticateWsConnection(
+      { Authorization: `Bearer ${token}` },
+      { GRAPHQL_API_KEY: "secret" } as NodeJS.ProcessEnv,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.claims?.userId).toBe("user-99");
+  });
+
+  it("shouldRequireWsAuth is true in production", () => {
+    expect(shouldRequireWsAuth({ NODE_ENV: "production" } as NodeJS.ProcessEnv)).toBe(
+      true,
+    );
+  });
+});
 
 describe("WS authentication guard", () => {
   it("rejects unauthenticated subscription with UNAUTHENTICATED error", () => {
@@ -121,6 +214,96 @@ describe("WS authentication guard", () => {
     expect(() =>
       resolvers.Subscription.transactionCreated.subscribe(null, {}, ANON_CTX, null as any),
     ).toThrow(/UNAUTHENTICATED/);
+  });
+
+  it("rejects unauthenticated paymentStatusUpdated subscription", () => {
+    const { resolvers } = makeResolvers();
+    expect(() =>
+      resolvers.Subscription.paymentStatusUpdated.subscribe(
+        null,
+        { id: "pay-1" },
+        ANON_CTX,
+        null as any,
+      ),
+    ).toThrow(/UNAUTHENTICATED/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// paymentStatusUpdated — real-time per-ID delivery
+// ---------------------------------------------------------------------------
+
+describe("paymentStatusUpdated subscription", () => {
+  it("delivers status changes for the subscribed payment id", async () => {
+    const { pubsub, resolvers } = makeResolvers();
+    const sub = resolvers.Subscription.paymentStatusUpdated;
+
+    const iterator = sub.subscribe(null, { id: "pay-42" }, AUTH_CTX, null as any);
+
+    const payload = {
+      id: "pay-42",
+      referenceNumber: "REF-042",
+      status: "completed",
+      updatedAt: new Date().toISOString(),
+    };
+    await pubsub.publish(paymentStatusChannel("pay-42"), payload);
+
+    const result = await iterator.next();
+    expect(result.done).toBe(false);
+    const resolved = sub.resolve(result.value);
+    expect(resolved).toEqual({
+      id: "pay-42",
+      status: "completed",
+      referenceNumber: "REF-042",
+      updatedAt: payload.updatedAt,
+    });
+
+    await iterator.return?.();
+  });
+
+  it("does not receive updates for a different payment id", async () => {
+    const { pubsub, resolvers } = makeResolvers();
+    const sub = resolvers.Subscription.paymentStatusUpdated;
+
+    const iterator = sub.subscribe(null, { id: "pay-1" }, AUTH_CTX, null as any);
+
+    await pubsub.publish(paymentStatusChannel("pay-2"), {
+      id: "pay-2",
+      referenceNumber: "REF-002",
+      status: "failed",
+      updatedAt: new Date().toISOString(),
+    });
+
+    const expected = {
+      id: "pay-1",
+      referenceNumber: "REF-001",
+      status: "pending",
+      updatedAt: new Date().toISOString(),
+    };
+    await pubsub.publish(paymentStatusChannel("pay-1"), expected);
+
+    const result = await iterator.next();
+    expect(result.value.id).toBe("pay-1");
+    expect(result.value.status).toBe("pending");
+
+    await iterator.return?.();
+  });
+
+  it("covers pending → failed transition", async () => {
+    const { pubsub, resolvers } = makeResolvers();
+    const sub = resolvers.Subscription.paymentStatusUpdated;
+    const iterator = sub.subscribe(null, { id: "pay-7" }, AUTH_CTX, null as any);
+
+    await pubsub.publish(paymentStatusChannel("pay-7"), {
+      id: "pay-7",
+      referenceNumber: "REF-007",
+      status: "failed",
+      updatedAt: new Date().toISOString(),
+    });
+
+    const result = await iterator.next();
+    expect(sub.resolve(result.value).status).toBe("failed");
+    await iterator.return?.();
   });
 });
 

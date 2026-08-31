@@ -17,6 +17,8 @@ export enum SubscriptionChannels {
   TRANSACTION_COMPLETED  = "transaction.completed",
   TRANSACTION_FAILED     = "transaction.failed",
 
+  PAYMENT_STATUS_UPDATED = "payment.status_updated",
+
   DISPUTE_CREATED        = "dispute.created",
   DISPUTE_UPDATED        = "dispute.updated",
   DISPUTE_NOTE_ADDED     = "dispute.note_added",
@@ -31,6 +33,14 @@ export enum SubscriptionChannels {
  */
 export function transactionChannel(id: string): string {
   return `TRANSACTION_UPDATED:${id}`;
+}
+
+/**
+ * Per-payment status channel used by `paymentStatusUpdated(id: ID!)`.
+ * Redis Pub/Sub fans this out across API instances for horizontal scaling.
+ */
+export function paymentStatusChannel(id: string): string {
+  return `PAYMENT_STATUS_UPDATED:${id}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +69,13 @@ export interface TransactionUpdatedPayload {
   phoneNumber?: string;
   provider?: string;
   stellarAddress?: string;
+}
+
+export interface PaymentStatusUpdatedPayload {
+  id: string;
+  status: string;
+  referenceNumber: string;
+  updatedAt: string;
 }
 
 export interface TransactionCompletedPayload {

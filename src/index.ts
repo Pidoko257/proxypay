@@ -646,6 +646,17 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
     await disconnectRedis();
     console.log("[Shutdown] Redis client closed");
 
+    console.log("[Shutdown] Closing WebSocket servers");
+    if (wsManager) {
+      await wsManager.close();
+      wsManager = null;
+    }
+    if (graphqlServerCleanup) {
+      await graphqlServerCleanup.dispose();
+      graphqlServerCleanup = null;
+    }
+    console.log("[Shutdown] WebSocket servers closed");
+
     console.log("[Shutdown] Graceful shutdown complete");
     process.exit(0);
   } catch (error) {
@@ -663,6 +674,7 @@ process.once("SIGINT", () => {
 });
 
 export let wsManager: WebSocketManager | null = null;
+let graphqlServerCleanup: ServerCleanup | null = null;
 
 async function initializeRuntime(): Promise<void> {
   if (process.env.NODE_ENV === "test") {
@@ -757,7 +769,7 @@ async function initializeRuntime(): Promise<void> {
     console.log("WebSocket server attached");
 
     // Start Apollo Server with APQ enabled (must run after HTTP server is created)
-    await startApolloServer(app, server);
+    graphqlServerCleanup = await startApolloServer(app, server);
     console.log("Apollo GraphQL server started at /graphql");
   }
 }

@@ -12,7 +12,7 @@ import {
 
 const gzipAsync = promisify(gzip);
 
-export type WebhookEvent = "transaction.completed" | "transaction.failed";
+export type WebhookEvent = "transaction.completed" | "transaction.failed" | "transaction.cancelled" | "transaction.pending";
 export type WebhookDeliveryStatus =
   | "pending"
   | "delivered"

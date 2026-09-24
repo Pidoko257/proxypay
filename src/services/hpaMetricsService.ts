@@ -12,7 +12,9 @@
  * - Transaction processing latency
  */
 
+import { Request, Response } from "express";
 import {
+  register,
   transactionProcessingRate,
   transactionQueueDepth,
   providerTransactionRate,
@@ -301,6 +303,35 @@ export class HpaMetricsService {
     }
 
     return null;
+  }
+
+  /**
+   * Returns all Prometheus formatted metrics including custom HPA metrics
+   */
+  async getMetrics(): Promise<string> {
+    await this.updateMetrics();
+    return register.metrics();
+  }
+
+  /**
+   * Returns Prometheus metrics content type
+   */
+  getContentType(): string {
+    return register.contentType;
+  }
+
+  /**
+   * Express request handler for Prometheus scraper endpoint (/metrics)
+   */
+  async metricsHandler(req: Request, res: Response): Promise<void> {
+    try {
+      res.set("Content-Type", this.getContentType());
+      const metrics = await this.getMetrics();
+      res.end(metrics);
+    } catch (error) {
+      logger.error(error, "[HPA Metrics] Failed to expose metrics");
+      res.status(500).end(String(error));
+    }
   }
 }
 

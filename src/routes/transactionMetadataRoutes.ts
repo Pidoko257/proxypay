@@ -14,6 +14,7 @@ import {
   searchMetadataFullText,
   getMetadataIndexStats,
   runMetadataBenchmark,
+  getSearchQualityMetrics,
 } from "../services/transactionMetadataService";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
@@ -30,6 +31,8 @@ const SearchQuerySchema = z.object({
   status: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().nonnegative().default(0),
+  min_relevance: z.coerce.number().min(0).max(1).optional(),
+  ranking: z.enum(["bm25", "ts_rank", "ts_rank_cd"]).optional(),
 });
 
 router.get("/search", authenticateToken, async (req: Request, res: Response) => {
@@ -43,7 +46,7 @@ router.get("/search", authenticateToken, async (req: Request, res: Response) => 
     });
   }
 
-  const { mode, field, value, q, status, limit, offset } = parsed.data;
+  const { mode, field, value, q, status, limit, offset, min_relevance, ranking } = parsed.data;
 
   if (mode === "field") {
     if (!field || !value) {
@@ -88,6 +91,8 @@ router.get("/search", authenticateToken, async (req: Request, res: Response) => 
     status,
     limit,
     offset,
+    minRelevance: min_relevance,
+    rankingMethod: ranking,
   });
 
   res.json({
@@ -98,8 +103,17 @@ router.get("/search", authenticateToken, async (req: Request, res: Response) => 
       offset,
       queryTimeMs: result.queryTimeMs,
       cached: result.cached,
+      pagination: result.pagination,
+      minRelevanceApplied: result.minRelevanceApplied,
     },
   });
+});
+
+// ─── GET /quality ─────────────────────────────────────────────────────────────
+
+router.get("/quality", authenticateToken, async (_req: Request, res: Response) => {
+  const metrics = getSearchQualityMetrics();
+  res.json({ data: metrics });
 });
 
 // ─── GET /stats ───────────────────────────────────────────────────────────────

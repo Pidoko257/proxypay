@@ -1,4 +1,4 @@
-import { createHmac } from "crypto";
+import { createHmac, timingSafeEqual } from "crypto";
 import {
   MerchantWebhookModel,
   MerchantWebhook,
@@ -36,10 +36,82 @@ interface DeliveryResult {
 }
 
 /**
- * Sign a payload with HMAC-SHA256 — same scheme as the existing WebhookService.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Webhook Signature Algorithm Documentation (HMAC-SHA256)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Algorithm:
+ * - HMAC (Hash-based Message Authentication Code) with SHA-256 hash function.
+ *
+ * Header format:
+ * - Delivered in `X-Webhook-Signature` and `X-Signature` HTTP request headers.
+ * - Format: `sha256=<hex_digest>`
+ *   Where `<hex_digest>` is the 64-character lowercase hex string computed by
+ *   HMAC-SHA256(secret, raw_payload_body).
+ *
+ * Verification procedure for webhook consumers:
+ * 1. Extract the raw HTTP request body string or buffer BEFORE JSON parsing.
+ * 2. Retrieve the signature from the `X-Webhook-Signature` or `X-Signature` header.
+ * 3. Compute HMAC-SHA256 using the shared merchant secret and the raw request body.
+ * 4. Compare the expected digest with the received digest using a constant-time /
+ *    timing-safe equality check (e.g. `crypto.timingSafeEqual` in Node.js,
+ *    `hmac.compare_digest` in Python) to prevent timing attacks.
+ *
+ * @param payload - Verbatim raw payload string (do not re-serialize JSON)
+ * @param secret - The shared webhook secret key
+ * @returns Prefixed hex signature `sha256=<hex>`
  */
-function signPayload(payload: string, secret: string): string {
+export function signPayload(payload: string, secret: string): string {
   return "sha256=" + createHmac("sha256", secret).update(payload).digest("hex");
+}
+
+/**
+ * Validates an incoming webhook signature received from ProxyPay.
+ *
+ * @example
+ * ```ts
+ * const isValid = verifyWebhookSignature(req.rawBody, process.env.WEBHOOK_SECRET, req.headers["x-webhook-signature"]);
+ * if (!isValid) {
+ *   return res.status(401).send("Invalid signature");
+ * }
+ * ```
+ *
+ * @param rawBody - Raw body buffer or UTF-8 string
+ * @param secret - Shared merchant webhook secret key
+ * @param signatureHeader - Header value from `X-Webhook-Signature` or `X-Signature`
+ * @returns boolean indicating whether the signature is authentic
+ */
+export function verifyWebhookSignature(
+  rawBody: string | Buffer,
+  secret: string,
+  signatureHeader?: string | string[],
+): boolean {
+  if (!rawBody || !secret || !signatureHeader) {
+    return false;
+  }
+
+  const rawHeader = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+  if (!rawHeader) return false;
+
+  const expectedSignature = signPayload(
+    typeof rawBody === "string" ? rawBody : rawBody.toString("utf8"),
+    secret,
+  );
+
+  const cleanExpected = expectedSignature.replace(/^sha256=/, "").trim();
+  const cleanReceived = rawHeader.replace(/^sha256=/, "").trim();
+
+  if (cleanExpected.length !== cleanReceived.length) {
+    return false;
+  }
+
+  try {
+    const expectedBuf = Buffer.from(cleanExpected, "hex");
+    const receivedBuf = Buffer.from(cleanReceived, "hex");
+    return timingSafeEqual(expectedBuf, receivedBuf);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -190,6 +262,7 @@ async function deliverWithRetry(
           headers: {
             "Content-Type": "application/json",
             "X-Webhook-Signature": signature,
+            "X-Signature": signature,
             "User-Agent": "MobileMoney-Webhook/1.0",
           },
           body,
@@ -451,5 +524,12 @@ export class MerchantWebhookService {
 export const merchantWebhookService = new MerchantWebhookService();
 export { model as merchantWebhookModel };
 
-// Export utility functions for testing
-export { deliverWithRetry, calculateBackoffDelay, isRetryableError, sleep, signPayload };
+// Export utility functions for testing and consumer validation
+export {
+  deliverWithRetry,
+  calculateBackoffDelay,
+  isRetryableError,
+  sleep,
+  signPayload,
+  verifyWebhookSignature,
+};

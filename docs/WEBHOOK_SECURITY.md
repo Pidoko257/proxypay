@@ -159,3 +159,176 @@ The suite covers:
 3. **Replay protection** — verification proves authenticity, not freshness.
    Callback handlers must remain idempotent (keyed on the provider reference /
    transaction id) so replayed or duplicated callbacks are safe.
+
+---
+
+# Merchant Outbound Webhooks: Consumer Verification Guide
+
+ProxyPay delivers outbound event notifications (e.g. `transaction.completed`, `onboarding.completed`, `dispute.created`) to merchant webhook endpoints configured in the dashboard.
+
+To ensure authenticity, prevent tampering, and block replay attacks, **merchants must verify the cryptographic signature** on all incoming webhooks before processing the payload.
+
+## 1. Signature Algorithm
+
+ProxyPay signs all webhook payloads using **HMAC-SHA256**:
+
+- **Algorithm**: `HMAC-SHA256` (Hash-based Message Authentication Code with SHA-256)
+- **Key**: The merchant webhook secret configured in the ProxyPay dashboard or returned at webhook creation.
+- **Data to sign**: The verbatim raw HTTP request body string (UTF-8 encoded).
+
+## 2. Signature Header Format
+
+ProxyPay attaches the computed signature to each webhook request in the following headers:
+
+- **Primary Header**: `X-Webhook-Signature`
+- **Compatibility Header**: `X-Signature`
+
+**Format:**
+```http
+X-Webhook-Signature: sha256=d3b07384d113edec49eaa6238ad5ff00...
+X-Signature: sha256=d3b07384d113edec49eaa6238ad5ff00...
+```
+
+The value begins with the prefix `sha256=` followed by the 64-character lowercase hexadecimal HMAC-SHA256 digest.
+
+## 3. Step-by-Step Validation Process for Webhook Consumers
+
+1. **Extract the raw body**: Capture the raw, unparsed request payload bytes or UTF-8 string directly from the incoming HTTP request stream **before** JSON parsing. Re-serializing parsed JSON changes whitespace or key ordering and invalidates the signature.
+2. **Extract the signature header**: Read the value of `X-Webhook-Signature` (or `X-Signature`).
+3. **Compute expected signature**: Calculate `HMAC-SHA256(secret, raw_body)` formatted as `sha256=<hex_digest>`.
+4. **Compare constant-time**: Compare the extracted signature against the expected signature using a timing-safe equality function (to prevent side-channel timing attacks).
+5. **Accept or Reject**:
+   - If signatures match: Return `200 OK` and process the event asynchronously.
+   - If signatures do not match: Return `401 Unauthorized` and discard the request.
+
+---
+
+## 4. Consumer Implementation Examples
+
+### Node.js (Express)
+
+```javascript
+const express = require('express');
+const crypto = require('crypto');
+
+const app = express();
+const WEBHOOK_SECRET = process.env.PROXYPAY_WEBHOOK_SECRET;
+
+// Preserve raw body buffer for verification
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
+
+function verifyWebhook(req) {
+  const signatureHeader = req.headers['x-webhook-signature'] || req.headers['x-signature'];
+  if (!signatureHeader) return false;
+
+  const expectedSignature = 'sha256=' + crypto
+    .createHmac('sha256', WEBHOOK_SECRET)
+    .update(req.rawBody)
+    .digest('hex');
+
+  const cleanExpected = expectedSignature.replace(/^sha256=/, '');
+  const cleanReceived = signatureHeader.replace(/^sha256=/, '');
+
+  if (cleanExpected.length !== cleanReceived.length) return false;
+
+  return crypto.timingSafeEqual(
+    Buffer.from(cleanExpected, 'hex'),
+    Buffer.from(cleanReceived, 'hex')
+  );
+}
+
+app.post('/webhook', (req, res) => {
+  if (!verifyWebhook(req)) {
+    return res.status(401).send('Invalid signature');
+  }
+
+  const event = req.body;
+  console.log(`Received verified event: ${event.eventType}`);
+
+  // Process event idempotently...
+  res.status(200).json({ received: true });
+});
+```
+
+### Python (FastAPI / Flask)
+
+```python
+import hmac
+import hashlib
+from fastapi import FastAPI, Request, HTTPException
+
+app = FastAPI()
+WEBHOOK_SECRET = b"your_merchant_webhook_secret"
+
+@app.post("/webhook")
+async def handle_webhook(request: Request):
+    raw_body = await request.body()
+    signature_header = request.headers.get("x-webhook-signature") or request.headers.get("x-signature")
+
+    if not signature_header:
+        raise HTTPException(status_code=401, detail="Missing signature header")
+
+    received_digest = signature_header.replace("sha256=", "").strip()
+    expected_digest = hmac.new(WEBHOOK_SECRET, raw_body, hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(expected_digest, received_digest):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    payload = await request.json()
+    # Process event payload...
+    return {"status": "ok"}
+```
+
+### Go
+
+```go
+package main
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"net/http"
+	"strings"
+)
+
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+	secret := []byte("your_merchant_webhook_secret")
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	sigHeader := r.Header.Get("X-Webhook-Signature")
+	if sigHeader == "" {
+		sigHeader = r.Header.Get("X-Signature")
+	}
+	receivedDigest := strings.TrimPrefix(sigHeader, "sha256=")
+
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(body)
+	expectedDigest := hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(expectedDigest), []byte(receivedDigest)) {
+		http.Error(w, "Invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+```
+
+---
+
+## 5. Security Recommendations for Webhook Receivers
+
+1. **Verify Before Parsing**: Always verify before deserializing untrusted JSON payloads.
+2. **Timing-Safe Comparison**: Always use constant-time comparison methods (`crypto.timingSafeEqual`, `hmac.compare_digest`, `hmac.Equal`).
+3. **Idempotency**: Treat all event deliveries idempotently using the transaction or event ID.
+4. **TLS Only**: Only expose webhook endpoints over HTTPS with valid SSL/TLS certificates.

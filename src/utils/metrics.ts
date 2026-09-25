@@ -408,6 +408,21 @@ export const transactionClassifierTrainingSamples = new Gauge({
   registers: [register],
 });
 
+// Webhook Circuit Breaker Metrics (#573)
+export const WebhookCircuitBreakerTransitionTotal = new Counter({
+  name: "webhook_circuit_breaker_transition_total",
+  help: "Total number of webhook circuit breaker state transitions",
+  labelNames: ["webhook", "from", "to"],
+  registers: [register],
+});
+
+export const WebhookCircuitBreakerState = new Gauge({
+  name: "webhook_circuit_breaker_state",
+  help: "Current webhook circuit breaker state (0=open, 0.5=half_open, 1=closed)",
+  labelNames: ["state"],
+  registers: [register],
+});
+
 // Webhook Retry Metrics
 export const webhookRetryAttemptsTotal = new Counter({
   name: "webhook_retry_attempts_total",

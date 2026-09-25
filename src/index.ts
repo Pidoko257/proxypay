@@ -115,6 +115,7 @@ import { transactionMetadataRouter } from "./routes/transactionMetadataRoutes";
 import healthProvidersRouter from "./routes/healthProviders";
 import adminReplicasRouter from "./routes/adminReplicas";
 import connectionDashboardRouter from "./routes/connectionDashboard";
+import webhookAdminRouter from "./routes/webhookAdmin";
 import { transactionStreamRoutes } from "./routes/stream";
 import { batchOperationRoutes } from "./routes/batchOperations";
 import {

@@ -9,8 +9,15 @@ import {
   webhookDeliveryRetriesTotal,
   webhookBackoffDelaySeconds,
 } from "../utils/metrics";
+import {
+  WebhookCircuitBreaker,
+  WebhookCircuitBreakerOptions,
+  WebhookCircuitBreakerRegistry,
+} from "./webhookCircuitBreaker";
 
 const gzipAsync = promisify(gzip);
+
+const WEBHOOK_CIRCUIT_BREAKER_RECOVERY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export type WebhookEvent = "transaction.completed" | "transaction.failed" | "transaction.cancelled" | "transaction.pending";
 export type WebhookDeliveryStatus =
@@ -97,6 +104,14 @@ interface WebhookServiceOptions {
   logger?: WebhookLogger;
   /** When true, payloads are Gzip-compressed before sending (Content-Encoding: gzip) */
   compress?: boolean;
+  /**
+   * Circuit breaker guarding the webhook endpoint (issue #573).
+   * Defaults to a shared registry breaker keyed by the webhook URL with
+   * automatic recovery after 24 hours. Pass `null` to disable.
+   */
+  circuitBreaker?: WebhookCircuitBreaker | null;
+  /** Consecutive delivery failures before the breaker opens (default 5). */
+  circuitBreakerFailureThreshold?: number;
 }
 
 interface WebhookTransactionModel {
@@ -221,6 +236,8 @@ export class WebhookService {
   private readonly logger: WebhookLogger;
   /** Whether to Gzip-compress outgoing webhook payloads */
   readonly compress: boolean;
+  /** Circuit breaker guarding the endpoint (issue #573); null disables it. */
+  private readonly circuitBreaker: WebhookCircuitBreaker | null;
 
   constructor(options: WebhookServiceOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -239,6 +256,60 @@ export class WebhookService {
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
     this.compress = options.compress ?? (process.env.WEBHOOK_COMPRESSION === "true");
+    if (options.circuitBreaker === null) {
+      this.circuitBreaker = null;
+    } else if (options.circuitBreaker) {
+      this.circuitBreaker = options.circuitBreaker;
+    } else {
+      const breakerLogger = {
+        info: (msg: string, meta?: Record<string, unknown>) =>
+          this.logger.log(`[webhook-circuit] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ""}`),
+        warn: (msg: string, meta?: Record<string, unknown>) =>
+          this.logger.warn(`[webhook-circuit] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ""}`),
+        error: (msg: string, meta?: Record<string, unknown>) =>
+          this.logger.error(`[webhook-circuit] ${msg}${meta ? ` ${JSON.stringify(meta)}` : ""}`),
+      };
+      this.circuitBreaker = WebhookCircuitBreakerRegistry.get(
+        this.webhookUrl || "default",
+        {
+          recoveryTimeMs: WEBHOOK_CIRCUIT_BREAKER_RECOVERY_MS,
+          failureThreshold: options.circuitBreakerFailureThreshold,
+          now: () => this.now().getTime(),
+          logger: breakerLogger,
+        },
+      );
+    }
+  }
+
+  /** Exposed for the admin API and tests. */
+  getWebhookCircuitBreaker(): WebhookCircuitBreaker | null {
+    return this.circuitBreaker;
+  }
+
+  /** Returns a skipped result when the circuit is open. */
+  private circuitGate(): WebhookDeliveryResult | null {
+    if (!this.circuitBreaker) return null;
+    if (this.circuitBreaker.canAttempt()) return null;
+    const message = `Webhook circuit breaker is open for ${this.webhookUrl} (recovery pending)`;
+    this.logger.warn(`[webhook] ${message}`);
+    return {
+      status: "skipped",
+      attempts: 0,
+      lastAttemptAt: null,
+      deliveredAt: null,
+      lastError: message,
+    };
+  }
+
+  private onDeliverySuccess(): void {
+    this.circuitBreaker?.recordSuccess();
+  }
+
+  private onDeliveryFailure(lastError: string | null): void {
+    this.circuitBreaker?.recordFailure();
+    if (lastError) {
+      this.logger.error(`[webhook-circuit] delivery failure recorded: ${lastError}`);
+    }
   }
 
   buildPayload(event: WebhookEvent, transaction: Transaction): WebhookPayload {
@@ -320,6 +391,9 @@ export class WebhookService {
       };
     }
 
+    const circuitGate = this.circuitGate();
+    if (circuitGate) return circuitGate;
+
     const payload = this.buildPayload(event, transaction);
     const validation = webhookPayloadSchema.safeParse(payload);
     if (!validation.success) {
@@ -364,6 +438,8 @@ export class WebhookService {
         if (attempt > 1) {
           webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
         }
+
+        this.onDeliverySuccess();
 
         return {
           status: "delivered",
@@ -418,6 +494,7 @@ export class WebhookService {
     const durationSecs = (Date.now() - deliveryStart) / 1000;
     webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
     webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+    this.onDeliveryFailure(lastError);
 
     return {
       status: "failed",
@@ -455,6 +532,9 @@ export class WebhookService {
         lastError: message,
       };
     }
+
+    const circuitGate = this.circuitGate();
+    if (circuitGate) return circuitGate;
 
     const payload = this.buildFlatPayload(event, transaction);
     const validation = flatWebhookPayloadSchema.safeParse(payload);
@@ -497,6 +577,8 @@ export class WebhookService {
         if (attempt > 1) {
           webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
         }
+
+        this.onDeliverySuccess();
 
         return {
           status: "delivered",
@@ -549,6 +631,7 @@ export class WebhookService {
     const durationSecs = (Date.now() - deliveryStart) / 1000;
     webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
     webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+    this.onDeliveryFailure(lastError);
 
     return {
       status: "failed",
@@ -567,6 +650,11 @@ export class WebhookService {
     const entries = await outboxModel.findNextToProcess(batchSize);
     let processed = 0;
     let failures = 0;
+
+    // Issue #573: skip the whole batch while the circuit is open.
+    if (this.circuitGate()) {
+      return { processed: 0, failures: 0 };
+    }
 
     for (const entry of entries) {
       const rawPayload = JSON.stringify(entry.payload);

@@ -13,6 +13,9 @@
  *   GET    /api/disputes/:disputeId/details
  *     Fetch dispute with full details (notes, evidence, timeline).
  *
+ *   GET    /api/disputes/:disputeId/notes
+ *     Cursor-paginated notes (limit?, cursor?, sort?: date|relevance).
+ *
  *   PATCH  /api/disputes/:disputeId/status
  *     Transition dispute status.
  *     Body: { status: 'open'|'investigating'|'resolved'|'rejected'|'reversed'|'upheld', resolution?: string, assignedTo?: string }
@@ -77,6 +80,7 @@ import { requireAuth } from "../middleware/auth";
 import { requirePermission } from "../middleware/rbac";
 import { createError } from "../middleware/errorHandler";
 import { ERROR_CODES } from "../constants/errorCodes";
+import { PaginationError } from "../utils/pagination";
 import {
   gateUpload,
   linkStoredKey,
@@ -590,6 +594,86 @@ disputeRoutes.post(
 );
 
 /**
+ * GET /api/disputes/:disputeId/notes
+ *
+ * Cursor-paginated notes for a dispute (issue #622). Large threads previously
+ * had to be read off the dispute detail response, which loads every note.
+ *
+ * Query:
+ *   limit?   page size, default 50 (max 100)
+ *   cursor?  opaque cursor returned as `pagination.nextCursor`
+ *   sort?    'date' (default, newest first) | 'relevance' (assigned agent first)
+ */
+disputeRoutes.get(
+  "/:disputeId/notes",
+  requireAuth,
+  requirePermission("dispute:read"),
+  async (req: Request, res: Response) => {
+    const { limit, cursor, sort } = req.query;
+
+    if (sort !== undefined && sort !== "date" && sort !== "relevance") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        'Query "sort" must be one of: date, relevance',
+        { error: 'Query "sort" must be one of: date, relevance' },
+      );
+    }
+
+    if (cursor !== undefined && typeof cursor !== "string") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        'Query "cursor" must be a string',
+        { error: 'Query "cursor" must be a string' },
+      );
+    }
+
+    const parsedLimit =
+      typeof limit === "string" ? parseInt(limit, 10) : undefined;
+    if (
+      limit !== undefined &&
+      (parsedLimit === undefined ||
+        !Number.isFinite(parsedLimit) ||
+        parsedLimit < 1)
+    ) {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        'Query "limit" must be a positive integer',
+        { error: 'Query "limit" must be a positive integer' },
+      );
+    }
+
+    try {
+      const page = await disputeService.getNotesPage(req.params.disputeId, {
+        limit: parsedLimit,
+        cursor: cursor as string | undefined,
+        sort: (sort as "date" | "relevance" | undefined) ?? "date",
+      });
+      return res.json(page);
+    } catch (error) {
+      if (error instanceof PaginationError) {
+        throw createError(ERROR_CODES.INVALID_INPUT, error.message, {
+          error: error.message,
+        });
+      }
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to fetch dispute notes";
+      throw createError(
+        message.includes("not found")
+          ? ERROR_CODES.NOT_FOUND
+          : ERROR_CODES.INTERNAL_ERROR,
+        message,
+        {
+          error: message,
+        },
+      );
+    }
+  },
+);
+
+/**
  * POST /api/disputes/:disputeId/notes
  */
 disputeRoutes.post(
@@ -709,10 +793,7 @@ disputeRoutes.post(
       if (uploadResult.success && uploadResult.key) {
         await linkStoredKey(security.record.id, uploadResult.key).catch(
           (err: unknown) => {
-            console.error(
-              "Failed to link security record to S3 key:",
-              err,
-            );
+            console.error("Failed to link security record to S3 key:", err);
           },
         );
       }
@@ -846,10 +927,7 @@ disputeRoutes.post(
             securityResults[i].record!.id,
             uploadResult.key,
           ).catch((err: unknown) => {
-            console.error(
-              "Failed to link security record to S3 key:",
-              err,
-            );
+            console.error("Failed to link security record to S3 key:", err);
           });
         }
 
@@ -944,7 +1022,10 @@ disputeRoutes.patch(
     const { disputeId, evidenceId } = req.params;
     const { category } = req.body;
 
-    if (!category || !EVIDENCE_CATEGORIES.includes(category as EvidenceCategory)) {
+    if (
+      !category ||
+      !EVIDENCE_CATEGORIES.includes(category as EvidenceCategory)
+    ) {
       throw createError(
         ERROR_CODES.INVALID_INPUT,
         `Field "category" must be one of: ${EVIDENCE_CATEGORIES.join(", ")}`,
@@ -1101,9 +1182,7 @@ disputeRoutes.get(
       return res.json({ count: timeline.length, timeline });
     } catch (error) {
       const message =
-        error instanceof Error
-          ? error.message
-          : "Failed to retrieve timeline";
+        error instanceof Error ? error.message : "Failed to retrieve timeline";
       throw createError(
         message.includes("not found")
           ? ERROR_CODES.NOT_FOUND

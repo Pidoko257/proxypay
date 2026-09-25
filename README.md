@@ -239,6 +239,7 @@ POST /api/vaults/:id/transfer         # Deposit/withdraw funds
 
 # Disputes
 GET  /api/disputes                    # List disputes
+GET  /api/disputes/:id/notes          # Notes (cursor paginated, limit/cursor/sort)
 PUT  /api/disputes/:id                # Update dispute status
 
 # Compliance

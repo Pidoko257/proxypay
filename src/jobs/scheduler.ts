@@ -37,6 +37,7 @@ import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
 import { runRedisKeyExpirationMonitorJob } from "./redisKeyExpirationJob";
 import { runIdempotencyCleanupJob } from "./idempotencyCleanupJob";
+import { runEncryptionKeyRotationJob } from "./keyRotationJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -191,6 +192,13 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM - purges expired idempotency keys in batches
     schedule: process.env.IDEMPOTENCY_CLEANUP_CRON || "0 3 * * *",
     handler: runIdempotencyCleanupJob,
+  },
+  {
+    name: "encryption-key-rotation",
+    // Weekly (Sun 4:00 AM) - validates the PII key ring and re-encrypts data
+    // when a new ACTIVE_PII_KEY_VERSION is deployed.
+    schedule: process.env.ENCRYPTION_KEY_ROTATION_CRON || "0 4 * * 0",
+    handler: runEncryptionKeyRotationJob,
   },
 ];
 

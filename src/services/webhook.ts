@@ -40,6 +40,13 @@ export interface WebhookOutboxEntry {
   maxAttempts: number;
   lastAttemptAt?: Date;
   nextAttemptAt?: Date;
+  /**
+   * Timestamp after which the delivery is considered unconfirmed if no ACK has
+   * been received.  Set to `Date.now() + ackTimeoutMs` when status transitions
+   * to "processing".  The outbox processor re-queues the entry if it remains
+   * in "processing" past this deadline (handles lost ACKs / crashed workers).
+   */
+  ackDeadlineAt?: Date;
   errorMessage?: string;
   createdAt: Date;
   compress?: boolean;
@@ -97,6 +104,12 @@ interface WebhookServiceOptions {
   logger?: WebhookLogger;
   /** When true, payloads are Gzip-compressed before sending (Content-Encoding: gzip) */
   compress?: boolean;
+  /**
+   * How long (ms) to wait for a consumer ACK before treating the delivery as
+   * unconfirmed and re-queuing the outbox entry.  Defaults to 60 000 ms (60 s).
+   * Only applies to processOutbox(); direct send* methods are unaffected.
+   */
+  ackTimeoutMs?: number;
 }
 
 interface WebhookTransactionModel {
@@ -112,6 +125,8 @@ export interface WebhookOutboxModel {
   findNextToProcess(limit: number): Promise<WebhookOutboxEntry[]>;
   update(id: string, update: Partial<WebhookOutboxEntry>): Promise<void>;
   delete(id: string): Promise<void>;
+  /** Optional: move a permanently-failed entry to the DLQ. */
+  moveToDLQ?(id: string, reason: string): Promise<void>;
 }
 
 function wait(ms: number): Promise<void> {
@@ -221,6 +236,11 @@ export class WebhookService {
   private readonly logger: WebhookLogger;
   /** Whether to Gzip-compress outgoing webhook payloads */
   readonly compress: boolean;
+  /**
+   * How long (ms) to wait for consumer ACK before re-queuing the outbox entry.
+   * Default: 60 000 ms (60 seconds).
+   */
+  private readonly ackTimeoutMs: number;
 
   constructor(options: WebhookServiceOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -239,6 +259,8 @@ export class WebhookService {
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
     this.compress = options.compress ?? (process.env.WEBHOOK_COMPRESSION === "true");
+    this.ackTimeoutMs = options.ackTimeoutMs
+      ?? (parseInt(process.env.WEBHOOK_ACK_TIMEOUT_MS || "", 10) || 60_000);
   }
 
   buildPayload(event: WebhookEvent, transaction: Transaction): WebhookPayload {
@@ -560,6 +582,26 @@ export class WebhookService {
     };
   }
 
+  /**
+   * Processes pending outbox entries with explicit consumer acknowledgment
+   * tracking (#630).
+   *
+   * Delivery guarantee flow per entry:
+   *  1. Mark the entry as "processing" and record an `ackDeadlineAt` timestamp.
+   *  2. POST the payload to the webhook endpoint.
+   *  3. Only mark the entry as "delivered" when the endpoint responds with a
+   *     2xx status — this is the explicit ACK.  Any other response (non-2xx,
+   *     network error, timeout) is treated as an unconfirmed delivery.
+   *  4. On failure: if `attempts < maxAttempts`, re-queue with exponential
+   *     backoff (status → "pending").  On final exhaustion, move the entry to
+   *     the DLQ via `outboxModel.moveToDLQ()` if available, otherwise mark as
+   *     "failed".
+   *
+   * The caller (scheduler) should also periodically call processOutbox() to
+   * re-pick any entries that have been stuck in "processing" past their
+   * `ackDeadlineAt` (e.g. due to a crashed worker between steps 2 and 3).
+   * Those entries are re-queued back to "pending" automatically.
+   */
   async processOutbox(
     outboxModel: WebhookOutboxModel,
     batchSize: number = 10,
@@ -569,51 +611,34 @@ export class WebhookService {
     let failures = 0;
 
     for (const entry of entries) {
-      const rawPayload = JSON.stringify(entry.payload);
-      const signature = this.signPayload(rawPayload);
-      const useCompress = entry.compress ?? this.compress;
-      const { body, extraHeaders } = await prepareBody(rawPayload, useCompress);
       const now = this.now();
 
-      try {
-        const response = await this.fetchImpl(this.webhookUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Webhook-Signature": signature,
-            ...extraHeaders,
-          },
-          body: body as any,
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        this.logger.log(
-          `[webhook-outbox] Delivered entry=${entry.id} compressed=${useCompress}`,
-        );
-        await outboxModel.update(entry.id, {
-          status: "delivered",
-          attempts: entry.attempts + 1,
-          lastAttemptAt: now,
-          errorMessage: undefined,
-        });
-        processed++;
-      } catch (error) {
-        failures++;
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+      // ── Re-queue entries stuck in "processing" past their ACK deadline ──
+      // This handles crashed workers that posted the payload but never updated
+      // the status.  The entry gets treated as a new attempt so delivery is
+      // retried automatically.
+      if (
+        entry.status === "processing" &&
+        entry.ackDeadlineAt &&
+        now > entry.ackDeadlineAt
+      ) {
         const attempts = entry.attempts + 1;
-        // For outbox, we don't have the status code easily available from the error
-        // We'll treat all errors as potentially retryable for the outbox processor
-        // since it runs asynchronously and we want to retry on transient failures
-        const isRetryable = attempts < entry.maxAttempts;
-        
         if (attempts >= entry.maxAttempts) {
-          await outboxModel.update(entry.id, {
-            status: "failed",
-            attempts,
-            lastAttemptAt: now,
-            errorMessage: `Exhausted retries: ${errorMessage}`,
-          });
-        } else if (isRetryable) {
+          this.logger.error(
+            `[webhook-outbox] ACK timeout exhausted retries entry=${entry.id}`,
+          );
+          if (outboxModel.moveToDLQ) {
+            await outboxModel.moveToDLQ(entry.id, `ACK timeout after ${attempts} attempts`);
+          } else {
+            await outboxModel.update(entry.id, {
+              status: "failed",
+              attempts,
+              lastAttemptAt: now,
+              errorMessage: `ACK timeout after ${attempts} attempts`,
+            });
+          }
+          failures++;
+        } else {
           const delayMs = calculateBackoffDelay(
             this.baseDelayMs,
             attempts,
@@ -625,20 +650,97 @@ export class WebhookService {
             attempts,
             lastAttemptAt: now,
             nextAttemptAt: new Date(now.getTime() + delayMs),
+            ackDeadlineAt: undefined,
+            errorMessage: `ACK timeout — re-queued (attempt ${attempts}/${entry.maxAttempts})`,
+          });
+          this.logger.warn(
+            `[webhook-outbox] ACK timeout for entry=${entry.id} — re-queuing, attempt ${attempts}/${entry.maxAttempts}`,
+          );
+          failures++;
+        }
+        continue;
+      }
+
+      // ── Mark as "processing" with an ACK deadline before sending ────────
+      const ackDeadlineAt = new Date(now.getTime() + this.ackTimeoutMs);
+      await outboxModel.update(entry.id, {
+        status: "processing",
+        ackDeadlineAt,
+      });
+
+      const rawPayload = JSON.stringify(entry.payload);
+      const signature = this.signPayload(rawPayload);
+      const useCompress = entry.compress ?? this.compress;
+      const { body, extraHeaders } = await prepareBody(rawPayload, useCompress);
+
+      try {
+        const response = await this.fetchImpl(this.webhookUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Webhook-Signature": signature,
+            ...extraHeaders,
+          },
+          body: body as any,
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        // Explicit ACK received (2xx response) — mark as delivered.
+        this.logger.log(
+          `[webhook-outbox] ACK received — delivered entry=${entry.id} compressed=${useCompress}`,
+        );
+        await outboxModel.update(entry.id, {
+          status: "delivered",
+          attempts: entry.attempts + 1,
+          lastAttemptAt: now,
+          ackDeadlineAt: undefined,
+          errorMessage: undefined,
+        });
+        processed++;
+      } catch (error) {
+        failures++;
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const attempts = entry.attempts + 1;
+
+        if (attempts >= entry.maxAttempts) {
+          // Final attempt exhausted — move to DLQ
+          this.logger.error(
+            `[webhook-outbox] Exhausted retries entry=${entry.id}: ${errorMessage}`,
+          );
+          if (outboxModel.moveToDLQ) {
+            await outboxModel.moveToDLQ(entry.id, `Exhausted retries: ${errorMessage}`);
+          } else {
+            await outboxModel.update(entry.id, {
+              status: "failed",
+              attempts,
+              lastAttemptAt: now,
+              ackDeadlineAt: undefined,
+              errorMessage: `Exhausted retries: ${errorMessage}`,
+            });
+          }
+        } else {
+          // Re-queue with backoff
+          const delayMs = calculateBackoffDelay(
+            this.baseDelayMs,
+            attempts,
+            this.maxDelayMs,
+            this.jitterFactor,
+          );
+          await outboxModel.update(entry.id, {
+            status: "pending",
+            attempts,
+            lastAttemptAt: now,
+            nextAttemptAt: new Date(now.getTime() + delayMs),
+            ackDeadlineAt: undefined,
             errorMessage,
           });
           this.logger.log(
             `[webhook-outbox] retrying in ${delayMs}ms entry=${entry.id} attempt=${attempts + 1}/${entry.maxAttempts}`,
           );
-        } else {
-          // Non-retryable error, mark as failed
-          await outboxModel.update(entry.id, {
-            status: "failed",
-            attempts,
-            lastAttemptAt: now,
-            errorMessage: `Non-retryable error: ${errorMessage}`,
-          });
         }
+
         this.logger.warn(
           `[webhook-outbox] Failed to deliver entry=${entry.id} attempt=${attempts}/${entry.maxAttempts}: ${errorMessage}`,
         );

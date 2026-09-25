@@ -15,6 +15,7 @@ import { runProviderBalanceAlertJob } from "./balances";
 import { runProviderHealthCheckJob } from "./providerHealthCheck";
 import { runProviderTokenWatchdogJob } from "./providerTokenWatchdog";
 import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
+import { runTranslationGapDetectionJob } from "./translationGapDetectionJob";
 import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
 import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
 import { runDailyProviderReconciliation } from "./providerReconciliationJob";
@@ -191,6 +192,14 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM - purges expired idempotency keys in batches
     schedule: process.env.IDEMPOTENCY_CLEANUP_CRON || "0 3 * * *",
     handler: runIdempotencyCleanupJob,
+  },
+  {
+    name: "translation-gap-detection",
+    // Daily at 4:30 AM - reports provider error translations missing per locale
+    schedule: process.env.TRANSLATION_GAP_DETECTION_CRON || "30 4 * * *",
+    handler: async () => {
+      await runTranslationGapDetectionJob();
+    },
   },
 ];
 

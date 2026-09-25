@@ -2,6 +2,14 @@ import { queryRead, queryWrite } from "../config/database";
 import { v4 as uuidv4 } from "uuid";
 import { AssetIssuanceService } from "../services/stellar/issuanceService";
 import logger from "../utils/logger";
+import {
+  AssetConfigurationError,
+  AssetConfigurationInput,
+  AssetConfigurationValidation,
+  AssetCreationRateLimiter,
+  AssetCreationRateLimitError,
+  validateAssetConfiguration,
+} from "./assetWorkflowValidation";
 
 export type AssetWorkflowStatus = "draft" | "pending_approval" | "approved" | "rejected" | "issuing" | "completed" | "failed";
 export type ApprovalAction = "approve" | "reject" | "request_changes";
@@ -26,11 +34,7 @@ export interface AssetIssuanceRequest {
   updatedAt: Date;
 }
 
-export interface AssetConfigurationValidation {
-  isValid: boolean;
-  errors: string[];
-  warnings: string[];
-}
+export type { AssetConfigurationValidation };
 
 export class AssetIssuanceRequestModel {
   async create(input: {
@@ -39,6 +43,7 @@ export class AssetIssuanceRequestModel {
     description?: string;
     limit: string;
     requestedBy: string;
+    metadata?: Record<string, any>;
     trustlineConfig?: { destinationAccount: string; limit: string; autoSetup: boolean };
   }): Promise<AssetIssuanceRequest> {
     const id = uuidv4();
@@ -60,7 +65,7 @@ export class AssetIssuanceRequestModel {
         input.limit,
         input.requestedBy,
         input.trustlineConfig ? JSON.stringify(input.trustlineConfig) : null,
-        JSON.stringify({}),
+        JSON.stringify(input.metadata || {}),
       ],
     );
 
@@ -124,6 +129,12 @@ export class AssetIssuanceRequestModel {
 export class AssetWorkflowService {
   private requestModel = new AssetIssuanceRequestModel();
   private issuanceService = new AssetIssuanceService();
+  private creationLimiter = new AssetCreationRateLimiter();
+
+  /** Swappable for tests (deterministic clock / raised limits). */
+  setCreationRateLimiter(limiter: AssetCreationRateLimiter): void {
+    this.creationLimiter = limiter;
+  }
 
   async createRequest(input: {
     assetCode: string;
@@ -131,17 +142,95 @@ export class AssetWorkflowService {
     description?: string;
     limit: string;
     requestedBy: string;
+    issuerPublicKey?: string;
     trustlineConfig?: { destinationAccount: string; limit: string; autoSetup: boolean };
   }): Promise<AssetIssuanceRequest> {
-    const validation = this.validateConfiguration({ assetCode: input.assetCode, name: input.name, limit: input.limit });
-    if (!validation.isValid) {
-      throw new Error(`Invalid asset configuration: ${validation.errors.join(", ")}`);
+    // Rate limit first: a caller hammering the endpoint should not even get to
+    // the (more expensive) duplicate lookup.
+    const rate = this.creationLimiter.consume(input.requestedBy);
+    if (!rate.allowed) {
+      logger.warn(
+        { requestedBy: input.requestedBy, retryAfterMs: rate.retryAfterMs },
+        "[asset-workflow] Creation rate limit exceeded",
+      );
+      throw new AssetCreationRateLimitError(rate.retryAfterMs);
     }
 
-    const request = await this.requestModel.create(input);
+    const validation = this.validateConfiguration({
+      assetCode: input.assetCode,
+      name: input.name,
+      limit: input.limit,
+      issuerPublicKey: input.issuerPublicKey,
+      distributionAccount: input.trustlineConfig?.destinationAccount,
+      description: input.description,
+    });
+    for (const warning of validation.warnings) {
+      logger.warn(
+        { assetCode: input.assetCode, requestedBy: input.requestedBy, warning },
+        "[asset-workflow] Asset configuration warning",
+      );
+    }
+    if (!validation.isValid) {
+      throw new AssetConfigurationError(validation.errors, validation.warnings);
+    }
+
+    if (input.trustlineConfig && input.trustlineConfig.limit !== undefined) {
+      const trustlineCheck = validateAssetConfiguration({
+        assetCode: input.assetCode,
+        name: input.name,
+        limit: input.trustlineConfig.limit,
+        distributionAccount: input.trustlineConfig.destinationAccount,
+      });
+      if (!trustlineCheck.isValid) {
+        throw new AssetConfigurationError(
+          trustlineCheck.errors.map((e) => `trustline: ${e}`),
+          trustlineCheck.warnings,
+        );
+      }
+    }
+
+    const duplicate = await this.findDuplicateAssetCode(input.assetCode);
+    if (duplicate) {
+      throw new AssetConfigurationError([
+        duplicate.exact
+          ? `Asset code ${input.assetCode} already exists`
+          : `Asset code ${input.assetCode} duplicates existing request ${duplicate.id} (` +
+            `${duplicate.assetCode}) in a case-insensitive comparison`,
+      ]);
+    }
+
+    const request = await this.requestModel.create({
+      ...input,
+      metadata: input.issuerPublicKey
+        ? { issuerPublicKey: input.issuerPublicKey }
+        : undefined,
+    });
     logger.info({ requestId: request.id, assetCode: input.assetCode }, "[asset-workflow] Request created");
 
     return request;
+  }
+
+  /**
+   * Duplicate business-rule check (issue #571).
+   *
+   * Exact duplicates are rejected by the persistence layer too, but doing it
+   * here gives a typed error and covers case-insensitive collisions such as
+   * `usdco` vs `USDCO`, which the exact-match lookup misses.
+   */
+  private async findDuplicateAssetCode(
+    assetCode: string,
+  ): Promise<{ id: string; assetCode: string; exact: boolean } | null> {
+    const exact = await this.requestModel.findByCode(assetCode);
+    if (exact) {
+      return { id: exact.id, assetCode: exact.assetCode, exact: true };
+    }
+    const all = await this.requestModel.findAll();
+    const collision = all.find(
+      (request) => request.assetCode.toUpperCase() === assetCode.toUpperCase(),
+    );
+    return collision
+      ? { id: collision.id, assetCode: collision.assetCode, exact: false }
+      : null;
   }
 
   async approveRequest(id: string, approverId: string, action: ApprovalAction, notes?: string): Promise<AssetIssuanceRequest> {
@@ -189,6 +278,21 @@ export class AssetWorkflowService {
       throw new Error("Asset issuance request not found");
     }
 
+    // Destination and trustline limit are validated before anything is
+    // persisted or signed: a malformed account here used to reach setup.
+    const trustlineValidation = validateAssetConfiguration({
+      assetCode: request.assetCode,
+      name: request.name,
+      limit: config.limit,
+      distributionAccount: config.destinationAccount,
+    });
+    if (!trustlineValidation.isValid) {
+      throw new AssetConfigurationError(
+        trustlineValidation.errors.map((e) => `trustline: ${e}`),
+        trustlineValidation.warnings,
+      );
+    }
+
     if (!config.autoSetup) {
       await this.requestModel.updateTrustlineConfig(id, config);
       return (await this.requestModel.findById(id))!;
@@ -218,28 +322,8 @@ export class AssetWorkflowService {
     logger.info({ assetCode, destinationAccount, limit }, "[asset-workflow] Setting up trustline automatically");
   }
 
-  validateConfiguration(config: { assetCode: string; name: string; limit: string }): AssetConfigurationValidation {
-    const errors: string[] = [];
-    const warnings: string[] = [];
-
-    if (!config.assetCode || config.assetCode.length < 1 || config.assetCode.length > 12) {
-      errors.push("Asset code must be between 1 and 12 characters");
-    }
-    if (!/^[a-zA-Z0-9]+$/.test(config.assetCode)) {
-      errors.push("Asset code must be alphanumeric");
-    }
-    if (!config.name || config.name.trim().length < 1) {
-      errors.push("Asset name is required");
-    }
-    const limitNum = parseFloat(config.limit);
-    if (isNaN(limitNum) || limitNum <= 0) {
-      errors.push("Limit must be a positive number");
-    }
-    if (limitNum > 1000000000) {
-      warnings.push("Limit is very high, please verify");
-    }
-
-    return { isValid: errors.length === 0, errors, warnings };
+  validateConfiguration(config: AssetConfigurationInput): AssetConfigurationValidation {
+    return validateAssetConfiguration(config);
   }
 
   async getPendingApprovals(): Promise<AssetIssuanceRequest[]> {

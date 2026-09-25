@@ -1,8 +1,13 @@
 import { Router } from "express";
 import { AssetWizardController } from "../../controllers/admin/assetWizardController";
 import { assetWorkflowService } from "../../services/assetWorkflowService";
+import {
+  AssetConfigurationError,
+  AssetCreationRateLimitError,
+} from "../../services/assetWorkflowValidation";
 import { requireAdmin, logAdminAction } from "../admin";
-import { createError, ERROR_CODES } from "../../middleware/errorHandler";
+import { createError } from "../../middleware/errorHandler";
+import { ERROR_CODES } from "../../constants/errorCodes";
 
 const router = Router();
 const controller = new AssetWizardController();
@@ -71,10 +76,29 @@ router.post("/issue", controller.issueAsset);
  */
 router.post("/workflow/requests", async (req, res) => {
   try {
-    const { assetCode, name, description, limit, requestedBy, trustlineConfig } = req.body;
-    const request = await assetWorkflowService.createRequest({ assetCode, name, description, limit, requestedBy, trustlineConfig });
+    const { assetCode, name, description, limit, requestedBy, trustlineConfig, issuerPublicKey } = req.body;
+    const request = await assetWorkflowService.createRequest({
+      assetCode,
+      name,
+      description,
+      limit,
+      requestedBy,
+      issuerPublicKey,
+      trustlineConfig,
+    });
     res.status(201).json({ success: true, data: request });
   } catch (error) {
+    // Rate limiting is a 429 with a retry hint, not a generic 400.
+    if (error instanceof AssetCreationRateLimitError) {
+      res.setHeader("Retry-After", String(Math.ceil(error.retryAfterMs / 1000)));
+      throw createError(ERROR_CODES.RATE_LIMIT, error.message);
+    }
+    if (error instanceof AssetConfigurationError) {
+      throw createError(ERROR_CODES.INVALID_INPUT, error.message, {
+        errors: error.errors,
+        warnings: error.warnings,
+      } as any);
+    }
     throw createError(ERROR_CODES.INVALID_INPUT, error instanceof Error ? error.message : "Failed to create request");
   }
 });

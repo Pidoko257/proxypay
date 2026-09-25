@@ -37,6 +37,8 @@ import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
 import { runRedisKeyExpirationMonitorJob } from "./redisKeyExpirationJob";
 import { runIdempotencyCleanupJob } from "./idempotencyCleanupJob";
+import { runNotificationHealthCheckJob } from "./notificationHealthCheckJob";
+import { runComplianceExpiryAlertJob } from "./complianceExpiryAlertJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -191,6 +193,20 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM - purges expired idempotency keys in batches
     schedule: process.env.IDEMPOTENCY_CLEANUP_CRON || "0 3 * * *",
     handler: runIdempotencyCleanupJob,
+  },
+  {
+    name: "notification-health-check",
+    // Every 5 minutes - evaluates per-channel delivery health and escalates
+    // only on state transitions (#479)
+    schedule: process.env.NOTIFICATION_HEALTH_CHECK_CRON || "*/5 * * * *",
+    handler: runNotificationHealthCheckJob,
+  },
+  {
+    name: "compliance-expiry-alert",
+    // Daily at 08:00 – escalates compliance certifications that are lapsing
+    // or have lapsed (#481)
+    schedule: process.env.COMPLIANCE_EXPIRY_ALERT_CRON || "0 8 * * *",
+    handler: runComplianceExpiryAlertJob,
   },
 ];
 

@@ -513,3 +513,46 @@ export const workerUtilizationRatio = new Gauge({
   registers: [register],
 });
 
+// ─── Provider balance cache (Issue #634) ────────────────────────────────────
+
+/** Number of provider balance reads served from a fresh cache entry. */
+export const providerBalanceCacheHitsTotal = new Counter({
+  name: "provider_balance_cache_hits_total",
+  help: "Provider balance cache hits (fresh entry served)",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+/** Number of provider balance reads that found no cached entry. */
+export const providerBalanceCacheMissesTotal = new Counter({
+  name: "provider_balance_cache_misses_total",
+  help: "Provider balance cache misses (no cached entry)",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+/** Number of times a stale provider balance entry was detected. */
+export const providerBalanceCacheStaleTotal = new Counter({
+  name: "provider_balance_cache_stale_total",
+  help: "Times a cached provider balance exceeded the staleness threshold",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+/** Provider balance cache refresh attempts, labelled by outcome. */
+export const providerBalanceCacheRefreshesTotal = new Counter({
+  name: "provider_balance_cache_refreshes_total",
+  help: "Provider balance cache refresh attempts",
+  labelNames: ["provider", "result"],
+  registers: [register],
+});
+
+/** Age in seconds of the cached provider balance. */
+export const providerBalanceCacheAgeSeconds = new Gauge({
+  name: "provider_balance_cache_age_seconds",
+  help: "Age of the cached provider balance in seconds",
+  labelNames: ["provider"],
+  registers: [register],
+});
+
+

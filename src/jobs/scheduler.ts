@@ -28,10 +28,14 @@ import {
   INDEX_BLOAT_MONITOR_ENABLED,
   LEDGER_INTEGRITY_CRON,
   LEDGER_INTEGRITY_JOB_ENABLED,
+  DB_OPTIMIZATION_CRON,
+  DB_OPTIMIZATION_JOB_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
 import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
+import { runDatabaseOptimizationJob } from "./databaseOptimizationJob";
+import { runMlFraudTrainingJob } from "./mlFraudTrainingJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
@@ -147,6 +151,17 @@ const JOBS: JobConfig[] = [
         },
       ]
     : []),
+  ...(DB_OPTIMIZATION_JOB_ENABLED
+    ? [
+        {
+          name: "database-optimization",
+          // Daily at 3:30 AM by default - vacuum/analyze, fragment and
+          // reorganize indexes, and maintain the query plan cache
+          schedule: DB_OPTIMIZATION_CRON,
+          handler: runDatabaseOptimizationJob,
+        },
+      ]
+    : []),
   {
     name: "subscriptions",
     // Default: run every minute to pick up due subscriptions
@@ -191,6 +206,13 @@ const JOBS: JobConfig[] = [
     // Daily at 3:00 AM - purges expired idempotency keys in batches
     schedule: process.env.IDEMPOTENCY_CLEANUP_CRON || "0 3 * * *",
     handler: runIdempotencyCleanupJob,
+  },
+  {
+    name: "ml-fraud-training",
+    // Daily at 4:30 AM - retrains the fraud classifier on the accumulated
+    // training set and promotes it only if it beats the live model
+    schedule: process.env.ML_FRAUD_TRAINING_CRON || "30 4 * * *",
+    handler: runMlFraudTrainingJob,
   },
 ];
 

@@ -117,6 +117,7 @@ import adminReplicasRouter from "./routes/adminReplicas";
 import connectionDashboardRouter from "./routes/connectionDashboard";
 import { transactionStreamRoutes } from "./routes/stream";
 import { batchOperationRoutes } from "./routes/batchOperations";
+import providerThrottleAdminRouter from "./routes/providerThrottleAdmin";
 import {
   startHeartbeatService,
   stopHeartbeatService,
@@ -532,6 +533,8 @@ app.use("/api/fraud", fraudRoutes);
 app.use("/api/auth/2fa", twoFactorRouter);
 // #392 – Batch Import Status Tracking
 app.use("/api/batch-operations", batchOperationRoutes);
+// #625 – Provider Throttle Dead-Letter Queue admin API
+app.use("/api/admin/provider-throttle", providerThrottleAdminRouter);
 // #358 – Provider Health Aggregation
 app.use("/api/health", healthProvidersRouter);
 // #356 – Read Replica Health Admin

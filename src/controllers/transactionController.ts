@@ -3,6 +3,10 @@ import { z } from "zod";
 import { StellarService } from "../services/stellar/stellarService";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { maskPhoneNumber } from "../utils/masking";
+import {
+  getPaginationInfo,
+  VALID_STATUSES as VALID_STATUS_FILTERS,
+} from "../utils/transactionFilters";
 import { validatePhoneProviderMatch } from "../utils/phoneUtils";
 import {
   Transaction,
@@ -1008,40 +1012,47 @@ export const listTransactionsHandler = async (req: Request, res: Response) => {
       offset: 0,
     };
 
-    const totalCount = await transactionModel.countByStatuses(filters.statuses);
-    const transactions = await transactionModel.findByStatuses(
-      filters.statuses,
-      filters.limit,
-      filters.offset,
-    );
+    // An empty status filter means "all statuses" — expand to the full valid
+    // set so SQL receives an explicit (OR) status list.
+    const statuses: TransactionStatus[] = (filters.statuses?.length
+      ? filters.statuses
+      : VALID_STATUS_FILTERS) as TransactionStatus[];
 
-    // If a reference search is requested, we should probably use the list method instead
-    // or just filter the results. But wait, findByStatuses is limited.
-    // Let's use the list() method instead which is more flexible.
-    const results = await transactionModel.list(
+    // Reference lookups need the more flexible list/count helpers; status
+    // filtering is applied through findByStatuses/countByStatuses.
+    if (filters.reference) {
+      const results = await transactionModel.list(
+        filters.limit,
+        filters.offset,
+        undefined,
+        undefined,
+        {
+          tags: [],
+          referenceNumber: filters.reference,
+        },
+      );
+      const total = await transactionModel.count(undefined, undefined, {
+        referenceNumber: filters.reference,
+      });
+
+      return res.json({
+        data: results,
+        pagination: getPaginationInfo(total, filters.limit, filters.offset),
+        filters: { statuses },
+      });
+    }
+
+    const totalCount = await transactionModel.countByStatuses(statuses);
+    const transactions = await transactionModel.findByStatuses(
+      statuses,
       filters.limit,
       filters.offset,
-      undefined,
-      undefined,
-      {
-        tags: [], // Could be extended
-        referenceNumber: filters.reference,
-      },
     );
-    const total = filters.reference
-      ? await transactionModel.count(undefined, undefined, {
-          referenceNumber: filters.reference,
-        })
-      : totalCount;
 
     return res.json({
-      data: results,
-      pagination: {
-        total,
-        limit: filters.limit,
-        offset: filters.offset,
-        hasMore: filters.offset + filters.limit < total,
-      },
+      data: transactions,
+      pagination: getPaginationInfo(totalCount, filters.limit, filters.offset),
+      filters: { statuses },
     });
   } catch (err) {
     console.error("Failed to list transactions:", err);

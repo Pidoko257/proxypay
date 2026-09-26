@@ -113,6 +113,9 @@ import providerHealthRouter from "./routes/providerHealthRoutes";
 import kycWebhookRouter from "./routes/kycWebhookRoutes";
 import twoFactorRouter from "./routes/twoFactorRoutes";
 import { transactionMetadataRouter } from "./routes/transactionMetadataRoutes";
+import transactionFilterRouter from "./routes/transactionFilters";
+import notificationHealthRouter from "./routes/notificationHealth";
+import complianceTrainingRouter from "./routes/complianceTraining";
 import healthProvidersRouter from "./routes/healthProviders";
 import adminReplicasRouter from "./routes/adminReplicas";
 import connectionDashboardRouter from "./routes/connectionDashboard";
@@ -449,6 +452,12 @@ app.use(validateVersionMiddleware);
 app.use(deprecationMiddleware);
 app.use("/oauth", createOAuthRouter());
 
+// #480 – Advanced transaction filtering (saved filter templates, filter AST).
+// Mounted *before* the version-negotiated transaction router on purpose: that
+// router serves GET /:id, which would otherwise capture
+// GET /api/transactions/filters and answer "transaction not found".
+app.use("/api/transactions/filters", transactionFilterRouter);
+
 // Replay retried mutations instead of processing them twice (Idempotency-Key)
 app.use("/api/v1/transactions", idempotency());
 app.use("/api/transactions", idempotency());
@@ -530,6 +539,10 @@ app.use("/api/admin/auth", createAdminSep10Router());
 app.use("/api/kyc/webhooks", kycWebhookRouter);
 // #403 – Transaction Metadata Search
 app.use("/api/transactions/metadata", transactionMetadataRouter);
+// #479 – real-time notification system status
+app.use("/api/notifications", notificationHealthRouter);
+// #481 – compliance training dashboard, assignments and certifications
+app.use("/api/compliance/training", complianceTrainingRouter);
 // #404 – Fraud Detection Logging
 app.use("/api/fraud", fraudRoutes);
 // #404 – 2FA Multi-method

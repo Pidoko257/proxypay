@@ -551,3 +551,34 @@ export const workerUtilizationRatio = new Gauge({
   registers: [register],
 });
 
+/**
+ * #479 – Notification system observability
+ * Exposes whether notifications are actually being delivered, per channel.
+ */
+export const notificationDeliveriesTotal = new Counter({
+  name: "notification_deliveries_total",
+  help: "Notification delivery attempts by channel and outcome",
+  labelNames: ["channel", "status"],
+  registers: [register],
+});
+
+export const notificationDeliveryDurationSeconds = new Histogram({
+  name: "notification_delivery_duration_seconds",
+  help: "Duration of a single notification channel delivery attempt",
+  labelNames: ["channel", "status"],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+  registers: [register],
+});
+
+export const notificationChannelHealthGauge = new Gauge({
+  name: "notification_channel_health",
+  help: "Notification channel health (1 healthy, 0.5 degraded, 0 down)",
+  labelNames: ["channel"],
+  registers: [register],
+});
+
+export const notificationSystemUp = new Gauge({
+  name: "notification_system_up",
+  help: "1 when every notification channel is healthy, 0 otherwise",
+  registers: [register],
+});

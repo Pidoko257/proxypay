@@ -2,16 +2,16 @@ import {
   generatePortalUrl,
   verifyPortalToken,
   consumePortalToken,
-} from "../services/merchantPortalService";
+} from "../merchantPortalService";
 
 // Mock database pool
-jest.mock("../config/database", () => ({
+jest.mock("../../config/database", () => ({
   pool: {
     query: jest.fn(),
   },
 }));
 
-import { pool } from "../config/database";
+import { pool } from "../../config/database";
 const mockPool = pool as jest.Mocked<typeof pool>;
 
 describe("merchantPortalService", () => {

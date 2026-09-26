@@ -8,7 +8,8 @@ import {
 } from "../assetWorkflowService";
 import { Keypair } from "stellar-sdk";
 import { queryRead, queryWrite } from "../../config/database";
-import { AssetIssuanceService } from "../../services/stellar/issuanceService";
+import { AssetIssuanceService } from "../stellar/issuanceService";
+import { Keypair } from "stellar-sdk";
 
 jest.mock("../../config/database");
 jest.mock("../stellar/issuanceService");
@@ -78,7 +79,7 @@ describe("AssetWorkflowService", () => {
     it("should reject invalid asset code", () => {
       const result = assetWorkflowService.validateConfiguration({ assetCode: "", name: "USD Coin", limit: "1000000" });
       expect(result.isValid).toBe(false);
-      expect(result.errors.some((e) => e.includes("1 and 12"))).toBe(true);
+      expect(result.errors.join(" ")).toMatch(/3-12|between 3 and 12/);
     });
 
     it("should reject invalid limit", () => {
@@ -89,13 +90,73 @@ describe("AssetWorkflowService", () => {
   });
 
   describe("submitForApproval", () => {
-    it("should submit draft request for approval", async () => {
-      (queryRead as jest.Mock).mockResolvedValue({
+    it("moves a draft request to pending_approval", async () => {
+      const row = useStatefulDb(baseRow("draft"));
+
+      const request = await assetWorkflowService.submitForApproval("req-1");
+
+      expect(row.status).toBe("pending_approval");
+      expect(request.status).toBe("pending_approval");
+    });
+
+    it("should throw if request is not in draft", async () => {
+      useStatefulDb(baseRow("pending_approval"));
+
+      await expect(assetWorkflowService.submitForApproval("req-1")).rejects.toThrow("Cannot submit request");
+    });
+  });
+
+  describe("approveRequest", () => {
+    it("approves, issues and ends in completed", async () => {
+      const row = useStatefulDb(baseRow("pending_approval"));
+      (AssetIssuanceService as jest.MockedClass<typeof AssetIssuanceService>).mockImplementation(() => ({
+        setupAnchoredAsset: jest.fn().mockResolvedValue({ assetCode: "USD", issuerPublicKey: "G...", distributionPublicKey: "G..." }),
+      } as any));
+
+      const request = await assetWorkflowService.approveRequest("req-1", "admin-1", "approve", "Looks good");
+
+      expect(row.status).toBe("completed");
+      expect(request.status).toBe("completed");
+      expect(row.approved_by).toBe("admin-1");
+      expect(row.approval_notes).toBe("Looks good");
+    });
+
+    it("marks the request failed when issuance throws", async () => {
+      const row = useStatefulDb(baseRow("pending_approval"));
+      jest
+        .spyOn((assetWorkflowService as any).issuanceService, "setupAnchoredAsset")
+        .mockRejectedValue(new Error("horizon unavailable"));
+
+      await expect(
+        assetWorkflowService.approveRequest("req-1", "admin-1", "approve"),
+      ).rejects.toThrow("horizon unavailable");
+      expect(row.status).toBe("failed");
+    });
+
+    it("rejects a pending request without issuing anything", async () => {
+      const row = useStatefulDb(baseRow("pending_approval"));
+      const issueSpy = jest.spyOn((assetWorkflowService as any).issuanceService, "setupAnchoredAsset");
+
+      const request = await assetWorkflowService.approveRequest("req-1", "admin-1", "reject", "wrong code");
+
+      expect(row.status).toBe("rejected");
+      expect(request.status).toBe("rejected");
+      expect(issueSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("createRequest validation (issue #571)", () => {
+    const issuer = Keypair.random().publicKey();
+    const distribution = Keypair.random().publicKey();
+
+    const stubInsert = (assetCode = "USD") => {
+      (queryWrite as jest.Mock).mockResolvedValue({
         rows: [
           {
-            id: "req-1",
-            asset_code: "USD",
+            id: "req-new",
+            asset_code: assetCode,
             name: "USD Coin",
+            description: null,
             limit: "1000000",
             status: "draft",
             requested_by: "user-1",
@@ -105,57 +166,199 @@ describe("AssetWorkflowService", () => {
           },
         ],
       });
-      (queryWrite as jest.Mock).mockResolvedValue({ rows: [] });
+    };
 
-      const request = await assetWorkflowService.submitForApproval("req-1");
-      expect(request.status).toBe("pending_approval");
+    beforeEach(() => {
+      assetWorkflowService.setCreationRateLimiter(
+        new AssetCreationRateLimiter({ maxRequests: 100, windowMs: 60_000 }),
+      );
     });
 
-    it("should throw if request is not in draft", async () => {
-      (queryRead as jest.Mock).mockResolvedValue({
-        rows: [
-          {
-            id: "req-1",
-            asset_code: "USD",
-            name: "USD Coin",
-            limit: "1000000",
-            status: "pending_approval",
-            requested_by: "user-1",
-            metadata: {},
-            created_at: new Date(),
-            updated_at: new Date(),
-          },
-        ],
+    it("rejects an invalid asset code before touching the database", async () => {
+      (queryRead as jest.Mock).mockResolvedValue({ rows: [] });
+
+      await expect(
+        assetWorkflowService.createRequest({
+          assetCode: "US",
+          name: "Too short",
+          limit: "1000",
+          requestedBy: "user-1",
+        }),
+      ).rejects.toBeInstanceOf(AssetConfigurationError);
+
+      expect(queryWrite).not.toHaveBeenCalled();
+    });
+
+    it("rejects an invalid issuer account", async () => {
+      (queryRead as jest.Mock).mockResolvedValue({ rows: [] });
+
+      await expect(
+        assetWorkflowService.createRequest({
+          assetCode: "USD",
+          name: "USD Coin",
+          limit: "1000",
+          requestedBy: "user-1",
+          issuerPublicKey: "GNOTAREALKEY",
+        }),
+      ).rejects.toThrow(/issuer account is not a valid Stellar public key/i);
+    });
+
+    it("rejects an invalid distribution account and a self-issued trustline", async () => {
+      (queryRead as jest.Mock).mockResolvedValue({ rows: [] });
+
+      await expect(
+        assetWorkflowService.createRequest({
+          assetCode: "USD",
+          name: "USD Coin",
+          limit: "1000",
+          requestedBy: "user-1",
+          trustlineConfig: { destinationAccount: "nope", limit: "1000", autoSetup: false },
+        }),
+      ).rejects.toThrow(/distribution account is not a valid Stellar public key/i);
+
+      await expect(
+        assetWorkflowService.createRequest({
+          assetCode: "USD",
+          name: "USD Coin",
+          limit: "1000",
+          requestedBy: "user-1",
+          issuerPublicKey: issuer,
+          trustlineConfig: { destinationAccount: issuer, limit: "1000", autoSetup: false },
+        }),
+      ).rejects.toThrow(/must differ from the issuer/i);
+    });
+
+    it("rejects an exact duplicate asset code", async () => {
+      (queryRead as jest.Mock).mockImplementation((sql: string) =>
+        Promise.resolve(
+          String(sql).includes("asset_code")
+            ? { rows: [{ id: "req-existing", asset_code: "USD" }] }
+            : { rows: [] },
+        ),
+      );
+
+      await expect(
+        assetWorkflowService.createRequest({
+          assetCode: "USD",
+          name: "USD Coin",
+          limit: "1000",
+          requestedBy: "user-1",
+        }),
+      ).rejects.toThrow(/already exists/);
+      expect(queryWrite).not.toHaveBeenCalled();
+    });
+
+    it("rejects a case-insensitive duplicate the exact lookup misses", async () => {
+      (queryRead as jest.Mock).mockImplementation((sql: string) =>
+        Promise.resolve(
+          String(sql).includes("WHERE asset_code")
+            ? { rows: [] }
+            : { rows: [{ id: "req-existing", asset_code: "USDCOIN" }] },
+        ),
+      );
+
+      await expect(
+        assetWorkflowService.createRequest({
+          assetCode: "usdcoin",
+          name: "Same asset, different casing",
+          limit: "1000",
+          requestedBy: "user-1",
+        }),
+      ).rejects.toThrow(/case-insensitive/);
+    });
+
+    it("rate limits asset creation per requester", async () => {
+      assetWorkflowService.setCreationRateLimiter(
+        new AssetCreationRateLimiter({ maxRequests: 1, windowMs: 60_000 }),
+      );
+      (queryRead as jest.Mock).mockResolvedValue({ rows: [] });
+      stubInsert();
+
+      await assetWorkflowService.createRequest({
+        assetCode: "USD",
+        name: "USD Coin",
+        limit: "1000",
+        requestedBy: "user-1",
       });
 
-      await expect(assetWorkflowService.submitForApproval("req-1")).rejects.toThrow("Cannot submit request");
+      const error = await assetWorkflowService
+        .createRequest({
+          assetCode: "EUR",
+          name: "Euro Coin",
+          limit: "1000",
+          requestedBy: "user-1",
+        })
+        .catch((e) => e);
+
+      expect(error).toBeInstanceOf(AssetCreationRateLimitError);
+      expect((error as AssetCreationRateLimitError).retryAfterMs).toBeGreaterThan(0);
+
+      // A different requester still gets through.
+      await expect(
+        assetWorkflowService.createRequest({
+          assetCode: "EUR",
+          name: "Euro Coin",
+          limit: "1000",
+          requestedBy: "user-2",
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it("stores the issuer account in metadata so it is not silently dropped", async () => {
+      (queryRead as jest.Mock).mockResolvedValue({ rows: [] });
+      stubInsert();
+
+      await assetWorkflowService.createRequest({
+        assetCode: "USD",
+        name: "USD Coin",
+        limit: "1000",
+        requestedBy: "user-1",
+        issuerPublicKey: issuer,
+      });
+
+      const insertCall = (queryWrite as jest.Mock).mock.calls[0];
+      expect(insertCall[1]).toContain(JSON.stringify({ issuerPublicKey: issuer }));
     });
   });
 
-  describe("approveRequest", () => {
-    it("should approve a pending request", async () => {
-      (queryRead as jest.Mock).mockResolvedValue({
-        rows: [
-          {
-            id: "req-1",
-            asset_code: "USD",
-            name: "USD Coin",
-            limit: "1000000",
-            status: "pending_approval",
-            requested_by: "user-1",
-            metadata: {},
-            created_at: new Date(),
-            updated_at: new Date(),
-          },
-        ],
-      });
-      (queryWrite as jest.Mock).mockResolvedValue({ rows: [] });
-      (AssetIssuanceService as jest.MockedClass<typeof AssetIssuanceService>).mockImplementation(() => ({
-        setupAnchoredAsset: jest.fn().mockResolvedValue({ assetCode: "USD", issuerPublicKey: "G...", distributionPublicKey: "G..." }),
-      } as any));
+  describe("configureTrustline validation (issue #571)", () => {
+    const request = {
+      id: "req-1",
+      asset_code: "USD",
+      name: "USD Coin",
+      limit: "1000000",
+      status: "approved",
+      requested_by: "user-1",
+      metadata: {},
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
 
-      const request = await assetWorkflowService.approveRequest("req-1", "admin-1", "approve", "Looks good");
-      expect(request.status).toBe("approved");
+    it("refuses a malformed destination account without writing", async () => {
+      (queryRead as jest.Mock).mockResolvedValue({ rows: [request] });
+
+      await expect(
+        assetWorkflowService.configureTrustline("req-1", {
+          destinationAccount: "GDESTINATION",
+          limit: "1000",
+          autoSetup: true,
+        }),
+      ).rejects.toThrow(/trustline: distribution account is not a valid Stellar public key/i);
+
+      expect(queryWrite).not.toHaveBeenCalled();
+    });
+
+    it("accepts a valid destination account", async () => {
+      (queryRead as jest.Mock).mockResolvedValue({ rows: [request] });
+      (queryWrite as jest.Mock).mockResolvedValue({ rows: [] });
+
+      await expect(
+        assetWorkflowService.configureTrustline("req-1", {
+          destinationAccount: Keypair.random().publicKey(),
+          limit: "1000",
+          autoSetup: false,
+        }),
+      ).resolves.toBeDefined();
     });
   });
 });

@@ -3,6 +3,14 @@ import { v4 as uuidv4 } from "uuid";
 import * as StellarSdk from "stellar-sdk";
 import { AssetIssuanceService } from "../services/stellar/issuanceService";
 import logger from "../utils/logger";
+import {
+  AssetConfigurationError,
+  AssetConfigurationInput,
+  AssetConfigurationValidation,
+  AssetCreationRateLimiter,
+  AssetCreationRateLimitError,
+  validateAssetConfiguration,
+} from "./assetWorkflowValidation";
 
 export type AssetWorkflowStatus = "draft" | "pending_approval" | "approved" | "rejected" | "issuing" | "completed" | "failed";
 export type ApprovalAction = "approve" | "reject" | "request_changes";
@@ -27,11 +35,7 @@ export interface AssetIssuanceRequest {
   updatedAt: Date;
 }
 
-export interface AssetConfigurationValidation {
-  isValid: boolean;
-  errors: string[];
-  warnings: string[];
-}
+export type { AssetConfigurationValidation };
 
 /** PostgreSQL unique-violation. The authority on "this asset code is taken". */
 const PG_UNIQUE_VIOLATION = "23505";
@@ -131,6 +135,7 @@ export class AssetIssuanceRequestModel {
     description?: string;
     limit: string;
     requestedBy: string;
+    metadata?: Record<string, any>;
     trustlineConfig?: { destinationAccount: string; limit: string; autoSetup: boolean };
     metadata?: Record<string, unknown>;
   }): Promise<AssetIssuanceRequest> {
@@ -237,6 +242,12 @@ export class AssetIssuanceRequestModel {
 export class AssetWorkflowService {
   private requestModel = new AssetIssuanceRequestModel();
   private issuanceService = new AssetIssuanceService();
+  private creationLimiter = new AssetCreationRateLimiter();
+
+  /** Swappable for tests (deterministic clock / raised limits). */
+  setCreationRateLimiter(limiter: AssetCreationRateLimiter): void {
+    this.creationLimiter = limiter;
+  }
 
   async createRequest(input: {
     assetCode: string;
@@ -258,7 +269,7 @@ export class AssetWorkflowService {
       distributionAccount: input.trustlineConfig?.destinationAccount,
     });
     if (!validation.isValid) {
-      throw new Error(`Invalid asset configuration: ${validation.errors.join(", ")}`);
+      throw new AssetConfigurationError(validation.errors, validation.warnings);
     }
 
     // The issuer is persisted in the existing metadata JSONB rather than in a
@@ -277,6 +288,29 @@ export class AssetWorkflowService {
     logger.info({ requestId: request.id, assetCode: input.assetCode }, "[asset-workflow] Request created");
 
     return request;
+  }
+
+  /**
+   * Duplicate business-rule check (issue #571).
+   *
+   * Exact duplicates are rejected by the persistence layer too, but doing it
+   * here gives a typed error and covers case-insensitive collisions such as
+   * `usdco` vs `USDCO`, which the exact-match lookup misses.
+   */
+  private async findDuplicateAssetCode(
+    assetCode: string,
+  ): Promise<{ id: string; assetCode: string; exact: boolean } | null> {
+    const exact = await this.requestModel.findByCode(assetCode);
+    if (exact) {
+      return { id: exact.id, assetCode: exact.assetCode, exact: true };
+    }
+    const all = await this.requestModel.findAll();
+    const collision = all.find(
+      (request) => request.assetCode.toUpperCase() === assetCode.toUpperCase(),
+    );
+    return collision
+      ? { id: collision.id, assetCode: collision.assetCode, exact: false }
+      : null;
   }
 
   async approveRequest(id: string, approverId: string, action: ApprovalAction, notes?: string): Promise<AssetIssuanceRequest> {

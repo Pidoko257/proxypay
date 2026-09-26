@@ -6,9 +6,14 @@ import { maskPhoneNumber } from "../utils/masking";
 import { validatePhoneProviderMatch } from "../utils/phoneUtils";
 import {
   Transaction,
+  TransactionListFilters,
   TransactionModel,
   TransactionStatus,
 } from "../models/transaction";
+import {
+  getFilterTemplate,
+  parseFilterExpression,
+} from "../services/transactionFilterService";
 import { lockManager, LockKeys } from "../utils/lock";
 import { TransactionLimitService } from "../services/transactionLimit/transactionLimitService";
 import { KYCService } from "../services/kyc/kycService";
@@ -135,6 +140,16 @@ export const getTransactionHistoryHandler = async (
       maxAmount,
       provider,
       tags,
+      // #480 – Advanced filtering
+      currency,
+      type,
+      statuses,
+      referenceNumber,
+      dateField,
+      startDateTime,
+      endDateTime,
+      filter,
+      templateId,
     } = req.query;
 
     const isValidISO = (dateStr: unknown) => {
@@ -176,7 +191,7 @@ export const getTransactionHistoryHandler = async (
 
     // Filter Construction
     // Note: tags are expected as a comma-separated string in the query (e.g. ?tags=refund,priority)
-    const filters = {
+    const filters: TransactionListFilters = {
       minAmount: minAmount ? parseFloat(minAmount as string) : undefined,
       maxAmount: maxAmount ? parseFloat(maxAmount as string) : undefined,
       provider: provider as string | undefined,
@@ -184,6 +199,91 @@ export const getTransactionHistoryHandler = async (
         ? (tags as string).split(",").map((t) => t.trim().toLowerCase())
         : undefined,
     };
+
+    // #480 – Advanced filtering.
+    // Anything malformed is rejected here rather than reaching the model,
+    // where a bad expression would otherwise become a confusing 500.
+    if (currency) filters.currency = currency as string;
+    if (type) filters.type = type as string;
+    if (referenceNumber) filters.referenceNumber = referenceNumber as string;
+    if (statuses) {
+      filters.statuses = (statuses as string)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean) as TransactionListFilters["statuses"];
+    }
+
+    const DATE_FIELDS = ["createdAt", "updatedAt"];
+    if (dateField) {
+      if (!DATE_FIELDS.includes(dateField as string)) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          `Invalid dateField. Must be one of: ${DATE_FIELDS.join(", ")}`,
+          { error: "Invalid dateField" },
+        );
+      }
+      filters.dateField = dateField as TransactionListFilters["dateField"];
+    }
+    if (startDateTime || endDateTime) {
+      const parseInstant = (value: unknown, label: string) => {
+        const parsedDate = new Date(value as string);
+        if (Number.isNaN(parsedDate.getTime())) {
+          throw createError(
+            ERROR_CODES.INVALID_INPUT,
+            `Invalid ${label}. Must be a valid ISO 8601 timestamp`,
+            { error: `Invalid ${label}` },
+          );
+        }
+        return parsedDate;
+      };
+      if (startDateTime) {
+        filters.startDateTime = parseInstant(
+          startDateTime,
+          "startDateTime",
+        ).toISOString();
+      }
+      if (endDateTime) {
+        filters.endDateTime = parseInstant(endDateTime, "endDateTime").toISOString();
+      }
+      if (
+        filters.startDateTime &&
+        filters.endDateTime &&
+        new Date(filters.startDateTime) > new Date(filters.endDateTime)
+      ) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "startDateTime cannot be greater than endDateTime",
+          { error: "startDateTime cannot be greater than endDateTime" },
+        );
+      }
+    }
+
+    if (templateId) {
+      const template = await getFilterTemplate(
+        templateId as string,
+        (req as any).user?.id,
+      );
+      if (!template) {
+        throw createError(
+          ERROR_CODES.NOT_FOUND,
+          "Filter template not found",
+          { error: "Filter template not found" },
+        );
+      }
+      filters.filter = template.expression;
+    } else if (filter) {
+      try {
+        filters.filter = parseFilterExpression(
+          typeof filter === "string" ? JSON.parse(filter) : filter,
+        );
+      } catch (error) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          error instanceof Error ? error.message : "Invalid filter expression",
+          { error: "Invalid filter expression" },
+        );
+      }
+    }
 
     // Database Queries
     // If using cursor-based pagination, fetch limit+1 items to determine `hasMore`.

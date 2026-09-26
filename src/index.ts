@@ -119,6 +119,7 @@ import complianceTrainingRouter from "./routes/complianceTraining";
 import healthProvidersRouter from "./routes/healthProviders";
 import adminReplicasRouter from "./routes/adminReplicas";
 import connectionDashboardRouter from "./routes/connectionDashboard";
+import maintenanceRoutes from "./routes/maintenanceRoutes";
 import { transactionStreamRoutes } from "./routes/stream";
 import { batchOperationRoutes } from "./routes/batchOperations";
 import {
@@ -555,6 +556,9 @@ app.use("/api/health", healthProvidersRouter);
 app.use("/api/admin/replicas", requireAuth, adminReplicasRouter);
 // #355 – Connection Pool Dashboard
 app.use("/api/admin/connections", requireAuth, connectionDashboardRouter);
+// #482/#484/#483/#485 – Automatic database optimization, provider contract
+// version management, transaction reversal audit and ML fraud detection
+app.use("/api/admin/maintenance", requireAuth, maintenanceRoutes);
 app.use("/api/receipt-templates", receiptTemplateRoutes);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);

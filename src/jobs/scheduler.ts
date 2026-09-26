@@ -28,10 +28,14 @@ import {
   INDEX_BLOAT_MONITOR_ENABLED,
   LEDGER_INTEGRITY_CRON,
   LEDGER_INTEGRITY_JOB_ENABLED,
+  DB_OPTIMIZATION_CRON,
+  DB_OPTIMIZATION_JOB_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
 import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
+import { runDatabaseOptimizationJob } from "./databaseOptimizationJob";
+import { runMlFraudTrainingJob } from "./mlFraudTrainingJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
@@ -146,6 +150,17 @@ const JOBS: JobConfig[] = [
           // Daily at 3:00 AM by default - reindexes bloated indexes during low traffic
           schedule: INDEX_REINDEX_CRON,
           handler: runIndexReindexJob,
+        },
+      ]
+    : []),
+  ...(DB_OPTIMIZATION_JOB_ENABLED
+    ? [
+        {
+          name: "database-optimization",
+          // Daily at 3:30 AM by default - vacuum/analyze, fragment and
+          // reorganize indexes, and maintain the query plan cache
+          schedule: DB_OPTIMIZATION_CRON,
+          handler: runDatabaseOptimizationJob,
         },
       ]
     : []),

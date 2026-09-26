@@ -1,5 +1,10 @@
 import { pool, queryRead, queryWrite } from "../config/database";
 import { encrypt, decrypt } from "../utils/encryption";
+import {
+  PaginationError,
+  createPaginatedResponse,
+  decodeCursor,
+} from "../utils/pagination";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,6 +79,48 @@ export interface DisputeWithNotes extends Dispute {
   notes: DisputeNote[];
 }
 
+/** Ordering supported by the paginated dispute notes endpoint. */
+export type DisputeNoteSort = "date" | "relevance";
+
+export interface DisputeNotePageOptions {
+  /** Page size. Defaults to 50, clamped to 1..100. */
+  limit?: number;
+  /** Opaque cursor returned by a previous page. */
+  cursor?: string;
+  /**
+   * `date` (default) returns newest notes first. `relevance` ranks notes
+   * written by the assigned agent first, then falls back to newest first.
+   */
+  sort?: DisputeNoteSort;
+}
+
+export interface DisputeNotePage {
+  data: DisputeNote[];
+  pagination: {
+    limit: number;
+    nextCursor: string | null;
+    prevCursor: string | null;
+    hasMore: boolean;
+    sort: DisputeNoteSort;
+  };
+}
+
+const DEFAULT_NOTE_PAGE_SIZE = 50;
+const MAX_NOTE_PAGE_SIZE = 100;
+
+/**
+ * Row shape returned by the paginated notes query — a note plus the columns
+ * used by the `relevance` ordering.
+ */
+type NotePageRow = DisputeNote & {
+  assignedTo?: string | null;
+  relevanceRank?: number;
+};
+
+/** Notes written by the assigned agent rank first under `relevance`. */
+const NOTE_RELEVANCE_RANK =
+  "CASE WHEN d.assigned_to IS NOT NULL AND n.author = d.assigned_to THEN 1 ELSE 0 END";
+
 export interface DisputeReportRow {
   status: DisputeStatus;
   count: string;
@@ -129,11 +176,11 @@ export class DisputeModel {
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"`,
       [
-        input.transactionId, 
-        input.reason, 
+        input.transactionId,
+        input.reason,
         input.reportedBy ?? null,
-        input.priority ?? 'medium',
-        input.category ?? null
+        input.priority ?? "medium",
+        input.category ?? null,
       ],
     );
     const row = result.rows[0];
@@ -227,8 +274,102 @@ export class DisputeModel {
     };
   }
 
+  /**
+   * Fetch one page of a dispute's notes using cursor pagination.
+   *
+   * Large disputes can collect thousands of notes, so the page is bounded in
+   * SQL and never materialises the whole thread in memory (issue #622).
+   *
+   * @throws {PaginationError} when the supplied cursor is malformed.
+   */
+  async findNotesPage(
+    disputeId: string,
+    options: DisputeNotePageOptions = {},
+  ): Promise<DisputeNotePage> {
+    const sort: DisputeNoteSort =
+      options.sort === "relevance" ? "relevance" : "date";
+    const limit = Math.min(
+      Math.max(options.limit ?? DEFAULT_NOTE_PAGE_SIZE, 1),
+      MAX_NOTE_PAGE_SIZE,
+    );
+
+    const params: unknown[] = [disputeId];
+    let cursorClause = "";
+
+    if (options.cursor) {
+      const { t, id } = decodeCursor(options.cursor);
+
+      if (sort === "relevance") {
+        const [rawRank, timestamp] = t.split("|");
+        if (!timestamp) {
+          throw new PaginationError("Invalid cursor");
+        }
+        params.push(rawRank === "1" ? 1 : 0, timestamp, id);
+        cursorClause = `AND (${NOTE_RELEVANCE_RANK}, n.created_at, n.id) < ($${params.length - 2}, $${params.length - 1}, $${params.length})`;
+      } else {
+        params.push(t, id);
+        cursorClause = `AND (n.created_at, n.id) < ($${params.length - 1}, $${params.length})`;
+      }
+    }
+
+    params.push(limit + 1);
+
+    const relevanceSelect =
+      sort === "relevance" ? `${NOTE_RELEVANCE_RANK} AS "relevanceRank",` : "";
+    const orderBy =
+      sort === "relevance"
+        ? `"relevanceRank" DESC, n.created_at DESC, n.id DESC`
+        : `n.created_at DESC, n.id DESC`;
+
+    const result = await queryRead<Record<string, unknown>>(
+      `SELECT
+         n.id,
+         n.dispute_id  AS "disputeId",
+         n.author,
+         n.note,
+         n.created_at  AS "createdAt",
+         ${relevanceSelect}
+         d.assigned_to AS "assignedTo"
+       FROM dispute_notes n
+       JOIN disputes d ON d.id = n.dispute_id
+       WHERE n.dispute_id = $1
+         ${cursorClause}
+       ORDER BY ${orderBy}
+       LIMIT $${params.length}`,
+      params,
+    );
+
+    const rows: NotePageRow[] = result.rows.map((row) => ({
+      ...(row as unknown as NotePageRow),
+      note: decrypt(String(row.note ?? "")) || "",
+    }));
+
+    const page = createPaginatedResponse<NotePageRow>({
+      rows,
+      limit,
+      getSortValue: (row) =>
+        sort === "relevance"
+          ? `${row.relevanceRank ?? 0}|${new Date(row.createdAt).toISOString()}`
+          : row.createdAt,
+      getId: (row) => row.id,
+    });
+
+    return {
+      data: page.data.map((row) => ({
+        id: row.id,
+        disputeId: row.disputeId,
+        author: row.author,
+        note: row.note,
+        createdAt: row.createdAt,
+      })),
+      pagination: { ...page.pagination, sort },
+    };
+  }
+
   /** Find a dispute with all details (notes, evidence, timeline). */
-  async findByIdWithDetails(disputeId: string): Promise<DisputeWithDetails | null> {
+  async findByIdWithDetails(
+    disputeId: string,
+  ): Promise<DisputeWithDetails | null> {
     const dispute = await this.findByIdWithNotes(disputeId);
     if (!dispute) return null;
 
@@ -343,12 +484,12 @@ export class DisputeModel {
     }
 
     if (setParts.length === 0) {
-      throw new Error('No fields to update');
+      throw new Error("No fields to update");
     }
 
     const result = await queryWrite<Dispute>(
       `UPDATE disputes
-       SET ${setParts.join(', ')}
+       SET ${setParts.join(", ")}
        WHERE id = $1
        RETURNING
          id,
@@ -431,7 +572,16 @@ export class DisputeModel {
          uploaded_by   AS "uploadedBy",
          description,
          created_at    AS "createdAt"`,
-      [disputeId, fileName, fileType, fileSize, s3Key, s3Url, uploadedBy, description ?? null],
+      [
+        disputeId,
+        fileName,
+        fileType,
+        fileSize,
+        s3Key,
+        s3Url,
+        uploadedBy,
+        description ?? null,
+      ],
     );
     return result.rows[0];
   }
@@ -653,14 +803,12 @@ export class DisputeModel {
     query: string,
     category?: string,
   ): Promise<DisputeEvidence[]> {
-    const conditions: string[] = ['dispute_id = $1'];
+    const conditions: string[] = ["dispute_id = $1"];
     const params: unknown[] = [disputeId];
     let p = 2;
 
     if (query) {
-      conditions.push(
-        `(file_name ILIKE $${p} OR description ILIKE $${p})`,
-      );
+      conditions.push(`(file_name ILIKE $${p} OR description ILIKE $${p})`);
       params.push(`%${query}%`);
       p++;
     }
@@ -670,7 +818,7 @@ export class DisputeModel {
       params.push(category);
     }
 
-    const where = conditions.join(' AND ');
+    const where = conditions.join(" AND ");
 
     const result = await queryRead<DisputeEvidence>(
       `SELECT

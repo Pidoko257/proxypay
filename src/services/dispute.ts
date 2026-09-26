@@ -31,6 +31,8 @@ import {
   DisputeStatus,
   DisputePriority,
   ReportFilter,
+  DisputeNotePage,
+  DisputeNotePageOptions,
 } from "../models/dispute";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import logger from "../utils/logger";
@@ -94,7 +96,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
         transactionId: payload.transactionId,
         status: payload.status,
       },
-      'Dispute notification sent'
+      "Dispute notification sent",
     );
   } catch (error) {
     logger.error(
@@ -103,7 +105,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
         disputeId: payload.disputeId,
         event: payload.event,
       },
-      'Failed to send dispute notification'
+      "Failed to send dispute notification",
     );
   }
 }
@@ -115,7 +117,9 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
 export class DisputeService {
   private disputeModel = new DisputeModel();
   private transactionModel = new TransactionModel();
-  private reversalService = new TransactionReversalService(this.transactionModel);
+  private reversalService = new TransactionReversalService(
+    this.transactionModel,
+  );
 
   /**
    * Open a new dispute for a transaction.
@@ -193,6 +197,24 @@ export class DisputeService {
       throw new Error(`Dispute ${disputeId} not found`);
     }
     return dispute;
+  }
+
+  /**
+   * Fetch one page of a dispute's notes (cursor paginated).
+   *
+   * Kept separate from {@link getDispute} so large note threads are paged
+   * instead of being loaded in full (issue #622).
+   */
+  async getNotesPage(
+    disputeId: string,
+    options: DisputeNotePageOptions = {},
+  ): Promise<DisputeNotePage> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+
+    return this.disputeModel.findNotesPage(disputeId, options);
   }
 
   /**
@@ -456,7 +478,10 @@ export class DisputeService {
         await this.disputeModel.markSlaWarningSent(dispute.id);
         warningsSent++;
       } catch (error) {
-        console.error(`Failed to send SLA warning for dispute ${dispute.id}:`, error);
+        console.error(
+          `Failed to send SLA warning for dispute ${dispute.id}:`,
+          error,
+        );
       }
     }
 
@@ -595,7 +620,11 @@ export class DisputeService {
     if (!dispute) {
       throw new Error(`Dispute ${disputeId} not found`);
     }
-    return this.disputeModel.updateEvidenceCategory(evidenceId, disputeId, category);
+    return this.disputeModel.updateEvidenceCategory(
+      evidenceId,
+      disputeId,
+      category,
+    );
   }
 
   /**
@@ -654,7 +683,7 @@ export class DisputeService {
 
     const grouped: Record<string, DisputeEvidence[]> = {};
     for (const ev of allEvidence) {
-      const cat = (ev as any).category ?? 'other';
+      const cat = (ev as any).category ?? "other";
       if (!grouped[cat]) grouped[cat] = [];
       grouped[cat].push(ev);
     }

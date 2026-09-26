@@ -4,10 +4,17 @@ import { gzip } from "zlib";
 import { promisify } from "util";
 import { Transaction, WebhookDeliveryUpdate } from "../models/transaction";
 import {
+  CIRCUIT_HALF_OPEN,
+  CIRCUIT_OPEN,
+  type WebhookCircuitBreaker,
+  getWebhookCircuitBreaker,
+} from "./webhookCircuitBreaker";
+import {
   webhookRetryAttemptsTotal,
   webhookDeliveryDurationSeconds,
   webhookDeliveryRetriesTotal,
   webhookBackoffDelaySeconds,
+  webhookCircuitBreakerSkippedTotal,
 } from "../utils/metrics";
 
 const gzipAsync = promisify(gzip);
@@ -78,7 +85,7 @@ export interface WebhookDeliveryResult {
   lastError?: string | null;
 }
 
-interface WebhookLogger {
+export interface WebhookLogger {
   log: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
@@ -97,6 +104,12 @@ interface WebhookServiceOptions {
   logger?: WebhookLogger;
   /** When true, payloads are Gzip-compressed before sending (Content-Encoding: gzip) */
   compress?: boolean;
+  /**
+   * Circuit breaker guarding this destination (#573). Defaults to the
+   * process-wide breaker, because a per-instance breaker would count failures
+   * in isolation and never reach its threshold.
+   */
+  circuitBreaker?: WebhookCircuitBreaker;
 }
 
 interface WebhookTransactionModel {
@@ -221,6 +234,8 @@ export class WebhookService {
   private readonly logger: WebhookLogger;
   /** Whether to Gzip-compress outgoing webhook payloads */
   readonly compress: boolean;
+  /** Circuit breaker for the configured destination (#573). */
+  private readonly circuitBreaker: WebhookCircuitBreaker;
 
   constructor(options: WebhookServiceOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -239,6 +254,23 @@ export class WebhookService {
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? console;
     this.compress = options.compress ?? (process.env.WEBHOOK_COMPRESSION === "true");
+    this.circuitBreaker = options.circuitBreaker ?? getWebhookCircuitBreaker();
+  }
+
+  /**
+   * Ask the breaker for permission to deliver to this instance's URL.
+   *
+   * Returns `undefined` when delivery may proceed, or a reason string when it
+   * must not. `undefined` rather than a boolean so the "half-open trial" case
+   * stays distinguishable from ordinary traffic: a trial has to be reported
+   * back as a probe, because a probe that fails re-opens the breaker
+   * immediately instead of waiting for the threshold again.
+   */
+  private circuitBlocksDelivery(): "open" | "probe" | undefined {
+    const permission = this.circuitBreaker.acquirePermission(this.webhookUrl);
+    if (permission === CIRCUIT_HALF_OPEN) return "probe";
+    if (permission === CIRCUIT_OPEN) return "open";
+    return undefined;
   }
 
   buildPayload(event: WebhookEvent, transaction: Transaction): WebhookPayload {
@@ -320,6 +352,24 @@ export class WebhookService {
       };
     }
 
+    // Consulted before any network call, which is the entire point: an open
+    // breaker must cost one map lookup, not `maxAttempts` round trips.
+    const circuit = this.circuitBlocksDelivery();
+    if (circuit === "open") {
+      const message = "Circuit breaker is open for this webhook destination";
+      this.logger.warn(
+        `[webhook] delivery suppressed event=${event} transactionId=${transaction.id}: ${message}`,
+      );
+      webhookCircuitBreakerSkippedTotal.inc({ event_type: event });
+      return {
+        status: "skipped",
+        attempts: 0,
+        lastAttemptAt: null,
+        deliveredAt: null,
+        lastError: message,
+      };
+    }
+
     const payload = this.buildPayload(event, transaction);
     const validation = webhookPayloadSchema.safeParse(payload);
     if (!validation.success) {
@@ -364,6 +414,10 @@ export class WebhookService {
         if (attempt > 1) {
           webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
         }
+
+        // A delivery that lands closes the breaker, including when it was the
+        // half-open probe: that is the evidence the destination is back.
+        this.circuitBreaker.recordSuccess(this.webhookUrl);
 
         return {
           status: "delivered",
@@ -419,6 +473,11 @@ export class WebhookService {
     webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
     webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
 
+    // The retries are over, so the whole delivery is one failure as far as the
+    // breaker is concerned. Counting each attempt would trip it on a single
+    // flaky delivery; this is the "that endpoint is broken" signal.
+    this.circuitBreaker.recordFailure(this.webhookUrl, lastError, circuit === "probe");
+
     return {
       status: "failed",
       attempts: finalAttempt,
@@ -447,6 +506,23 @@ export class WebhookService {
     if (!this.webhookSecret) {
       const message = "WEBHOOK_SECRET is not configured";
       this.logger.warn(`[webhook] ${message}`);
+      return {
+        status: "skipped",
+        attempts: 0,
+        lastAttemptAt: null,
+        deliveredAt: null,
+        lastError: message,
+      };
+    }
+
+    // Same breaker check as `sendTransactionEvent`; see the comment there.
+    const circuit = this.circuitBlocksDelivery();
+    if (circuit === "open") {
+      const message = "Circuit breaker is open for this webhook destination";
+      this.logger.warn(
+        `[webhook] flat delivery suppressed event=${event} transactionId=${transaction.id}: ${message}`,
+      );
+      webhookCircuitBreakerSkippedTotal.inc({ event_type: event });
       return {
         status: "skipped",
         attempts: 0,
@@ -497,6 +573,8 @@ export class WebhookService {
         if (attempt > 1) {
           webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "delivered" });
         }
+
+        this.circuitBreaker.recordSuccess(this.webhookUrl);
 
         return {
           status: "delivered",
@@ -549,6 +627,8 @@ export class WebhookService {
     const durationSecs = (Date.now() - deliveryStart) / 1000;
     webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
     webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+
+    this.circuitBreaker.recordFailure(this.webhookUrl, lastError, circuit === "probe");
 
     return {
       status: "failed",

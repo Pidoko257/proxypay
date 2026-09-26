@@ -1,5 +1,6 @@
 import { queryRead, queryWrite } from "../config/database";
 import { v4 as uuidv4 } from "uuid";
+import * as StellarSdk from "stellar-sdk";
 import { AssetIssuanceService } from "../services/stellar/issuanceService";
 import logger from "../utils/logger";
 import {
@@ -36,6 +37,97 @@ export interface AssetIssuanceRequest {
 
 export type { AssetConfigurationValidation };
 
+/** PostgreSQL unique-violation. The authority on "this asset code is taken". */
+const PG_UNIQUE_VIOLATION = "23505";
+
+/**
+ * Is this a valid Stellar account public key?
+ *
+ * Uses the SDK's own check rather than a regex, because the account id is a
+ * base32-encoded CRC-checked payload: a regex can be satisfied by a string the
+ * SDK will still reject, and the SDK is what will actually be handed this value
+ * when the asset is issued.
+ */
+export function isValidStellarAccount(account: string): boolean {
+  if (!account || typeof account !== "string") return false;
+  return StellarSdk.StrKey.isValidEd25519PublicKey(account.trim());
+}
+
+/**
+ * Issuers this platform is allowed to issue assets under (#571).
+ *
+ * Built from three sources, in the spirit of "an operator should not have to
+ * repeat themselves":
+ *
+ *   1. `ASSET_ISSUER_WHITELIST` — a comma-separated list of public keys.
+ *   2. The platform's own issuer, derived from `STELLAR_ISSUER_SECRET`, since
+ *      an operator issuing under their own key obviously needs no permission.
+ *   3. Nothing, if neither is set — see below.
+ *
+ * An unset whitelist is treated as "not configured" rather than "nothing is
+ * allowed", so an existing deployment is not broken by adding a check it never
+ * opted into. That choice is a real trade-off and worth stating: it means the
+ * whitelist protects only the deployments that configure one, and a
+ * misconfigured value that parses to nothing therefore disables the protection
+ * silently. It logs a warning when it does.
+ */
+export function allowedIssuers(): Set<string> {
+  const configured = new Set<string>();
+
+  const fromEnv = (process.env.ASSET_ISSUER_WHITELIST || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  for (const issuer of fromEnv) {
+    if (isValidStellarAccount(issuer)) {
+      configured.add(issuer.trim());
+    } else {
+      logger.warn(
+        { issuer },
+        "[asset-workflow] ASSET_ISSUER_WHITELIST entry is not a valid Stellar account and was ignored",
+      );
+    }
+  }
+
+  // The platform's own issuer is implicitly allowed. Derived from the secret
+  // only to get its public half, and never logged.
+  const issuerSecret = (process.env.STELLAR_ISSUER_SECRET || "").trim();
+  if (issuerSecret) {
+    try {
+      configured.add(StellarSdk.Keypair.fromSecret(issuerSecret).publicKey());
+    } catch {
+      logger.warn(
+        "[asset-workflow] STELLAR_ISSUER_SECRET is set but not parseable; its issuer is not on the allowlist",
+      );
+    }
+  }
+
+  return configured;
+}
+
+/** Has an issuer allowlist been configured at all? */
+export function isIssuerAllowlistConfigured(): boolean {
+  return (process.env.ASSET_ISSUER_WHITELIST || "").trim().length > 0;
+}
+
+/**
+ * May this issuer issue assets through this platform?
+ *
+ * When no allowlist is configured, any syntactically valid issuer is allowed
+ * and the decision is logged, because silently refusing every request in a
+ * deployment that never set the variable would look like an outage.
+ */
+export function isIssuerAllowed(issuer: string): boolean {
+  if (!isIssuerAllowlistConfigured()) {
+    logger.warn(
+      { issuer },
+      "[asset-workflow] no ASSET_ISSUER_WHITELIST configured; accepting any valid issuer",
+    );
+    return true;
+  }
+  return allowedIssuers().has(issuer.trim());
+}
+
 export class AssetIssuanceRequestModel {
   async create(input: {
     assetCode: string;
@@ -45,31 +137,52 @@ export class AssetIssuanceRequestModel {
     requestedBy: string;
     metadata?: Record<string, any>;
     trustlineConfig?: { destinationAccount: string; limit: string; autoSetup: boolean };
+    metadata?: Record<string, unknown>;
   }): Promise<AssetIssuanceRequest> {
     const id = uuidv4();
 
+    // A friendly fast path, not the guarantee. Two requests for the same code
+    // that arrive together both get past this SELECT; only the unique index in
+    // migration 20260830 can actually arbitrate between them. The INSERT below
+    // is therefore what decides, and its error is handled rather than allowed to
+    // surface as a 500.
     const existing = await this.findByCode(input.assetCode);
     if (existing) {
       throw new Error(`Asset code ${input.assetCode} already exists`);
     }
 
-    const result = await queryWrite(
-      `INSERT INTO asset_issuance_requests (id, asset_code, name, description, limit, status, requested_by, trustline_config, metadata)
-       VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8)
-       RETURNING *`,
-      [
-        id,
-        input.assetCode,
-        input.name,
-        input.description || null,
-        input.limit,
-        input.requestedBy,
-        input.trustlineConfig ? JSON.stringify(input.trustlineConfig) : null,
-        JSON.stringify(input.metadata || {}),
-      ],
-    );
+    try {
+      const result = await queryWrite(
+        `INSERT INTO asset_issuance_requests (id, asset_code, name, description, limit, status, requested_by, trustline_config, metadata)
+         VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $8)
+         RETURNING *`,
+        [
+          id,
+          input.assetCode,
+          input.name,
+          input.description || null,
+          input.limit,
+          input.requestedBy,
+          input.trustlineConfig ? JSON.stringify(input.trustlineConfig) : null,
+          JSON.stringify(input.metadata || {}),
+        ],
+      );
 
-    return this.mapRow(result.rows[0]);
+      return this.mapRow(result.rows[0]);
+    } catch (error) {
+      // The concurrent-insert case the SELECT above cannot see. Reported with
+      // the same message as the fast path so callers can handle one error
+      // instead of two, and logged at warn because it is expected traffic on a
+      // busy asset code rather than a fault.
+      if ((error as { code?: string })?.code === PG_UNIQUE_VIOLATION) {
+        logger.warn(
+          { assetCode: input.assetCode },
+          "[asset-workflow] Duplicate asset code rejected by unique constraint",
+        );
+        throw new Error(`Asset code ${input.assetCode} already exists`);
+      }
+      throw error;
+    }
   }
 
   async findById(id: string): Promise<AssetIssuanceRequest | null> {
@@ -142,68 +255,35 @@ export class AssetWorkflowService {
     description?: string;
     limit: string;
     requestedBy: string;
-    issuerPublicKey?: string;
+    issuer?: string;
     trustlineConfig?: { destinationAccount: string; limit: string; autoSetup: boolean };
   }): Promise<AssetIssuanceRequest> {
-    // Rate limit first: a caller hammering the endpoint should not even get to
-    // the (more expensive) duplicate lookup.
-    const rate = this.creationLimiter.consume(input.requestedBy);
-    if (!rate.allowed) {
-      logger.warn(
-        { requestedBy: input.requestedBy, retryAfterMs: rate.retryAfterMs },
-        "[asset-workflow] Creation rate limit exceeded",
-      );
-      throw new AssetCreationRateLimitError(rate.retryAfterMs);
-    }
-
+    // The issuer is validated here rather than at approval time. An asset
+    // request is a promise to a requester, and finding out at approval that the
+    // issuer was never allowed is a week of someone's time spent for nothing.
     const validation = this.validateConfiguration({
       assetCode: input.assetCode,
       name: input.name,
       limit: input.limit,
-      issuerPublicKey: input.issuerPublicKey,
+      issuer: input.issuer,
       distributionAccount: input.trustlineConfig?.destinationAccount,
-      description: input.description,
     });
-    for (const warning of validation.warnings) {
-      logger.warn(
-        { assetCode: input.assetCode, requestedBy: input.requestedBy, warning },
-        "[asset-workflow] Asset configuration warning",
-      );
-    }
     if (!validation.isValid) {
       throw new AssetConfigurationError(validation.errors, validation.warnings);
     }
 
-    if (input.trustlineConfig && input.trustlineConfig.limit !== undefined) {
-      const trustlineCheck = validateAssetConfiguration({
-        assetCode: input.assetCode,
-        name: input.name,
-        limit: input.trustlineConfig.limit,
-        distributionAccount: input.trustlineConfig.destinationAccount,
-      });
-      if (!trustlineCheck.isValid) {
-        throw new AssetConfigurationError(
-          trustlineCheck.errors.map((e) => `trustline: ${e}`),
-          trustlineCheck.warnings,
-        );
-      }
-    }
-
-    const duplicate = await this.findDuplicateAssetCode(input.assetCode);
-    if (duplicate) {
-      throw new AssetConfigurationError([
-        duplicate.exact
-          ? `Asset code ${input.assetCode} already exists`
-          : `Asset code ${input.assetCode} duplicates existing request ${duplicate.id} (` +
-            `${duplicate.assetCode}) in a case-insensitive comparison`,
-      ]);
-    }
-
+    // The issuer is persisted in the existing metadata JSONB rather than in a
+    // new column: it is provenance for the request, not something the workflow
+    // queries on, and a nullable column that is only ever read by id is a
+    // column that will drift out of sync with reality.
     const request = await this.requestModel.create({
-      ...input,
-      metadata: input.issuerPublicKey
-        ? { issuerPublicKey: input.issuerPublicKey }
-        : undefined,
+      assetCode: input.assetCode,
+      name: input.name,
+      description: input.description,
+      limit: input.limit,
+      requestedBy: input.requestedBy,
+      trustlineConfig: input.trustlineConfig,
+      metadata: { issuer: input.issuer ?? null },
     });
     logger.info({ requestId: request.id, assetCode: input.assetCode }, "[asset-workflow] Request created");
 
@@ -278,18 +358,13 @@ export class AssetWorkflowService {
       throw new Error("Asset issuance request not found");
     }
 
-    // Destination and trustline limit are validated before anything is
-    // persisted or signed: a malformed account here used to reach setup.
-    const trustlineValidation = validateAssetConfiguration({
-      assetCode: request.assetCode,
-      name: request.name,
-      limit: config.limit,
-      distributionAccount: config.destinationAccount,
-    });
-    if (!trustlineValidation.isValid) {
-      throw new AssetConfigurationError(
-        trustlineValidation.errors.map((e) => `trustline: ${e}`),
-        trustlineValidation.warnings,
+    // The destination account is only persisted by this method, so this is the
+    // first and last point at which a bad one can be caught. `autoSetup` is
+    // checked as well as the plain save, because an invalid account saved now
+    // is an invalid account submitted on-chain later by whoever runs the job.
+    if (!isValidStellarAccount(config.destinationAccount)) {
+      throw new Error(
+        "Invalid asset configuration: Distribution account must be a valid Stellar account (G... public key)",
       );
     }
 
@@ -322,8 +397,67 @@ export class AssetWorkflowService {
     logger.info({ assetCode, destinationAccount, limit }, "[asset-workflow] Setting up trustline automatically");
   }
 
-  validateConfiguration(config: AssetConfigurationInput): AssetConfigurationValidation {
-    return validateAssetConfiguration(config);
+  /**
+   * Validate an asset configuration before a request is created (#571).
+   *
+   * The three account checks exist because every one of them is a way to issue
+   * an asset that nobody can trade. A malformed Stellar key is rejected by the
+   * SDK at the moment of submission, hours or days after the request was
+   * approved and somebody was told the work was done; a syntactically valid key
+   * that is not ours is worse still, because the request succeeds and the
+   * asset simply never appears.
+   *
+   * `issuer` and `distributionAccount` are optional rather than required so
+   * that existing callers of this method keep working. Omitting them skips
+   * those checks — which is why `createRequest` passes them explicitly.
+   */
+  validateConfiguration(config: {
+    assetCode: string;
+    name: string;
+    limit: string;
+    issuer?: string;
+    distributionAccount?: string;
+  }): AssetConfigurationValidation {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    // Stellar caps an asset code at 12 characters. The floor of 3 is ours, not
+    // Stellar's: a 1-2 character code cannot be told apart from a typo at a
+    // glance and there is no real asset code that short.
+    if (!config.assetCode || config.assetCode.length < 3 || config.assetCode.length > 12) {
+      errors.push("Asset code must be between 3 and 12 characters");
+    }
+    if (!/^[a-zA-Z0-9]+$/.test(config.assetCode || "")) {
+      errors.push("Asset code must be alphanumeric");
+    }
+    if (!config.name || config.name.trim().length < 1) {
+      errors.push("Asset name is required");
+    }
+    const limitNum = parseFloat(config.limit);
+    if (isNaN(limitNum) || limitNum <= 0) {
+      errors.push("Limit must be a positive number");
+    }
+    if (limitNum > 1000000000) {
+      warnings.push("Limit is very high, please verify");
+    }
+
+    if (config.issuer !== undefined && !isValidStellarAccount(config.issuer)) {
+      errors.push("Issuer must be a valid Stellar account (G... public key)");
+    } else if (config.issuer && !isIssuerAllowed(config.issuer)) {
+      // Reported as an error, not a warning. A non-whitelisted issuer is a
+      // request to issue an asset this platform is not supposed to be issuing,
+      // and approving it would be a mistake rather than a risk to be weighed.
+      errors.push("Issuer is not on the configured issuer allowlist");
+    }
+
+    if (
+      config.distributionAccount !== undefined &&
+      !isValidStellarAccount(config.distributionAccount)
+    ) {
+      errors.push("Distribution account must be a valid Stellar account (G... public key)");
+    }
+
+    return { isValid: errors.length === 0, errors, warnings };
   }
 
   async getPendingApprovals(): Promise<AssetIssuanceRequest[]> {

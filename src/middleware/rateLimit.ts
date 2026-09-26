@@ -26,6 +26,23 @@ export const RATE_LIMIT_CONFIG = {
   CANCELLATION_LIMIT: 5,
   CANCELLATION_WINDOW_MS: 60 * 60 * 1000, // 1 hour
 
+  // SEP-30 key recovery (#572): deliberately the tightest limit in this file.
+  // The recovery flow is the one place in the product where an unauthenticated
+  // caller can drive a key rotation, and each approval attempt is a cheap
+  // operation for the attacker and an expensive one for the operator: a
+  // successful recovery locks every legitimate signer out of the key. 5 attempts
+  // per 15 minutes leaves room for a real 3-of-5 ceremony and no room for
+  // guessing.
+  RECOVERY_LIMIT: 5,
+  RECOVERY_WINDOW_MS: 15 * 60 * 1000, // 15 minutes
+
+  // Asset issuance workflow (#571): 10 write operations per hour per admin.
+  // Deliberately low. Every request in this workflow can create a real asset or
+  // move funds once approved, so the thing being limited is a privileged,
+  // irreversible action rather than a query.
+  ASSET_ISSUANCE_LIMIT: 10,
+  ASSET_ISSUANCE_WINDOW_MS: 60 * 60 * 1000, // 1 hour
+
   // List queries: warn when requesting more than 1000 items
   MASSIVE_LIST_THRESHOLD: 1000,
 
@@ -949,6 +966,123 @@ export const rateLimitListQueries = (
       threshold: RATE_LIMIT_CONFIG.SUSPICIOUS_QUERY_THRESHOLD,
       path: req.path,
       timestamp: new Date().toISOString(),
+    });
+  }
+
+  next();
+};
+
+/**
+ * Middleware: for assetIssuanceRateLimiter (#571)
+ * Limit: 10 write operations per hour per admin
+ *
+ * Applied to the asset issuance workflow's mutating routes: creating a request,
+ * submitting it, approving or rejecting it, and configuring a trustline. Reads
+ * are left alone — a list endpoint is not worth a budget, and rate limiting
+ * reads here would break the approval queue for no security benefit.
+ */
+export const assetIssuanceRateLimiter = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  // `req.jwtUser` is what `requireAuth` actually sets; `req.user` is checked as
+  // a fallback for any mount point that populates it instead. Reading only
+  // `req.user` would rate limit nothing here, because it is never populated in
+  // the normal auth path.
+  const userId = req.jwtUser?.userId || (req as any).user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  const key = generateRateLimitKey(userId, "ASSET_ISSUANCE");
+  const { allowed, remaining, resetTime } = await checkRateLimit(
+    key,
+    RATE_LIMIT_CONFIG.ASSET_ISSUANCE_LIMIT,
+    RATE_LIMIT_CONFIG.ASSET_ISSUANCE_WINDOW_MS,
+  );
+
+  res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.ASSET_ISSUANCE_LIMIT);
+  res.setHeader("X-RateLimit-Remaining", remaining);
+  res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  if (!allowed) {
+    const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+
+    logHighSeverity("Asset issuance rate limit exceeded", {
+      userId,
+      limit: RATE_LIMIT_CONFIG.ASSET_ISSUANCE_LIMIT,
+      window: "1 hour",
+      path: req.path,
+      method: req.method,
+    });
+
+    return res.status(429).json({
+      error: "Rate limit exceeded for asset issuance operations",
+      retryAfter: retryAfterSeconds,
+    });
+  }
+
+  next();
+};
+
+/**
+ * Middleware: for sep30RecoveryRateLimiter (#572)
+ * Limit: 5 recovery operations per 15 minutes
+ *
+ * Keyed on the managed key rather than the user, because the thing being
+ * protected is the key. A caller who rotates their identity is still working
+ * against the same key, and a per-user limit would let a single recovery be
+ * attacked from several accounts.
+ *
+ * Unlike `sep24RateLimiter` and friends, a caller with no authenticated identity
+ * is *not* rejected with 401 here. The key id is still rate limited, so an
+ * anonymous flood is bounded, and rejecting anonymous callers outright would
+ * turn a rate limiter into an authentication check — which is the wrong tool and
+ * would change the response code for a case that is already handled downstream.
+ */
+export const sep30RecoveryRateLimiter = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  // Prefer the authenticated user so one operator cannot exhaust another
+  // operator's budget, and fall back to the key id when there is no user.
+  const subject =
+    req.jwtUser?.userId ||
+    (req as any).user?.id ||
+    req.params?.keyId ||
+    req.ip ||
+    "unknown";
+
+  const key = generateRateLimitKey(`sep30-recovery:${subject}`, "SEP30_RECOVERY");
+  const { allowed, remaining, resetTime } = await checkRateLimit(
+    key,
+    RATE_LIMIT_CONFIG.RECOVERY_LIMIT,
+    RATE_LIMIT_CONFIG.RECOVERY_WINDOW_MS,
+  );
+
+  res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.RECOVERY_LIMIT);
+  res.setHeader("X-RateLimit-Remaining", remaining);
+  res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  if (!allowed) {
+    const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+
+    logHighSeverity("SEP-30 recovery rate limit exceeded", {
+      subject,
+      limit: RATE_LIMIT_CONFIG.RECOVERY_LIMIT,
+      window: "15 minutes",
+      path: req.path,
+      method: req.method,
+    });
+
+    return res.status(429).json({
+      error: "Rate limit exceeded for key recovery operations",
+      retryAfter: retryAfterSeconds,
     });
   }
 

@@ -5,13 +5,15 @@
  * (one publisher, one subscriber) so they don't block each other.
  *
  * Channel naming convention:
- *   TRANSACTION_UPDATED:<id>   — per-transaction updates
- *   transaction.created        — all new transactions
- *   transaction.updated        — all transaction updates (legacy broadcast)
- *   transaction.completed      — completed transactions
- *   transaction.failed         — failed transactions
- *   dispute.*                  — dispute events
- *   bulk_import_job.updated    — bulk job events
+ *   PAYMENT_STATUS_UPDATED:<id> — per-payment status updates
+ *   payment.status_updated      — all payment status updates (broadcast)
+ *   TRANSACTION_UPDATED:<id>    — per-transaction updates
+ *   transaction.created         — all new transactions
+ *   transaction.updated         — all transaction updates (legacy broadcast)
+ *   transaction.completed       — completed transactions
+ *   transaction.failed          — failed transactions
+ *   dispute.*                   — dispute events
+ *   bulk_import_job.updated     — bulk job events
  *
  * Failure policy: if Redis is unavailable the ioredis reconnect strategy
  * retries indefinitely with capped backoff. The server never crashes.

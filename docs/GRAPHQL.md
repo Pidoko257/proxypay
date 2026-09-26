@@ -188,6 +188,45 @@ query Bulk($id: ID!) {
 }
 ```
 
+## Subscriptions (WebSocket)
+
+Real-time updates use [graphql-ws](https://github.com/enisdenjo/graphql-ws) on the same `/graphql` path over WebSocket. Events are published through **Redis Pub/Sub**, so multiple API pods can fan out updates in horizontally scaled deployments.
+
+### Authentication
+
+Pass a JWT in the WebSocket connection params:
+
+```js
+import { createClient } from "graphql-ws";
+
+const client = createClient({
+  url: "ws://localhost:3000/graphql",
+  connectionParams: {
+    authToken: "<your-jwt>",
+    // equivalently: Authorization: "Bearer <your-jwt>"
+  },
+});
+```
+
+In production (or when `GRAPHQL_API_KEY` / `GRAPHQL_WS_REQUIRE_AUTH=true` is set), connections without a valid JWT are rejected. Connection-level auth errors close only that socket and do not crash the WebSocket server.
+
+### Example: payment status updates
+
+```graphql
+subscription OnPaymentStatus($id: ID!) {
+  paymentStatusUpdated(id: $id) {
+    id
+    status
+    referenceNumber
+    updatedAt
+  }
+}
+```
+
+Whenever a payment/transaction status changes (for example pending → completed), subscribed clients receive the update immediately via Redis Pub/Sub.
+
+Other subscription fields include `transactionUpdated`, `transactionCreated`, `transactionCompleted`, `transactionFailed`, and dispute/bulk-import events.
+
 ## cURL
 
 ```bash

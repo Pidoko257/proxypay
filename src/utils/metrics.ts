@@ -439,6 +439,44 @@ export const webhookBackoffDelaySeconds = new Histogram({
   registers: [register],
 });
 
+// Webhook Circuit Breaker Metrics (#573)
+//
+// Transitions are counted rather than merely observable as a gauge: what an
+// operator needs to know is not "the breaker is open" but "this destination
+// opens every few hours", which is the signature of a flaky endpoint that a
+// 24-hour cooldown will never fix.
+export const webhookCircuitBreakerTransitionsTotal = new Counter({
+  name: "webhook_circuit_breaker_transitions_total",
+  help: "Webhook circuit breaker state transitions",
+  labelNames: ["from", "to", "reason"],
+  registers: [register],
+});
+
+// Deliveries that were never attempted because the breaker was open. This is
+// the number that quantifies the savings, and it is also the number that should
+// alarm an operator: it is a count of transaction events a merchant did not
+// hear about, so it is a count of events they will have to reconcile by hand.
+export const webhookCircuitBreakerSkippedTotal = new Counter({
+  name: "webhook_circuit_breaker_skipped_total",
+  help: "Webhook deliveries suppressed because the destination circuit was open",
+  labelNames: ["event_type"],
+  registers: [register],
+});
+
+// Three series, one per state: 1 for the current state and 0 for the other two.
+// All three are written on every change — setting only the active one would leave
+// a stale 1 behind and a dashboard would show open and closed at once. A gauge
+// rather than a counter so a restart resets it and the value is always the present
+// truth instead of a running total. Not labelled by URL: per-destination detail
+// is in the admin circuit-breaker snapshot, which keeps this at a fixed three
+// series regardless of how many destinations the process has seen.
+export const webhookCircuitBreakerState = new Gauge({
+  name: "webhook_circuit_breaker_state",
+  help: "Current webhook circuit breaker state (1 for the active state)",
+  labelNames: ["state"],
+  registers: [register],
+});
+
 // Deprecated API Endpoint Usage Metrics (#393)
 export const deprecatedEndpointRequestsTotal = new Counter({
   name: "deprecated_endpoint_requests_total",

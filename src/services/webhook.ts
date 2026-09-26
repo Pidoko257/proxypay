@@ -16,8 +16,15 @@ import {
   webhookBackoffDelaySeconds,
   webhookCircuitBreakerSkippedTotal,
 } from "../utils/metrics";
+import {
+  WebhookCircuitBreaker,
+  WebhookCircuitBreakerOptions,
+  WebhookCircuitBreakerRegistry,
+} from "./webhookCircuitBreaker";
 
 const gzipAsync = promisify(gzip);
+
+const WEBHOOK_CIRCUIT_BREAKER_RECOVERY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export type WebhookEvent = "transaction.completed" | "transaction.failed" | "transaction.cancelled" | "transaction.pending";
 export type WebhookDeliveryStatus =
@@ -472,6 +479,7 @@ export class WebhookService {
     const durationSecs = (Date.now() - deliveryStart) / 1000;
     webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
     webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+    this.onDeliveryFailure(lastError);
 
     // The retries are over, so the whole delivery is one failure as far as the
     // breaker is concerned. Counting each attempt would trip it on a single
@@ -627,6 +635,7 @@ export class WebhookService {
     const durationSecs = (Date.now() - deliveryStart) / 1000;
     webhookDeliveryDurationSeconds.observe({ event_type: event, status: "failed" }, durationSecs);
     webhookDeliveryRetriesTotal.inc({ event_type: event, final_status: "failed" });
+    this.onDeliveryFailure(lastError);
 
     this.circuitBreaker.recordFailure(this.webhookUrl, lastError, circuit === "probe");
 
@@ -647,6 +656,11 @@ export class WebhookService {
     const entries = await outboxModel.findNextToProcess(batchSize);
     let processed = 0;
     let failures = 0;
+
+    // Issue #573: skip the whole batch while the circuit is open.
+    if (this.circuitGate()) {
+      return { processed: 0, failures: 0 };
+    }
 
     for (const entry of entries) {
       const rawPayload = JSON.stringify(entry.payload);

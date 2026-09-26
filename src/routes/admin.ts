@@ -163,7 +163,7 @@ const logImpersonationAuditEvent = (
 /**
  * Middleware: Require Admin Role
  */
-const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
+export const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   // Assume req.user is set by auth middleware
   const user = (req as AuthRequest).user;
 
@@ -194,7 +194,7 @@ const requireSuperAdmin = (req: Request, res: Response, next: NextFunction) => {
 /**
  * Middleware: Admin Logger
  */
-const logAdminAction = (action: string) => {
+export const logAdminAction = (action: string) => {
   return (req: Request, res: Response, next: NextFunction) => {
     console.log(`[ADMIN ACTION] ${action}`, {
       adminId: (req as AuthRequest).user?.id,

@@ -9,6 +9,11 @@ import {
   transactionChannel,
   type TransactionUpdatedPayload,
 } from "../graphql/subscriptions";
+import {
+  compileFilterExpression,
+  parseFilterExpression,
+  type FilterNode,
+} from "../services/transactionFilterService";
 
 export type AssetType = "native" | "credit_alphanum4" | "credit_alphanum12";
 
@@ -44,6 +49,15 @@ export interface TransactionListFilters {
   tags?: string[];
   referenceNumber?: string;
   statuses?: TransactionStatus[];
+  // #480 – Advanced filtering
+  currency?: string;
+  type?: string;
+  /** Inclusive range on any filterable temporal field (createdAt/updatedAt/completedAt). */
+  dateField?: "createdAt" | "updatedAt";
+  startDateTime?: string;
+  endDateTime?: string;
+  /** Nested AND/OR/NOT filter tree. Takes precedence over the flat fields above. */
+  filter?: FilterNode;
 }
 
 export interface TransactionCursorOptions {
@@ -62,6 +76,16 @@ interface DecodedTransactionCursor {
   createdAt: Date;
   id: string;
 }
+
+/**
+ * Whitelist for #480 range filtering on timestamp columns. `transactions` has
+ * no `completed_at`, so completion-time range filtering is not offered rather
+ * than failing at execution time.
+ */
+const DATE_FILTER_COLUMNS: Record<"createdAt" | "updatedAt", string> = {
+  createdAt: "created_at",
+  updatedAt: "updated_at",
+};
 
 const MAX_TAGS = 10;
 const TAG_REGEX = /^[a-z0-9-]+$/;
@@ -217,6 +241,39 @@ export class TransactionModel {
 
     if (filters.tags?.length) {
       addCondition("tags @> ?::text[]", filters.tags);
+    }
+
+    if (filters.currency) {
+      addCondition("currency = ?", filters.currency);
+    }
+
+    if (filters.type) {
+      addCondition("type = ?", filters.type);
+    }
+
+    // #480 – Range filtering on a chosen timestamp column. Validated against
+    // the whitelist rather than interpolated, so `dateField` is not a
+    // SQL injection vector.
+    if (filters.startDateTime || filters.endDateTime) {
+      const column = DATE_FILTER_COLUMNS[filters.dateField ?? "createdAt"];
+      if (filters.startDateTime) {
+        addCondition(`${column} >= ?`, new Date(filters.startDateTime));
+      }
+      if (filters.endDateTime) {
+        addCondition(`${column} <= ?`, new Date(filters.endDateTime));
+      }
+    }
+
+    // #480 – Advanced filter AST. Compiled last so its placeholders continue
+    // the same parameter numbering as the simple conditions above.
+    if (filters.filter) {
+      const expression =
+        typeof filters.filter === "string"
+          ? parseFilterExpression(JSON.parse(filters.filter))
+          : parseFilterExpression(filters.filter);
+      const compiled = compileFilterExpression(expression, params.length + 1);
+      params.push(...compiled.params);
+      conditions.push(compiled.sql);
     }
 
     return {

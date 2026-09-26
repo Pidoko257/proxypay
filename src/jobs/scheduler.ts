@@ -29,15 +29,21 @@ import {
   INDEX_BLOAT_MONITOR_ENABLED,
   LEDGER_INTEGRITY_CRON,
   LEDGER_INTEGRITY_JOB_ENABLED,
+  DB_OPTIMIZATION_CRON,
+  DB_OPTIMIZATION_JOB_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
 import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
+import { runDatabaseOptimizationJob } from "./databaseOptimizationJob";
+import { runMlFraudTrainingJob } from "./mlFraudTrainingJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
 import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
 import { runRedisKeyExpirationMonitorJob } from "./redisKeyExpirationJob";
 import { runIdempotencyCleanupJob } from "./idempotencyCleanupJob";
+import { runNotificationHealthCheckJob } from "./notificationHealthCheckJob";
+import { runComplianceExpiryAlertJob } from "./complianceExpiryAlertJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
@@ -148,6 +154,17 @@ const JOBS: JobConfig[] = [
         },
       ]
     : []),
+  ...(DB_OPTIMIZATION_JOB_ENABLED
+    ? [
+        {
+          name: "database-optimization",
+          // Daily at 3:30 AM by default - vacuum/analyze, fragment and
+          // reorganize indexes, and maintain the query plan cache
+          schedule: DB_OPTIMIZATION_CRON,
+          handler: runDatabaseOptimizationJob,
+        },
+      ]
+    : []),
   {
     name: "subscriptions",
     // Default: run every minute to pick up due subscriptions
@@ -194,12 +211,18 @@ const JOBS: JobConfig[] = [
     handler: runIdempotencyCleanupJob,
   },
   {
-    name: "translation-gap-detection",
-    // Daily at 4:30 AM - reports provider error translations missing per locale
-    schedule: process.env.TRANSLATION_GAP_DETECTION_CRON || "30 4 * * *",
-    handler: async () => {
-      await runTranslationGapDetectionJob();
-    },
+    name: "notification-health-check",
+    // Every 5 minutes - evaluates per-channel delivery health and escalates
+    // only on state transitions (#479)
+    schedule: process.env.NOTIFICATION_HEALTH_CHECK_CRON || "*/5 * * * *",
+    handler: runNotificationHealthCheckJob,
+  },
+  {
+    name: "compliance-expiry-alert",
+    // Daily at 08:00 – escalates compliance certifications that are lapsing
+    // or have lapsed (#481)
+    schedule: process.env.COMPLIANCE_EXPIRY_ALERT_CRON || "0 8 * * *",
+    handler: runComplianceExpiryAlertJob,
   },
 ];
 

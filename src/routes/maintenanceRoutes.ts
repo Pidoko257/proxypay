@@ -15,6 +15,7 @@ import { queryRead } from "../config/database";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 import { databaseOptimizationService } from "../services/databaseOptimizationService";
+import { adminDashboardQueryPerformanceService } from "../services/adminDashboardQueryPerformanceService";
 import {
   listProviderVersions,
   getProviderVersion,
@@ -78,6 +79,42 @@ router.get("/database-optimization/runs", async (req: Request, res: Response) =>
   );
   return res.json({ data: rows });
 });
+
+// ─── #650 admin dashboard query performance ─────────────────────────────────
+
+// GET /api/maintenance/admin-dashboard-queries/plans
+// EXPLAIN (FORMAT JSON) for every registered dashboard query, with the plan
+// cost, the indexes the planner chose, and any relations it seq-scanned.
+router.get(
+  "/admin-dashboard-queries/plans",
+  async (_req: Request, res: Response) => {
+    const analyses =
+      await adminDashboardQueryPerformanceService.explainDashboardQueries();
+    return res.json({ data: analyses });
+  },
+);
+
+// GET /api/maintenance/admin-dashboard-queries/index-recommendations
+// Derives CREATE INDEX CONCURRENTLY statements from the current plans.
+router.get(
+  "/admin-dashboard-queries/index-recommendations",
+  async (_req: Request, res: Response) => {
+    const recommendations =
+      await adminDashboardQueryPerformanceService.recommendMissingIndexes();
+    return res.json({ data: recommendations });
+  },
+);
+
+// GET /api/maintenance/admin-dashboard-queries/metrics
+// Per-table seq-scan ratios and unused indexes for the dashboard's hot tables.
+router.get(
+  "/admin-dashboard-queries/metrics",
+  async (_req: Request, res: Response) => {
+    const metrics =
+      await adminDashboardQueryPerformanceService.collectQueryPerformanceMetrics();
+    return res.json({ data: metrics });
+  },
+);
 
 // ─── #484 provider contract versions ─────────────────────────────────────────
 

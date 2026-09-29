@@ -1,6 +1,10 @@
 import { Request, Response, NextFunction } from "express";
 import { RateLimiterRedis } from "rate-limiter-flexible";
 import { redisClient } from "../config/redis";
+import {
+  setStandardRateLimitHeaders,
+  toResetEpochSeconds,
+} from "../utils/rateLimitHeaders";
 
 // Define tiers
 export type UserTier = "free" | "pro" | "enterprise";
@@ -177,6 +181,17 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
     res.set("X-RateLimit-Remaining", String(Math.max(0, TIER_CONFIGS[tier].points - 1)));
     res.set("X-RateLimit-Tier", tier);
 
+    // #648: standard RateLimit-* headers. The limiter key lives for
+    // `duration` seconds from the first request in the window, so that is the
+    // point at which the full allowance becomes available again.
+    setStandardRateLimitHeaders(res, {
+      limit: TIER_CONFIGS[tier].points,
+      remaining: Math.max(0, TIER_CONFIGS[tier].points - 1),
+      resetEpochSeconds: toResetEpochSeconds(
+        Date.now() + TIER_CONFIGS[tier].duration * 1000,
+      ),
+    });
+
     next();
   } catch (rejRes) {
     const retrySecs = Math.round(rejRes.msBeforeNext / 1000) || 1;
@@ -218,6 +233,14 @@ export async function rateLimitMiddleware(req: Request, res: Response, next: Nex
     res.set("X-RateLimit-Limit", String(TIER_CONFIGS[tier].points));
     res.set("X-RateLimit-Remaining", "0");
     res.set("X-RateLimit-Tier", tier);
+
+    // #648: standard RateLimit-* headers on the rejection path too, so a
+    // client can read the reset without parsing the JSON body.
+    setStandardRateLimitHeaders(res, {
+      limit: TIER_CONFIGS[tier].points,
+      remaining: 0,
+      resetEpochSeconds: toResetEpochSeconds(Date.now() + retrySecs * 1000),
+    });
 
     res.status(429).json({
       error: "Too Many Requests",

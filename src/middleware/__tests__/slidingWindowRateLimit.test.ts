@@ -88,6 +88,47 @@ describe("slidingWindowRateLimit – auth group (max=5)", () => {
     expect(res.headers["x-ratelimit-reset"]).toBeDefined();
   });
 
+  // #648: standard RateLimit-* headers (IETF draft) so generic clients can
+  // parse the window without special-casing the legacy X- prefixed names.
+  it("returns standard RateLimit-Limit/Remaining/Reset headers", async () => {
+    const res = await request(app).get("/");
+
+    expect(res.headers["ratelimit-limit"]).toBe("5");
+    expect(res.headers["ratelimit-remaining"]).toBeDefined();
+    expect(res.headers["ratelimit-reset"]).toBeDefined();
+  });
+
+  it("emits RateLimit-Reset as a Unix timestamp in seconds", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app).get("/");
+    const reset = Number(res.headers["ratelimit-reset"]);
+
+    // Seconds, not milliseconds, and in the future relative to this request.
+    expect(Number.isInteger(reset)).toBe(true);
+    expect(reset).toBeGreaterThanOrEqual(before);
+    expect(reset).toBeLessThanOrEqual(before + 61);
+  });
+
+  it("keeps the standard headers consistent with the legacy ones", async () => {
+    const res = await request(app).get("/");
+    expect(res.headers["ratelimit-limit"]).toBe(
+      res.headers["x-ratelimit-limit"],
+    );
+    expect(res.headers["ratelimit-remaining"]).toBe(
+      res.headers["x-ratelimit-remaining"],
+    );
+  });
+
+  it("returns standard headers on the 429 response as well", async () => {
+    for (let i = 0; i < 5; i++) await request(app).get("/");
+    const res = await request(app).get("/");
+
+    expect(res.status).toBe(429);
+    expect(res.headers["ratelimit-limit"]).toBe("5");
+    expect(res.headers["ratelimit-remaining"]).toBe("0");
+    expect(Number(res.headers["ratelimit-reset"])).toBeGreaterThan(0);
+  });
+
   it("decrements X-RateLimit-Remaining on each request", async () => {
     const first  = await request(app).get("/");
     const second = await request(app).get("/");

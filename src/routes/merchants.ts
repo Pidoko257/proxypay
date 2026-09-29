@@ -402,6 +402,178 @@ merchantRoutes.post(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Hierarchy / sub-account routes
+// ---------------------------------------------------------------------------
+
+// POST /api/merchants/:id/sub-accounts - Create a sub-account under a merchant
+merchantRoutes.post(
+  "/:id/sub-accounts",
+  authenticateToken,
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const authReq = req as AuthRequest;
+      const createdBy = authReq.user?.id;
+
+      if (!req.body.name || !req.body.email || !req.body.phoneNumber) {
+        return res.status(400).json({
+          error: "Missing required fields",
+          message: "name, email, and phoneNumber are required",
+        });
+      }
+
+      const subAccount = await merchantService.createSubAccount(
+        id,
+        req.body,
+        createdBy
+      );
+
+      return res.status(201).json({
+        message: "Sub-account created successfully",
+        merchant: subAccount,
+      });
+    } catch (error) {
+      console.error("[Merchants] Error creating sub-account:", error);
+      const status =
+        error instanceof Error &&
+        (error.message.includes("not found") ||
+          error.message.includes("already exists"))
+          ? 404
+          : error instanceof Error &&
+            (error.message.includes("not active") ||
+              error.message.includes("maximum number"))
+          ? 422
+          : 500;
+      return res.status(status).json({
+        error: "Failed to create sub-account",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+);
+
+// GET /api/merchants/:id/sub-accounts - List direct sub-accounts
+merchantRoutes.get(
+  "/:id/sub-accounts",
+  authenticateToken,
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 50;
+      const status = req.query.status as string | undefined;
+
+      const result = await merchantService.getSubAccounts(id, {
+        page,
+        limit,
+        status,
+      });
+
+      return res.json(result);
+    } catch (error) {
+      console.error("[Merchants] Error listing sub-accounts:", error);
+      return res.status(500).json({
+        error: "Failed to list sub-accounts",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+);
+
+// GET /api/merchants/:id/hierarchy - Get the full hierarchy tree
+merchantRoutes.get(
+  "/:id/hierarchy",
+  authenticateToken,
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const tree = await merchantService.getHierarchyTree(id);
+
+      if (!tree) {
+        return res.status(404).json({ error: "Merchant not found" });
+      }
+
+      return res.json({ tree });
+    } catch (error) {
+      console.error("[Merchants] Error fetching hierarchy tree:", error);
+      const status =
+        error instanceof Error && error.message.includes("not found") ? 404 : 500;
+      return res.status(status).json({
+        error: "Failed to fetch hierarchy tree",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+);
+
+// GET /api/merchants/:id/ancestors - Get all ancestors (root → parent)
+merchantRoutes.get(
+  "/:id/ancestors",
+  authenticateToken,
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const ancestors = await merchantService.getAncestors(id);
+      return res.json({ ancestors });
+    } catch (error) {
+      console.error("[Merchants] Error fetching ancestors:", error);
+      const status =
+        error instanceof Error && error.message.includes("not found") ? 404 : 500;
+      return res.status(status).json({
+        error: "Failed to fetch ancestors",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+);
+
+// PUT /api/merchants/:id/parent - Move merchant to a different parent
+merchantRoutes.put(
+  "/:id/parent",
+  authenticateToken,
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { newParentId } = req.body;
+
+      if (!newParentId) {
+        return res.status(400).json({
+          error: "Missing required field",
+          message: "newParentId is required",
+        });
+      }
+
+      const merchant = await merchantService.moveSubAccount(id, newParentId);
+      return res.json({
+        message: "Merchant re-parented successfully",
+        merchant,
+      });
+    } catch (error) {
+      console.error("[Merchants] Error moving sub-account:", error);
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      const status =
+        msg.includes("not found")
+          ? 404
+          : msg.includes("circular") ||
+            msg.includes("not active") ||
+            msg.includes("maximum number") ||
+            msg.includes("own parent")
+          ? 422
+          : 500;
+      return res.status(status).json({
+        error: "Failed to move merchant",
+        message: msg,
+      });
+    }
+  }
+);
+
 // Error handler for multer errors
 merchantRoutes.use(
   (err: unknown, _req: Request, res: Response, _next: NextFunction) => {

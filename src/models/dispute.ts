@@ -524,6 +524,43 @@ export class DisputeModel {
     return result.rows;
   }
 
+  /** Add a timeline event to a dispute. */
+  async addTimelineEvent(
+    disputeId: string,
+    eventType: string,
+    actor: string,
+    description?: string,
+    oldStatus?: string,
+    newStatus?: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<DisputeTimelineEvent> {
+    const result = await queryWrite<DisputeTimelineEvent>(
+      `INSERT INTO dispute_timeline
+         (dispute_id, event_type, actor, description, old_status, new_status, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING
+         id,
+         dispute_id  AS "disputeId",
+         event_type  AS "eventType",
+         old_status  AS "oldStatus",
+         new_status  AS "newStatus",
+         actor,
+         description,
+         metadata,
+         created_at  AS "createdAt"`,
+      [
+        disputeId,
+        eventType,
+        actor,
+        description ?? null,
+        oldStatus ?? null,
+        newStatus ?? null,
+        metadata ? JSON.stringify(metadata) : null,
+      ],
+    );
+    return result.rows[0];
+  }
+
   /** Add a note/comment to a dispute. */
   async addNote(
     disputeId: string,

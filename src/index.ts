@@ -473,6 +473,7 @@ app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+app.use("/api/compliance", complianceVersionsRouter);
 app.use("/api/v2/transactions", transactionRoutesV2);
 app.use("/api/stream", transactionStreamRoutes);
 
@@ -510,6 +511,9 @@ app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
+// Split payments
+app.use("/api/split-payments", splitPaymentRulesRouter);
+app.use("/api/transactions", splitPaymentTransactionRouter);
 app.use("/api/fee-strategies", feeStrategiesRouter);
 app.use("/api/fee-routing", feeRoutingRouter);
 app.use("/api/cross-chain", crossChainRouter);

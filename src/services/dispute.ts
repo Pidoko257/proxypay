@@ -33,6 +33,7 @@ import {
   ReportFilter,
 } from "../models/dispute";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
+import { DisputeTimelineService } from "./disputeTimeline";
 import logger from "../utils/logger";
 
 // ---------------------------------------------------------------------------
@@ -116,6 +117,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
 export class DisputeService {
   private disputeModel = new DisputeModel();
   private transactionModel = new TransactionModel();
+  private timelineService = new DisputeTimelineService();
 
   /**
    * Open a new dispute for a transaction.
@@ -170,6 +172,19 @@ export class DisputeService {
     await this.transactionModel.updateStatus(
       transactionId,
       TransactionStatus.Dispute,
+    );
+
+    // Record opening event on the timeline
+    await this.timelineService.addEvent(
+      dispute.id,
+      "opened",
+      reportedBy ?? "system",
+      `Dispute opened for transaction ${transactionId}`,
+      undefined,
+      "open",
+      { reason, priority: dispute.priority, category },
+    ).catch((err) =>
+      logger.error({ err, disputeId: dispute.id }, "Failed to add opened timeline event"),
     );
 
     sendNotification({
@@ -247,6 +262,21 @@ export class DisputeService {
       assignedTo,
     });
 
+    // Record status change on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      "status_changed",
+      assignedTo ?? "system",
+      resolution
+        ? `Status changed to "${newStatus}": ${resolution}`
+        : `Status changed to "${newStatus}"`,
+      dispute.status,
+      newStatus,
+      { resolution, assignedTo },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add status_changed timeline event"),
+    );
+
     sendNotification({
       event: `dispute.${newStatus}`,
       disputeId: updated.id,
@@ -305,6 +335,19 @@ export class DisputeService {
       disputeId,
       adminId ?? "admin",
       `Admin ${action === "reverse" ? "reversed" : "upheld"} payment: ${trimmedResolution}`,
+    );
+
+    // Record resolution on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      action === "reverse" ? "reversed" : "upheld",
+      adminId ?? "admin",
+      `Payment ${action === "reverse" ? "reversed" : "upheld"}: ${trimmedResolution}`,
+      dispute.status,
+      nextDisputeStatus,
+      { action, transactionStatus: nextTransactionStatus, adminId },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add resolution timeline event"),
     );
 
     sendNotification({
@@ -485,6 +528,19 @@ export class DisputeService {
         assignedTo: agentName,
       });
     }
+
+    // Record assignment on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      "assigned",
+      agentName,
+      `Dispute assigned to ${agentName}`,
+      dispute.status !== updated.status ? dispute.status : undefined,
+      dispute.status !== updated.status ? updated.status : undefined,
+      { agentName },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add assigned timeline event"),
+    );
 
     sendNotification({
       event: "dispute.assigned",

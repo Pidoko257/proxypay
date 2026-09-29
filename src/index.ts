@@ -91,7 +91,12 @@ import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import { transactionStreamRoutes } from "./routes/stream";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
+import complianceVersionsRouter from "./routes/complianceVersions";
 import { startStellarExporter } from "./services/stellarExporter";
+import {
+  splitPaymentRulesRouter,
+  splitPaymentTransactionRouter,
+} from "./routes/splitPayments";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -355,6 +360,7 @@ app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+app.use("/api/compliance", complianceVersionsRouter);
 app.use("/api/v2/transactions", transactionRoutesV2);
 app.use("/api/stream", transactionStreamRoutes);
 
@@ -390,6 +396,9 @@ app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
+// Split payments
+app.use("/api/split-payments", splitPaymentRulesRouter);
+app.use("/api/transactions", splitPaymentTransactionRouter);
 app.use("/api/fee-strategies", feeStrategiesRouter);
 app.use("/api/cross-chain", crossChainRouter);
 app.use("/api/stellar", stellarRouter);

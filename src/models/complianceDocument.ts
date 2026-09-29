@@ -61,6 +61,34 @@ export interface ComplianceDocumentFacets {
   tags: string[];
 }
 
+export interface ComplianceDocumentVersion {
+  id: string;
+  documentId: string;
+  versionNumber: number;
+  title: string;
+  summary?: string | null;
+  body: string;
+  countryCode?: string | null;
+  provider?: string | null;
+  tags: string[];
+  sourceUrl?: string | null;
+  status: string;
+  changeSummary?: string | null;
+  createdBy?: string | null;
+  createdAt: Date | string;
+}
+
+export interface ComplianceDocumentVersionCreateInput {
+  title: string;
+  summary?: string | null;
+  body: string;
+  countryCode?: string | null;
+  provider?: string | null;
+  tags?: string[];
+  sourceUrl?: string | null;
+  status: string;
+}
+
 const selectFields = `
   id,
   title,
@@ -279,6 +307,210 @@ export class ComplianceDocumentModel {
       countries: result.rows[0]?.countries ?? [],
       providers: result.rows[0]?.providers ?? [],
       tags: result.rows[0]?.tags ?? [],
+    };
+  }
+
+  /**
+   * Snapshot the current document state as a new version row.
+   * The version_number is automatically incremented (MAX + 1) per document.
+   */
+  async createVersion(
+    documentId: string,
+    input: ComplianceDocumentVersionCreateInput,
+    changeSummary?: string,
+    actorUserId?: string,
+  ): Promise<ComplianceDocumentVersion> {
+    const query = `
+      INSERT INTO compliance_document_versions (
+        document_id,
+        version_number,
+        title,
+        summary,
+        body,
+        country_code,
+        provider,
+        tags,
+        source_url,
+        status,
+        change_summary,
+        created_by
+      )
+      SELECT
+        $1,
+        COALESCE((SELECT MAX(version_number) FROM compliance_document_versions WHERE document_id = $1), 0) + 1,
+        $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+      RETURNING
+        id,
+        document_id AS "documentId",
+        version_number AS "versionNumber",
+        title,
+        summary,
+        body,
+        country_code AS "countryCode",
+        provider,
+        tags,
+        source_url AS "sourceUrl",
+        status,
+        change_summary AS "changeSummary",
+        created_by AS "createdBy",
+        created_at AS "createdAt"
+    `;
+
+    const result = await pool.query(query, [
+      documentId,
+      input.title,
+      input.summary ?? null,
+      input.body,
+      input.countryCode ?? null,
+      input.provider ?? null,
+      input.tags ?? [],
+      input.sourceUrl ?? null,
+      input.status,
+      changeSummary ?? null,
+      actorUserId ?? null,
+    ]);
+
+    return this.mapVersionRow(result.rows[0]);
+  }
+
+  /**
+   * Return all versions for a document, newest first.
+   */
+  async listVersions(
+    documentId: string,
+  ): Promise<ComplianceDocumentVersion[]> {
+    const result = await pool.query(
+      `
+        SELECT
+          id,
+          document_id AS "documentId",
+          version_number AS "versionNumber",
+          title,
+          summary,
+          body,
+          country_code AS "countryCode",
+          provider,
+          tags,
+          source_url AS "sourceUrl",
+          status,
+          change_summary AS "changeSummary",
+          created_by AS "createdBy",
+          created_at AS "createdAt"
+        FROM compliance_document_versions
+        WHERE document_id = $1
+        ORDER BY version_number DESC
+      `,
+      [documentId],
+    );
+
+    return result.rows.map((row) => this.mapVersionRow(row));
+  }
+
+  /**
+   * Return a specific version by document id + version number.
+   */
+  async findVersion(
+    documentId: string,
+    versionNumber: number,
+  ): Promise<ComplianceDocumentVersion | null> {
+    const result = await pool.query(
+      `
+        SELECT
+          id,
+          document_id AS "documentId",
+          version_number AS "versionNumber",
+          title,
+          summary,
+          body,
+          country_code AS "countryCode",
+          provider,
+          tags,
+          source_url AS "sourceUrl",
+          status,
+          change_summary AS "changeSummary",
+          created_by AS "createdBy",
+          created_at AS "createdAt"
+        FROM compliance_document_versions
+        WHERE document_id = $1
+          AND version_number = $2
+      `,
+      [documentId, versionNumber],
+    );
+
+    return result.rows.length > 0 ? this.mapVersionRow(result.rows[0]) : null;
+  }
+
+  /**
+   * Restore a document to the state captured in a prior version.
+   * Creates a new version snapshot (so history is never lost) and then
+   * overwrites the live document row.
+   * Returns the restored document.
+   */
+  async restoreVersion(
+    documentId: string,
+    versionNumber: number,
+    actorUserId?: string,
+  ): Promise<ComplianceDocument | null> {
+    const version = await this.findVersion(documentId, versionNumber);
+    if (!version) {
+      return null;
+    }
+
+    // Snapshot the current live document before overwriting
+    const current = await this.findById(documentId);
+    if (current) {
+      await this.createVersion(
+        documentId,
+        {
+          title: current.title,
+          summary: current.summary,
+          body: current.body,
+          countryCode: current.countryCode,
+          provider: current.provider,
+          tags: current.tags,
+          sourceUrl: current.sourceUrl,
+          status: current.status,
+        },
+        `Auto-snapshot before restore to v${versionNumber}`,
+        actorUserId,
+      );
+    }
+
+    // Overwrite the live document with the version's content
+    const restored = await this.update(
+      documentId,
+      {
+        title: version.title,
+        summary: version.summary,
+        body: version.body,
+        countryCode: version.countryCode,
+        provider: version.provider,
+        tags: version.tags,
+        sourceUrl: version.sourceUrl,
+        status: version.status as ComplianceDocumentStatus,
+      },
+      actorUserId,
+    );
+
+    return restored;
+  }
+
+  private mapVersionRow(row: any): ComplianceDocumentVersion {
+    return {
+      id: row.id,
+      documentId: row.documentId ?? row.document_id,
+      versionNumber: row.versionNumber ?? row.version_number,
+      title: row.title,
+      summary: row.summary ?? null,
+      body: row.body,
+      countryCode: row.countryCode ?? row.country_code ?? null,
+      provider: row.provider ?? null,
+      tags: row.tags ?? [],
+      sourceUrl: row.sourceUrl ?? row.source_url ?? null,
+      status: row.status,
+      changeSummary: row.changeSummary ?? row.change_summary ?? null,
+      createdBy: row.createdBy ?? row.created_by ?? null,
+      createdAt: row.createdAt ?? row.created_at,
     };
   }
 

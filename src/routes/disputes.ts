@@ -64,6 +64,7 @@
 
 import { Router, Request, Response } from "express";
 import { DisputeService } from "../services/dispute";
+import { DisputeTimelineService } from "../services/disputeTimeline";
 import { DisputeStatus, DisputePriority } from "../models/dispute";
 import { DisputeStateMachine } from "../services/disputeStateMachine";
 import { uploadSingle, uploadMultiple } from "../middleware/disputeUpload";
@@ -105,6 +106,7 @@ const VALID_PRIORITIES: DisputePriority[] = [
 
 const disputeService = new DisputeService();
 const stateMachine = new DisputeStateMachine();
+const timelineService = new DisputeTimelineService();
 
 // ---------------------------------------------------------------------------
 // Transaction-scoped router  (mounted at /api/transactions)
@@ -370,6 +372,119 @@ disputeRoutes.post(
           ? 422
           : 500;
       return res.status(code).json({ error: message });
+    }
+  },
+);
+
+/**
+ * GET /api/disputes/:disputeId/timeline
+ *
+ * Returns the enriched, phase-grouped timeline for a dispute.
+ *
+ * Response: {
+ *   disputeId: string,
+ *   totalEvents: number,
+ *   phases: Array<{ phase, label, events[] }>,
+ *   events: EnrichedTimelineEvent[]
+ * }
+ */
+disputeRoutes.get(
+  "/:disputeId/timeline",
+  requireAuth,
+  requirePermission("dispute:read"),
+  async (req: Request, res: Response) => {
+    try {
+      const timeline = await timelineService.getTimeline(req.params.disputeId);
+      return res.json(timeline);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to get timeline";
+      throw createError(
+        message.includes("not found")
+          ? ERROR_CODES.NOT_FOUND
+          : ERROR_CODES.INTERNAL_ERROR,
+        message,
+        { error: message },
+      );
+    }
+  },
+);
+
+/**
+ * POST /api/disputes/:disputeId/timeline
+ *
+ * Manually add a timeline event (e.g. a note, admin action, or custom event).
+ *
+ * Body: {
+ *   eventType: string,          // e.g. 'manual_note', 'comment'
+ *   actor: string,              // who triggered it
+ *   description?: string,
+ *   oldStatus?: string,
+ *   newStatus?: string,
+ *   metadata?: object
+ * }
+ *
+ * Response: EnrichedTimelineEvent (201)
+ */
+disputeRoutes.post(
+  "/:disputeId/timeline",
+  requireAuth,
+  requirePermission("dispute:update"),
+  async (req: Request, res: Response) => {
+    const { eventType, actor, description, oldStatus, newStatus, metadata } =
+      req.body;
+
+    if (
+      !eventType ||
+      typeof eventType !== "string" ||
+      eventType.trim().length === 0
+    ) {
+      throw createError(
+        ERROR_CODES.MISSING_FIELD,
+        'Field "eventType" is required and must be a non-empty string',
+        {
+          error: 'Field "eventType" is required and must be a non-empty string',
+        },
+      );
+    }
+
+    if (!actor || typeof actor !== "string" || actor.trim().length === 0) {
+      throw createError(
+        ERROR_CODES.MISSING_FIELD,
+        'Field "actor" is required and must be a non-empty string',
+        { error: 'Field "actor" is required and must be a non-empty string' },
+      );
+    }
+
+    if (metadata !== undefined && (typeof metadata !== "object" || Array.isArray(metadata))) {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        'Field "metadata" must be a plain object if provided',
+        { error: 'Field "metadata" must be a plain object if provided' },
+      );
+    }
+
+    try {
+      const event = await timelineService.addEvent(
+        req.params.disputeId,
+        eventType.trim(),
+        actor.trim(),
+        description,
+        oldStatus,
+        newStatus,
+        metadata,
+      );
+      return res.status(201).json(event);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to add timeline event";
+      throw createError(
+        message.includes("not found")
+          ? ERROR_CODES.NOT_FOUND
+          : ERROR_CODES.INTERNAL_ERROR,
+        message,
+        { error: message },
+      );
     }
   },
 );

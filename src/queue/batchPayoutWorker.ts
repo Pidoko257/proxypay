@@ -39,6 +39,7 @@ const PARALLEL_CONCURRENCY = parseInt(process.env.BATCH_PAYOUT_CONCURRENCY || "5
 const RATE_LIMIT_PER_SECOND = parseInt(process.env.BATCH_PAYOUT_RATE_LIMIT || "50", 10);
 const CIRCUIT_BREAKER_THRESHOLD = parseInt(process.env.BATCH_PAYOUT_CB_THRESHOLD || "10", 10);
 const CIRCUIT_BREAKER_RESET_MS = parseInt(process.env.BATCH_PAYOUT_CB_RESET_MS || "60000", 10);
+const PROGRESS_WEBHOOK_INTERVAL = parseInt(process.env.BATCH_PROGRESS_WEBHOOK_INTERVAL || "100", 10);
 
 interface PendingPayout {
   transactionId: string;
@@ -296,6 +297,8 @@ async function processBatchResults(
   batchOperationId: string,
 ): Promise<void> {
   const resultMap = new Map(results.map(r => [r.referenceId, r]));
+  const totalCount = payouts.length;
+  let processedCount = 0;
 
   const processor = new ParallelBatchProcessor({
     concurrency: PARALLEL_CONCURRENCY,
@@ -314,6 +317,20 @@ async function processBatchResults(
     const payout = item.payload;
     const result = resultMap.get(payout.transactionId);
     await processSinglePayoutResult(payout, result, batchOperationId);
+
+    processedCount++;
+
+    // Fire an intermediate progress webhook every PROGRESS_WEBHOOK_INTERVAL items
+    if (processedCount % PROGRESS_WEBHOOK_INTERVAL === 0 && processedCount < totalCount) {
+      await batchWebhookService.sendBatchIntermediateProgressWebhook(
+        batchOperationId,
+        processedCount,
+        totalCount,
+      ).catch(err => {
+        console.error(`[BatchPayoutWorker] Failed to send progress webhook at ${processedCount}/${totalCount}:`, err);
+      });
+    }
+
     return { transactionId: payout.transactionId };
   });
 
@@ -328,7 +345,7 @@ async function processBatchResults(
   );
 
   // Send progress webhook if configured
-  await batchWebhookService.sendBatchCompletionWebhook(batchOperationId).catch(err => {
+  await batchWebhookService.sendBatchCompletedWebhook(batchOperationId).catch(err => {
     console.error(`[BatchPayoutWorker] Failed to send completion webhook:`, err);
   });
 }
@@ -359,6 +376,11 @@ async function processBatch(provider: string): Promise<void> {
   // Update batch operation status to processing
   await batchOperationModel.updateStatus(batchOperation.id, BatchOperationStatus.Processing);
 
+  // Notify merchants that the batch has started (Issue #626)
+  await batchWebhookService.sendBatchStartedWebhook(batchOperation.id).catch(err => {
+    console.error(`[BatchPayoutWorker] Failed to send batch_started webhook:`, err);
+  });
+
   // Create batch item records
   for (const payout of payouts) {
     await batchItemModel.create({
@@ -377,7 +399,22 @@ async function processBatch(provider: string): Promise<void> {
   }));
 
   const startTime = Date.now();
-  const result = await mobileMoneyService.sendBatchPayout(provider, batchItems);
+  let result: BatchPayoutResult;
+  try {
+    result = await mobileMoneyService.sendBatchPayout(provider, batchItems);
+  } catch (error) {
+    const errorMsg = getErrorMessage(error);
+    await batchOperationModel
+      .updateStatus(batchOperation.id, BatchOperationStatus.Failed)
+      .catch(() => undefined);
+    // Surface batch failure details to merchants (Issue #626)
+    await batchWebhookService
+      .sendBatchFailedWebhook(batchOperation.id, errorMsg)
+      .catch(err => {
+        console.error(`[BatchPayoutWorker] Failed to send batch_failed webhook:`, err);
+      });
+    throw error;
+  }
   const durationMs = Date.now() - startTime;
 
   // Record metrics

@@ -20,6 +20,7 @@
 import { Request, Response, NextFunction } from "express";
 import { redisClient } from "../config/redis";
 import { rateLimitConfig, RouteGroup, RateLimitEntry } from "../config/rateLimitConfig";
+import { setStandardRateLimitHeaders } from "../utils/rateLimitHeaders";
 
 // ---------------------------------------------------------------------------
 // Lua script (atomic read-modify-write)
@@ -153,6 +154,14 @@ export function slidingWindowRateLimit(
     res.setHeader("X-RateLimit-Limit",     String(result.limit));
     res.setHeader("X-RateLimit-Remaining", String(result.remaining));
     res.setHeader("X-RateLimit-Reset",     String(resetEpochSeconds));
+
+    // #648: also emit the standard RateLimit-* headers so clients can parse
+    // the window without special-casing the legacy X- prefixed names.
+    setStandardRateLimitHeaders(res, {
+      limit: result.limit,
+      remaining: result.remaining,
+      resetEpochSeconds,
+    });
 
     if (!result.allowed) {
       const retryAfter = Math.max(1, resetEpochSeconds - Math.floor(Date.now() / 1000));

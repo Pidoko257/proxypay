@@ -23,6 +23,82 @@ export interface TransactionHistoryResult {
   cursor: string | null;
 }
 
+/** Threshold level an operation is evaluated against (Stellar account thresholds). */
+export type StellarThresholdLevel = "low" | "medium" | "high";
+
+export interface StellarSignerWeight {
+  publicKey: string;
+  weight: number;
+  hasSigned: boolean;
+}
+
+export interface MultisigSigningResult {
+  signed: boolean;
+  /** Total weight contributed by the supplied signer keypairs. */
+  signatureWeight: number;
+  /** Weight required by the account threshold for this operation level. */
+  requiredWeight: number;
+  thresholdLevel: StellarThresholdLevel;
+  /** The account's master key weight (0 means the master key cannot sign). */
+  masterWeight: number;
+  signerBreakdown: StellarSignerWeight[];
+}
+
+/**
+ * Raised when a multi-signature transaction does not carry enough signing
+ * weight for the source account's threshold (Issue #624).
+ */
+export class MultisigThresholdError extends Error {
+  constructor(
+    public readonly thresholdLevel: StellarThresholdLevel,
+    public readonly requiredWeight: number,
+    public readonly signatureWeight: number,
+    public readonly signerBreakdown: StellarSignerWeight[],
+  ) {
+    super(
+      `Transaction requires ${requiredWeight} signature weight at the "${thresholdLevel}" threshold ` +
+        `but only ${signatureWeight} was provided`,
+    );
+    this.name = "MultisigThresholdError";
+  }
+}
+
+/**
+ * Why a clawback destination could not be validated on Stellar (#647).
+ *
+ * - `ACCOUNT_NOT_FOUND`  – the destination account no longer exists on the
+ *   network (merged away or never created).
+ * - `TRUSTLINE_NOT_FOUND` – the account exists but no longer holds a trustline
+ *   for the clawback asset, so there is nothing to claw back.
+ */
+export type ClawbackDestinationFailure =
+  | "ACCOUNT_NOT_FOUND"
+  | "TRUSTLINE_NOT_FOUND";
+
+/**
+ * Raised before a clawback is submitted when the destination account is no
+ * longer a valid clawback target. Failing fast keeps the accounting reversal
+ * (`ledgerService.postClawback`) from running for a clawback that the network
+ * would reject anyway.
+ */
+export class ClawbackDestinationError extends Error {
+  constructor(
+    public readonly failure: ClawbackDestinationFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ClawbackDestinationError";
+  }
+}
+
+/** Result of a successful {@link StellarService.validateClawbackDestination}. */
+export interface ClawbackDestinationCheck {
+  accountId: string;
+  assetCode: string;
+  /** Balance available to claw back, as a string in asset units. */
+  balance: string;
+}
+
 export class StellarService {
   private server: StellarSdk.Horizon.Server;
   private issuerKeypair: StellarSdk.Keypair | null = null;
@@ -411,6 +487,70 @@ export class StellarService {
   }
 
   /**
+   * Verifies that `fromAddress` is still a valid clawback destination (#647).
+   *
+   * A clawback fails at the network level when the destination account has been
+   * merged away or has removed its trustline for the asset. Detecting that
+   * before the transaction is built turns an opaque Horizon error into a clear,
+   * actionable message and stops the caller from posting an accounting reversal
+   * for a clawback that never happened.
+   *
+   * @throws {ClawbackDestinationError} when the account or trustline is gone.
+   */
+  async validateClawbackDestination(
+    fromAddress: string,
+    asset: StellarSdk.Asset = getConfiguredPaymentAsset(),
+  ): Promise<ClawbackDestinationCheck> {
+    const assetCode = asset.isNative() ? "XLM" : asset.getCode();
+
+    let account: StellarSdk.Horizon.AccountResponse;
+    try {
+      account = await this.server.loadAccount(fromAddress);
+    } catch (error: any) {
+      // Horizon returns 404 for an account that does not exist (or was merged).
+      if (error?.status === 404 || error?.response?.status === 404) {
+        throw new ClawbackDestinationError(
+          "ACCOUNT_NOT_FOUND",
+          `Clawback destination account ${fromAddress} no longer exists on Stellar`,
+        );
+      }
+      throw error;
+    }
+
+    // Native XLM is held by the account itself; issued assets need a trustline.
+    if (!asset.isNative()) {
+      const trustline = account.balances.find(
+        (b) =>
+          b.asset_type !== "native" &&
+          "asset_code" in b &&
+          b.asset_code === asset.getCode() &&
+          "asset_issuer" in b &&
+          b.asset_issuer === asset.getIssuer(),
+      );
+
+      if (!trustline) {
+        throw new ClawbackDestinationError(
+          "TRUSTLINE_NOT_FOUND",
+          `Clawback destination ${fromAddress} has no trustline for ${assetCode}`,
+        );
+      }
+
+      return {
+        accountId: fromAddress,
+        assetCode,
+        balance: "balance" in trustline ? trustline.balance : "0",
+      };
+    }
+
+    const native = account.balances.find((b) => b.asset_type === "native");
+    return {
+      accountId: fromAddress,
+      assetCode,
+      balance: native ? native.balance : "0",
+    };
+  }
+
+  /**
    * Executes a clawback operation for a specific address and amount.
    */
   async executeClawback(
@@ -439,6 +579,11 @@ export class StellarService {
     }
 
     try {
+      // #647: confirm the destination still exists and still trusts the asset
+      // before building the clawback, so the caller gets a precise error
+      // instead of an opaque Horizon failure after signing.
+      await this.validateClawbackDestination(fromAddress, paymentAsset);
+
       const account = await this.server.loadAccount(
         this.issuerKeypair.publicKey(),
       );
@@ -509,5 +654,112 @@ export class StellarService {
       console.error("Failed to write clawback audit log:", auditError);
       // Don't throw - audit logging failure shouldn't break the operation
     }
+  }
+
+  /**
+   * Signs a transaction with one or more signer keypairs **after** verifying
+   * that the combined signature weight satisfies the source account's
+   * threshold (Issue #624).
+   *
+   * Prior to this check any number of signatures could be attached to a
+   * transaction; Stellar would reject the submission at the network layer with
+   * an opaque `tx_bad_auth` error. Validating locally produces an actionable
+   * error that names the missing weight and the offending signers.
+   *
+   * @param transaction     The built (unsigned) transaction to sign.
+   * @param signerKeypairs  Keypairs that should sign the transaction.
+   * @param thresholdLevel  Account threshold to enforce (default `medium`,
+   *                        which is the level used by payments).
+   * @throws MultisigThresholdError when the supplied weight is insufficient.
+   */
+  async signTransactionWithThreshold(
+    transaction: StellarSdk.Transaction,
+    signerKeypairs: StellarSdk.Keypair[],
+    thresholdLevel: StellarThresholdLevel = "medium",
+  ): Promise<MultisigSigningResult> {
+    const sourceAccountId = transaction.source;
+    const account = await this.server.loadAccount(sourceAccountId);
+
+    const thresholds = ((account as { thresholds?: unknown }).thresholds ??
+      {}) as {
+      low_threshold?: number;
+      med_threshold?: number;
+      high_threshold?: number;
+      master_weight?: number;
+    };
+
+    const masterWeight = thresholds.master_weight ?? 1;
+    const requiredWeight =
+      thresholdLevel === "low"
+        ? thresholds.low_threshold ?? 0
+        : thresholdLevel === "high"
+          ? thresholds.high_threshold ?? 0
+          : thresholds.med_threshold ?? 0;
+
+    // Weight table derived from the account's signers. The master key only
+    // contributes weight while `master_weight > 0`; Stellar ignores master
+    // signatures when the master weight has been zeroed out.
+    const weights = new Map<string, number>();
+    if (masterWeight > 0) weights.set(sourceAccountId, masterWeight);
+
+    for (const signer of ((account as { signers?: unknown[] }).signers ??
+      []) as Array<{ type?: string; key?: string; weight?: number }>) {
+      if (signer?.type === "ed25519_public_key" && signer.key) {
+        weights.set(signer.key, signer.weight ?? 0);
+      }
+    }
+
+    const signedKeys: string[] = [];
+    let signatureWeight = 0;
+
+    for (const keypair of signerKeypairs) {
+      const publicKey = keypair.publicKey();
+      // Duplicate signatures add no weight in Stellar — count each key once.
+      if (signedKeys.includes(publicKey)) continue;
+      signedKeys.push(publicKey);
+      signatureWeight += weights.get(publicKey) ?? 0;
+    }
+
+    const signerBreakdown: StellarSignerWeight[] = Array.from(
+      weights.entries(),
+    ).map(([publicKey, weight]) => ({
+      publicKey,
+      weight,
+      hasSigned: signedKeys.includes(publicKey),
+    }));
+
+    if (signatureWeight < requiredWeight) {
+      console.warn(
+        `[StellarService] Refusing to sign transaction ${transaction.hash().toString(
+          "hex",
+        )}: weight ${signatureWeight} < required ${requiredWeight} (${thresholdLevel} threshold)`,
+      );
+      throw new MultisigThresholdError(
+        thresholdLevel,
+        requiredWeight,
+        signatureWeight,
+        signerBreakdown,
+      );
+    }
+
+    for (const keypair of signerKeypairs) {
+      transaction.sign(keypair);
+    }
+
+    console.log("[StellarService] Multi-signature threshold satisfied", {
+      thresholdLevel,
+      signatureWeight,
+      requiredWeight,
+      signers: signedKeys.length,
+    });
+
+    return {
+      signed: true,
+      signatureWeight,
+      requiredWeight,
+      thresholdLevel,
+      masterWeight,
+      signerBreakdown,
+    };
   }
 }

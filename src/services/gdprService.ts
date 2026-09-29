@@ -15,10 +15,38 @@ import {
 } from "./userService";
 import { getS3Client, s3Config } from "../config/s3";
 import { pool } from "../config/database";
+import { maskExportData } from "../utils/dataClassification";
 
 export interface PurgeOptions {
   archiveBeforePurge?: boolean;
   cascade?: boolean;
+}
+
+/**
+ * Options for {@link GDPRService.exportUserData} (#649).
+ *
+ * A subject-access export is a portable, self-contained archive. Anything
+ * sensitive left in the clear turns a leaked download into a full disclosure of
+ * the data subject's identity and financial history, so fields are classified
+ * and masked by default; the data subject (or a compliance reviewer acting on
+ * their behalf) opts in to the sensitive classes explicitly.
+ */
+export interface ExportOptions {
+  /**
+   * Include directly identifying values (phone, email, name, Stellar address)
+   * in the clear. Off by default.
+   */
+  includeConfidential?: boolean;
+  /**
+   * Include amounts, fees and other commercially sensitive values. Off by
+   * default.
+   */
+  includeInternal?: boolean;
+  /**
+   * Never honoured: authentication secrets (2FA seeds, backup codes, webhook
+   * secrets) are redacted in every export. Present so callers can be explicit.
+   */
+  includeRestricted?: false;
 }
 
 export interface PurgeResult {
@@ -77,8 +105,17 @@ export class GDPRService {
    * All data passes through memory-buffered streams only before being
    * returned to the caller for direct HTTP streaming — satisfying the
    * requirement to keep sensitive data out of local disk storage.
+   *
+   * #649: every field carries a data classification, and fields outside the
+   * `public` class are masked unless the caller explicitly opts in. The
+   * archive also ships `data_classification.json`, which records the
+   * classification of each exported field and what was withheld, so a reviewer
+   * can tell the difference between a redacted field and a missing one.
    */
-  async exportUserData(userId: string): Promise<Buffer> {
+  async exportUserData(
+    userId: string,
+    options: ExportOptions = {},
+  ): Promise<Buffer> {
     const user = await getUserById(userId);
     const txs = await this.txService.findByUserId(userId);
 
@@ -112,6 +149,58 @@ export class GDPRService {
       [userId],
     );
 
+    // #649: mask every section by data classification before it is serialised.
+    // Nothing sensitive reaches the archive (and therefore neither the HTTP
+    // response nor the S3 retention copy) unless explicitly requested.
+    const maskingOptions = {
+      includeConfidential: options.includeConfidential === true,
+      includeInternal: options.includeInternal === true,
+    };
+
+    const mask = (value: unknown, section: string) =>
+      maskExportData(value, maskingOptions, section);
+
+    const profile = mask(user || {}, "profile");
+    const transactions = mask(txs || [], "transactions");
+    const maskedDisputes = mask(disputes || [], "disputes");
+    const kyc = mask(
+      { requests: kycRequests, auditLogs: kycAudit, uploads: uploadRecords },
+      "kyc",
+    );
+    const logs = mask(auditLogs || [], "audit_logs");
+    const hooks = mask(webhooks || [], "webhooks");
+
+    const maskedFields = [
+      ...profile.maskedFields,
+      ...transactions.maskedFields,
+      ...maskedDisputes.maskedFields,
+      ...kyc.maskedFields,
+      ...logs.maskedFields,
+      ...hooks.maskedFields,
+    ];
+
+    // Manifest of what was withheld and why, so a masked field is
+    // distinguishable from a field that was never populated.
+    const classificationManifest = {
+      generatedAt: new Date().toISOString(),
+      userId,
+      masking: {
+        includeConfidential: maskingOptions.includeConfidential,
+        includeInternal: maskingOptions.includeInternal,
+        // Authentication material is redacted in every export.
+        includeRestricted: false,
+      },
+      note:
+        "Fields outside the `public` classification are replaced with [REDACTED] " +
+        "unless the corresponding include flag is set. `restricted` fields are " +
+        "always redacted.",
+      maskedFieldCount: maskedFields.length,
+      maskedFields: maskedFields.map((f) => ({
+        path: f.path,
+        classification: f.classification,
+      })),
+    };
+
     return new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
       const passthrough = new PassThrough();
@@ -125,32 +214,29 @@ export class GDPRService {
       archive.pipe(passthrough);
 
       // Append each export file directly as in-memory buffers — no disk I/O.
-      archive.append(Buffer.from(JSON.stringify(user || {}, null, 2), "utf8"), {
+      archive.append(Buffer.from(JSON.stringify(profile.data, null, 2), "utf8"), {
         name: "profile.json",
       });
-      archive.append(Buffer.from(JSON.stringify(txs || [], null, 2), "utf8"), {
-        name: "transactions.json",
-      });
-      archive.append(Buffer.from(JSON.stringify(disputes || [], null, 2), "utf8"), {
+      archive.append(
+        Buffer.from(JSON.stringify(transactions.data, null, 2), "utf8"),
+        { name: "transactions.json" },
+      );
+      archive.append(Buffer.from(JSON.stringify(maskedDisputes.data, null, 2), "utf8"), {
         name: "disputes.json",
       });
-      archive.append(
-        Buffer.from(
-          JSON.stringify(
-            { requests: kycRequests, auditLogs: kycAudit, uploads: uploadRecords },
-            null,
-            2,
-          ),
-          "utf8",
-        ),
-        { name: "kyc.json" },
-      );
-      archive.append(Buffer.from(JSON.stringify(auditLogs || [], null, 2), "utf8"), {
+      archive.append(Buffer.from(JSON.stringify(kyc.data, null, 2), "utf8"), {
+        name: "kyc.json",
+      });
+      archive.append(Buffer.from(JSON.stringify(logs.data, null, 2), "utf8"), {
         name: "audit_logs.json",
       });
-      archive.append(Buffer.from(JSON.stringify(webhooks || [], null, 2), "utf8"), {
+      archive.append(Buffer.from(JSON.stringify(hooks.data, null, 2), "utf8"), {
         name: "webhooks.json",
       });
+      archive.append(
+        Buffer.from(JSON.stringify(classificationManifest, null, 2), "utf8"),
+        { name: "data_classification.json" },
+      );
 
       archive.finalize();
     });
@@ -158,12 +244,20 @@ export class GDPRService {
 
   /**
    * Archives user data before purge according to retention policies.
+   *
+   * Unlike a subject-access export, this archive is an internal retention copy
+   * that exists precisely so the record survives the purge, so masking is
+   * disabled here — otherwise the retention artefact would be worthless.
+   * Authentication material (`restricted`) stays redacted either way.
    */
   async archiveUserDataBeforePurge(
     userId: string,
   ): Promise<{ archived: boolean; archiveKey?: string }> {
     try {
-      const buffer = await this.exportUserData(userId);
+      const buffer = await this.exportUserData(userId, {
+        includeConfidential: true,
+        includeInternal: true,
+      });
       const s3 = getS3Client();
       const archiveKey = `gdpr-archives/${userId}/${Date.now()}-retention-archive.zip`;
 

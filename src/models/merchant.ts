@@ -21,6 +21,29 @@ export interface Merchant {
   metadata: Record<string, any>;
   createdAt: Date;
   updatedAt: Date;
+  // Hierarchy fields
+  parentMerchantId: string | null;
+  hierarchyLevel: number;
+  hierarchyPath: string | null;
+  maxSubAccounts: number;
+}
+
+export interface CreateSubAccountInput {
+  name: string;
+  email: string;
+  phoneNumber: string;
+  businessName?: string;
+  businessType?: string;
+  taxId?: string;
+  address?: string;
+  city?: string;
+  country?: string;
+  metadata?: Record<string, any>;
+  maxSubAccounts?: number;
+}
+
+export interface HierarchyTreeNode extends Merchant {
+  children: HierarchyTreeNode[];
 }
 
 export interface CreateMerchantInput {
@@ -410,6 +433,292 @@ export class MerchantModel {
     await queryWrite(query, values);
   }
 
+  // ---------------------------------------------------------------------------
+  // Hierarchy methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Creates a sub-account under a parent merchant.
+   * Sets hierarchy_level = parent.hierarchy_level + 1 and builds hierarchy_path.
+   */
+  async createSubAccount(
+    parentId: string,
+    input: CreateSubAccountInput
+  ): Promise<Merchant> {
+    const parent = await this.findById(parentId);
+    if (!parent) {
+      throw new Error(`Parent merchant ${parentId} not found`);
+    }
+
+    const id = uuidv4();
+    const invitationToken = crypto.randomBytes(32).toString("hex");
+
+    const hierarchyLevel = parent.hierarchyLevel + 1;
+    // Build path: parent path (without trailing slash) + "/" + new id
+    const parentPath = parent.hierarchyPath || `/${parent.id}`;
+    const hierarchyPath = `${parentPath}/${id}`;
+
+    const query = `
+      INSERT INTO merchants (
+        id, name, email, phone_number, business_name, business_type,
+        tax_id, address, city, country, status, kyc_status,
+        invitation_token, invitation_sent_at, metadata,
+        parent_merchant_id, hierarchy_level, hierarchy_path, max_sub_accounts
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        'pending', 'not_started',
+        $11, NULL, $12,
+        $13, $14, $15, $16
+      )
+      RETURNING *
+    `;
+
+    const result = await queryWrite(query, [
+      id,
+      input.name,
+      input.email.toLowerCase().trim(),
+      input.phoneNumber,
+      input.businessName || null,
+      input.businessType || null,
+      input.taxId || null,
+      input.address || null,
+      input.city || null,
+      input.country || "CM",
+      invitationToken,
+      JSON.stringify(input.metadata || {}),
+      parentId,
+      hierarchyLevel,
+      hierarchyPath,
+      input.maxSubAccounts ?? 10,
+    ]);
+
+    return this.mapRowToMerchant(result.rows[0]);
+  }
+
+  /**
+   * Lists direct sub-accounts (children) of a parent merchant.
+   */
+  async findSubAccounts(
+    parentId: string,
+    options?: { page?: number; limit?: number; status?: string }
+  ): Promise<{ merchants: Merchant[]; total: number }> {
+    const page = options?.page || 1;
+    const limit = options?.limit || 50;
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = ["parent_merchant_id = $1"];
+    const values: any[] = [parentId];
+    let paramIndex = 2;
+
+    if (options?.status) {
+      conditions.push(`status = $${paramIndex++}`);
+      values.push(options.status);
+    }
+
+    const whereClause = `WHERE ${conditions.join(" AND ")}`;
+
+    const countResult = await queryRead(
+      `SELECT COUNT(*) as total FROM merchants ${whereClause}`,
+      values
+    );
+    const total = parseInt(countResult.rows[0]?.total || "0", 10);
+
+    const dataResult = await queryRead(
+      `SELECT * FROM merchants ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
+      [...values, limit, offset]
+    );
+
+    return {
+      merchants: dataResult.rows.map((row: any) => this.mapRowToMerchant(row)),
+      total,
+    };
+  }
+
+  /**
+   * Returns all ancestors from the root down to (but not including) this merchant.
+   * Uses the materialized hierarchy_path to find them in one query.
+   */
+  async findAncestors(merchantId: string): Promise<Merchant[]> {
+    const merchant = await this.findById(merchantId);
+    if (!merchant || !merchant.hierarchyPath) return [];
+
+    // hierarchy_path looks like: /rootId/parentId/selfId
+    // Ancestor IDs are all path segments except the last one (self)
+    const segments = merchant.hierarchyPath.split("/").filter(Boolean);
+    const ancestorIds = segments.slice(0, -1); // exclude self
+
+    if (ancestorIds.length === 0) return [];
+
+    // Fetch in a single query, then re-order to match path order
+    const placeholders = ancestorIds.map((_: string, i: number) => `$${i + 1}`).join(", ");
+    const result = await queryRead(
+      `SELECT * FROM merchants WHERE id IN (${placeholders})`,
+      ancestorIds
+    );
+
+    // Re-order to match path order (root → nearest parent)
+    const byId = new Map<string, Merchant>(
+      result.rows.map((row: any) => [row.id, this.mapRowToMerchant(row)])
+    );
+    return ancestorIds.map((id: string) => byId.get(id)).filter(Boolean) as Merchant[];
+  }
+
+  /**
+   * Returns all descendants of a merchant using a prefix-match on hierarchy_path.
+   */
+  async findDescendants(merchantId: string): Promise<Merchant[]> {
+    const merchant = await this.findById(merchantId);
+    if (!merchant) return [];
+
+    // All descendants have a hierarchy_path that starts with the merchant's path (or /{merchantId})
+    const pathPrefix = merchant.hierarchyPath || `/${merchantId}`;
+
+    const result = await queryRead(
+      `SELECT * FROM merchants
+       WHERE hierarchy_path LIKE $1
+       ORDER BY hierarchy_level ASC, created_at ASC`,
+      [`${pathPrefix}/%`]
+    );
+
+    return result.rows.map((row: any) => this.mapRowToMerchant(row));
+  }
+
+  /**
+   * Returns a nested tree structure starting from a given merchant.
+   */
+  async getHierarchyTree(merchantId: string): Promise<HierarchyTreeNode | null> {
+    const root = await this.findById(merchantId);
+    if (!root) return null;
+
+    const descendants = await this.findDescendants(merchantId);
+    const all = [root, ...descendants];
+
+    // Build a map for quick lookup
+    const nodeMap = new Map<string, HierarchyTreeNode>(
+      all.map((m) => [m.id, { ...m, children: [] }])
+    );
+
+    // Wire up parent → children
+    for (const m of descendants) {
+      if (m.parentMerchantId) {
+        const parentNode = nodeMap.get(m.parentMerchantId);
+        const selfNode = nodeMap.get(m.id);
+        if (parentNode && selfNode) {
+          parentNode.children.push(selfNode);
+        }
+      }
+    }
+
+    return nodeMap.get(merchantId) || null;
+  }
+
+  /**
+   * Finds the root merchant of the hierarchy that contains the given merchant.
+   */
+  async getRootMerchant(merchantId: string): Promise<Merchant | null> {
+    const merchant = await this.findById(merchantId);
+    if (!merchant) return null;
+
+    // A root merchant has no parent
+    if (!merchant.parentMerchantId) return merchant;
+
+    // Derive root from hierarchy_path: first segment after the leading slash
+    if (merchant.hierarchyPath) {
+      const segments = merchant.hierarchyPath.split("/").filter(Boolean);
+      if (segments.length > 0) {
+        return this.findById(segments[0]);
+      }
+    }
+
+    // Fallback: walk up via parent_merchant_id
+    return this.findById(merchant.parentMerchantId);
+  }
+
+  /**
+   * Updates the hierarchy path and level of a merchant and all its descendants
+   * when the merchant is re-parented.
+   */
+  async updateHierarchyPaths(
+    merchantId: string,
+    newParentId: string | null
+  ): Promise<void> {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      let newLevel = 0;
+      let newPathPrefix = `/${merchantId}`;
+
+      if (newParentId) {
+        const newParentResult = await client.query(
+          "SELECT hierarchy_level, hierarchy_path FROM merchants WHERE id = $1",
+          [newParentId]
+        );
+        if (newParentResult.rows.length === 0) {
+          throw new Error(`New parent merchant ${newParentId} not found`);
+        }
+        const np = newParentResult.rows[0];
+        newLevel = (np.hierarchy_level || 0) + 1;
+        const parentPath = np.hierarchy_path || `/${newParentId}`;
+        newPathPrefix = `${parentPath}/${merchantId}`;
+      }
+
+      // Update the merchant itself
+      await client.query(
+        `UPDATE merchants
+         SET parent_merchant_id = $1,
+             hierarchy_level    = $2,
+             hierarchy_path     = $3,
+             updated_at         = CURRENT_TIMESTAMP
+         WHERE id = $4`,
+        [newParentId, newLevel, newPathPrefix, merchantId]
+      );
+
+      // Fetch all descendants and rewrite their paths
+      const descResult = await client.query(
+        `SELECT id, hierarchy_path, hierarchy_level FROM merchants
+         WHERE hierarchy_path LIKE $1
+         ORDER BY hierarchy_level ASC`,
+        [`${newPathPrefix}/%`]
+      );
+
+      // We need the OLD path of this merchant to do the substitution
+      const oldMerchantResult = await client.query(
+        "SELECT hierarchy_path FROM merchants WHERE id = $1",
+        [merchantId]
+      );
+      const oldPath = oldMerchantResult.rows[0]?.hierarchy_path || `/${merchantId}`;
+
+      for (const desc of descResult.rows) {
+        const oldDescPath: string = desc.hierarchy_path || "";
+        const updatedPath = oldDescPath.replace(oldPath, newPathPrefix);
+        const levelDiff = newLevel - (oldMerchantResult.rows[0]?.hierarchy_level || 0);
+        await client.query(
+          `UPDATE merchants
+           SET hierarchy_path  = $1,
+               hierarchy_level = hierarchy_level + $2,
+               updated_at      = CURRENT_TIMESTAMP
+           WHERE id = $3`,
+          [updatedPath, levelDiff, desc.id]
+        );
+      }
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
+
   private mapRowToMerchant(row: any): Merchant {
     return {
       id: row.id,
@@ -430,6 +739,11 @@ export class MerchantModel {
       metadata: row.metadata || {},
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      // Hierarchy fields — default gracefully when columns don't exist yet
+      parentMerchantId: row.parent_merchant_id ?? null,
+      hierarchyLevel: row.hierarchy_level ?? 0,
+      hierarchyPath: row.hierarchy_path ?? null,
+      maxSubAccounts: row.max_sub_accounts ?? 10,
     };
   }
 }

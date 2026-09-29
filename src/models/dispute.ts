@@ -150,6 +150,11 @@ export interface ReportFilter {
   assignedTo?: string;
 }
 
+export interface AgentWorkload {
+  agentName: string;
+  activeDisputeCount: number;
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -669,6 +674,43 @@ export class DisputeModel {
     return result.rows;
   }
 
+  /** Add a timeline event to a dispute. */
+  async addTimelineEvent(
+    disputeId: string,
+    eventType: string,
+    actor: string,
+    description?: string,
+    oldStatus?: string,
+    newStatus?: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<DisputeTimelineEvent> {
+    const result = await queryWrite<DisputeTimelineEvent>(
+      `INSERT INTO dispute_timeline
+         (dispute_id, event_type, actor, description, old_status, new_status, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING
+         id,
+         dispute_id  AS "disputeId",
+         event_type  AS "eventType",
+         old_status  AS "oldStatus",
+         new_status  AS "newStatus",
+         actor,
+         description,
+         metadata,
+         created_at  AS "createdAt"`,
+      [
+        disputeId,
+        eventType,
+        actor,
+        description ?? null,
+        oldStatus ?? null,
+        newStatus ?? null,
+        metadata ? JSON.stringify(metadata) : null,
+      ],
+    );
+    return result.rows[0];
+  }
+
   /** Add a note/comment to a dispute. */
   async addNote(
     disputeId: string,
@@ -839,5 +881,56 @@ export class DisputeModel {
       params,
     );
     return result.rows;
+  }
+
+  /**
+   * Return active dispute counts per agent, ordered by workload ascending.
+   * Only disputes in 'open' or 'investigating' status are counted.
+   */
+  async getAgentWorkload(): Promise<AgentWorkload[]> {
+    const result = await queryRead<{ agentName: string; activeDisputeCount: string }>(
+      `SELECT assigned_to AS "agentName", COUNT(*) AS "activeDisputeCount"
+       FROM disputes
+       WHERE assigned_to IS NOT NULL
+         AND status IN ('open', 'investigating')
+       GROUP BY assigned_to
+       ORDER BY "activeDisputeCount" ASC`,
+    );
+    return result.rows.map(row => ({
+      agentName: row.agentName,
+      activeDisputeCount: parseInt(row.activeDisputeCount, 10),
+    }));
+  }
+
+  /**
+   * Find the agent with the fewest active disputes from a given list.
+   * Returns null if none of the provided agents have any workload data
+   * and the workload table is empty.
+   *
+   * @param availableAgents  List of agent identifiers to consider.
+   */
+  async findLeastLoadedAgent(availableAgents: string[]): Promise<string | null> {
+    if (availableAgents.length === 0) return null;
+
+    const workloads = await this.getAgentWorkload();
+
+    // Build a map of agentName → activeDisputeCount for quick lookup
+    const workloadMap = new Map<string, number>(
+      workloads.map(w => [w.agentName, w.activeDisputeCount]),
+    );
+
+    // Assign 0 to agents not yet in the workload table
+    let leastLoaded: string | null = null;
+    let lowestCount = Infinity;
+
+    for (const agent of availableAgents) {
+      const count = workloadMap.get(agent) ?? 0;
+      if (count < lowestCount) {
+        lowestCount = count;
+        leastLoaded = agent;
+      }
+    }
+
+    return leastLoaded;
   }
 }

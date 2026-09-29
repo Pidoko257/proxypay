@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { MerchantModel, CreateMerchantInput, Merchant } from "../models/merchant";
+import { MerchantModel, CreateMerchantInput, CreateSubAccountInput, HierarchyTreeNode, Merchant } from "../models/merchant";
 import { EmailService } from "./email";
 import { resolveLocale, translate } from "../utils/i18n";
 
@@ -364,6 +364,152 @@ If you didn't expect this invitation, please ignore this email.
         totalPages: Math.ceil(result.total / limit),
       },
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hierarchy / sub-account methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Creates a sub-account under a parent merchant.
+   * Validates that the parent exists, is active, and has not exceeded its sub-account limit.
+   */
+  async createSubAccount(
+    parentId: string,
+    input: CreateSubAccountInput,
+    createdBy?: string
+  ): Promise<Merchant> {
+    const parent = await this.merchantModel.findById(parentId);
+    if (!parent) {
+      throw new Error("Parent merchant not found");
+    }
+
+    if (parent.status !== "active") {
+      throw new Error(
+        `Parent merchant is not active (current status: ${parent.status})`
+      );
+    }
+
+    // Check how many direct sub-accounts already exist
+    const { total: existingCount } = await this.merchantModel.findSubAccounts(
+      parentId,
+      { limit: 1 }
+    );
+
+    if (existingCount >= parent.maxSubAccounts) {
+      throw new Error(
+        `Parent merchant has reached the maximum number of sub-accounts (${parent.maxSubAccounts})`
+      );
+    }
+
+    // Check email uniqueness
+    if (input.email) {
+      const existing = await this.merchantModel.findByEmail(input.email);
+      if (existing) {
+        throw new Error("A merchant with this email already exists");
+      }
+    }
+
+    const subAccount = await this.merchantModel.createSubAccount(parentId, input);
+    return subAccount;
+  }
+
+  /**
+   * Lists direct children of a merchant.
+   */
+  async getSubAccounts(
+    parentId: string,
+    options?: { page?: number; limit?: number; status?: string }
+  ): Promise<{ merchants: Merchant[]; total: number; pagination: any }> {
+    const page = options?.page || 1;
+    const limit = options?.limit || 50;
+
+    const result = await this.merchantModel.findSubAccounts(parentId, options);
+
+    return {
+      ...result,
+      pagination: {
+        page,
+        limit,
+        totalPages: Math.ceil(result.total / limit),
+      },
+    };
+  }
+
+  /**
+   * Returns the full hierarchy tree rooted at the given merchant.
+   */
+  async getHierarchyTree(merchantId: string): Promise<HierarchyTreeNode | null> {
+    const merchant = await this.merchantModel.findById(merchantId);
+    if (!merchant) {
+      throw new Error("Merchant not found");
+    }
+    return this.merchantModel.getHierarchyTree(merchantId);
+  }
+
+  /**
+   * Moves a sub-account to a new parent, updating all hierarchy paths.
+   * Prevents circular references (cannot re-parent to a descendant).
+   */
+  async moveSubAccount(merchantId: string, newParentId: string): Promise<Merchant> {
+    if (merchantId === newParentId) {
+      throw new Error("A merchant cannot be its own parent");
+    }
+
+    const merchant = await this.merchantModel.findById(merchantId);
+    if (!merchant) {
+      throw new Error("Merchant not found");
+    }
+
+    const newParent = await this.merchantModel.findById(newParentId);
+    if (!newParent) {
+      throw new Error("New parent merchant not found");
+    }
+
+    if (newParent.status !== "active") {
+      throw new Error(
+        `New parent merchant is not active (current status: ${newParent.status})`
+      );
+    }
+
+    // Prevent circular reference: newParent must not be a descendant of merchant
+    const descendants = await this.merchantModel.findDescendants(merchantId);
+    const isDescendant = descendants.some((d) => d.id === newParentId);
+    if (isDescendant) {
+      throw new Error(
+        "Cannot move a merchant to one of its own descendants (circular reference)"
+      );
+    }
+
+    // Check new parent's sub-account limit
+    const { total: existingCount } = await this.merchantModel.findSubAccounts(
+      newParentId,
+      { limit: 1 }
+    );
+    if (existingCount >= newParent.maxSubAccounts) {
+      throw new Error(
+        `New parent merchant has reached the maximum number of sub-accounts (${newParent.maxSubAccounts})`
+      );
+    }
+
+    await this.merchantModel.updateHierarchyPaths(merchantId, newParentId);
+
+    const updated = await this.merchantModel.findById(merchantId);
+    if (!updated) {
+      throw new Error("Failed to fetch updated merchant after move");
+    }
+    return updated;
+  }
+
+  /**
+   * Returns all ancestors (root → immediate parent) of the given merchant.
+   */
+  async getAncestors(merchantId: string): Promise<Merchant[]> {
+    const merchant = await this.merchantModel.findById(merchantId);
+    if (!merchant) {
+      throw new Error("Merchant not found");
+    }
+    return this.merchantModel.findAncestors(merchantId);
   }
 }
 

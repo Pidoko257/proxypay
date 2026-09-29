@@ -35,6 +35,7 @@ import {
   DisputeNotePageOptions,
 } from "../models/dispute";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
+import { DisputeTimelineService } from "./disputeTimeline";
 import logger from "../utils/logger";
 import { notificationRouter } from "./notificationRouter";
 import { TransactionReversalService } from "./transactionReversalService";
@@ -176,6 +177,19 @@ export class DisputeService {
       TransactionStatus.Dispute,
     );
 
+    // Record opening event on the timeline
+    await this.timelineService.addEvent(
+      dispute.id,
+      "opened",
+      reportedBy ?? "system",
+      `Dispute opened for transaction ${transactionId}`,
+      undefined,
+      "open",
+      { reason, priority: dispute.priority, category },
+    ).catch((err) =>
+      logger.error({ err, disputeId: dispute.id }, "Failed to add opened timeline event"),
+    );
+
     sendNotification({
       event: "dispute.opened",
       disputeId: dispute.id,
@@ -269,6 +283,21 @@ export class DisputeService {
       assignedTo,
     });
 
+    // Record status change on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      "status_changed",
+      assignedTo ?? "system",
+      resolution
+        ? `Status changed to "${newStatus}": ${resolution}`
+        : `Status changed to "${newStatus}"`,
+      dispute.status,
+      newStatus,
+      { resolution, assignedTo },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add status_changed timeline event"),
+    );
+
     sendNotification({
       event: `dispute.${newStatus}`,
       disputeId: updated.id,
@@ -339,6 +368,19 @@ export class DisputeService {
       disputeId,
       adminId ?? "admin",
       `Admin ${action === "reverse" ? "reversed" : "upheld"} payment: ${trimmedResolution}`,
+    );
+
+    // Record resolution on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      action === "reverse" ? "reversed" : "upheld",
+      adminId ?? "admin",
+      `Payment ${action === "reverse" ? "reversed" : "upheld"}: ${trimmedResolution}`,
+      dispute.status,
+      nextDisputeStatus,
+      { action, transactionStatus: nextTransactionStatus, adminId },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add resolution timeline event"),
     );
 
     sendNotification({
@@ -523,6 +565,19 @@ export class DisputeService {
       });
     }
 
+    // Record assignment on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      "assigned",
+      agentName,
+      `Dispute assigned to ${agentName}`,
+      dispute.status !== updated.status ? dispute.status : undefined,
+      dispute.status !== updated.status ? updated.status : undefined,
+      { agentName },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add assigned timeline event"),
+    );
+
     sendNotification({
       event: "dispute.assigned",
       disputeId: updated.id,
@@ -688,5 +743,52 @@ export class DisputeService {
       grouped[cat].push(ev);
     }
     return grouped;
+  }
+
+  // ---------------------------------------------------------------------------
+  // #636 Dispute Workload Balancing
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Automatically assign a dispute to the agent with the lowest active
+   * dispute workload from a provided list of available agents.
+   *
+   * Falls back to the first agent in the list when no workload data exists
+   * (e.g., all agents are new or have no open disputes).
+   *
+   * @param disputeId        UUID of the dispute to assign.
+   * @param availableAgents  Non-empty list of candidate agent identifiers.
+   */
+  async autoAssignToLeastLoadedAgent(
+    disputeId: string,
+    availableAgents: string[],
+  ): Promise<Dispute> {
+    if (availableAgents.length === 0) {
+      throw new Error('availableAgents must not be empty');
+    }
+
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+
+    if (TERMINAL_STATUSES.includes(dispute.status)) {
+      throw new Error(`Cannot assign a ${dispute.status} dispute`);
+    }
+
+    const bestAgent = await this.disputeModel.findLeastLoadedAgent(availableAgents);
+
+    // Fallback: no workload data at all — use first agent in the list
+    const agentToAssign = bestAgent ?? availableAgents[0];
+
+    return this.assignToAgent(disputeId, agentToAssign);
+  }
+
+  /**
+   * Return current workload metrics for all agents with active disputes.
+   * Useful for monitoring dashboards and operational tooling.
+   */
+  async getWorkloadMetrics(): Promise<AgentWorkload[]> {
+    return this.disputeModel.getAgentWorkload();
   }
 }

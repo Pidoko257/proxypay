@@ -19,7 +19,7 @@ import {
   fieldExtensionsEstimator,
 } from "graphql-query-complexity";
 import { createAPQCache } from "./apqCache";
-import { verifyToken } from "../auth/jwt";
+import { authenticateWsConnection } from "./wsAuth";
 
 // Merge resolvers with subscription resolvers
 const mergedResolvers = {
@@ -92,53 +92,80 @@ export async function startApolloServer(
     path: "/graphql",
   });
 
+  // Isolate transport-level failures so one bad client cannot take down WS
+  wsServer.on("error", (err) => {
+    console.error("[WS] WebSocketServer error (non-fatal):", err);
+  });
+  wsServer.on("connection", (socket) => {
+    socket.on("error", (err) => {
+      console.error("[WS] client socket error (non-fatal):", err.message);
+    });
+  });
+
   // Set up the graphql-ws server
   const serverCleanup = useServer(
     {
       schema,
       context: (ctx: any) => {
-        const req = ctx.extra.request as Request | undefined;
-        const jwtClaims = ctx.extra.jwtClaims;
-        // Build base context from HTTP request, then overlay WS auth
-        const base = buildGraphqlContext(req as Request);
-        if (jwtClaims) {
-          base.auth = { authenticated: true, subject: jwtClaims.userId };
+        const jwtClaims = ctx.extra?.jwtClaims;
+        try {
+          const req = ctx.extra.request as Request | undefined;
+          // Build base context from HTTP request, then overlay WS JWT auth
+          const base = buildGraphqlContext(req as Request);
+          if (jwtClaims) {
+            base.auth = {
+              authenticated: true,
+              subject: jwtClaims.userId ?? null,
+            };
+          }
+          return base;
+        } catch (err) {
+          // HTTP API-key checks may fail on the WS upgrade request; JWT still wins
+          if (jwtClaims) {
+            return {
+              auth: {
+                authenticated: true,
+                subject: jwtClaims.userId ?? null,
+              },
+            };
+          }
+          console.error("[WS] context build failed (non-fatal):", err);
+          return {
+            auth: { authenticated: false, subject: null },
+          };
         }
-        return base;
       },
       onConnect: (ctx: any) => {
-        // ── JWT authentication on WS handshake ──────────────────────────
-        // Clients must pass: connectionParams: { authToken: "<jwt>" }
-        const token =
-          ctx.connectionParams?.authToken ||
-          ctx.connectionParams?.Authorization?.replace(/^Bearer\s+/i, "");
-
-        // Allow unauthenticated in dev when no GRAPHQL_API_KEY is set
-        const apiKeyRequired = !!process.env.GRAPHQL_API_KEY;
-
-        if (apiKeyRequired) {
-          if (!token) {
-            console.warn("[WS] Rejected unauthenticated connection — no authToken");
-            return false; // graphql-ws closes the connection
-          }
-          try {
-            const claims = verifyToken(String(token));
-            // Attach claims to context so subscription resolvers can access them
-            ctx.extra.jwtClaims = claims;
-            console.log(`[WS] Authenticated connection for user ${claims.userId}`);
-          } catch (err) {
-            console.warn("[WS] Rejected connection — invalid token:", (err as Error).message);
-            return false;
-          }
+        // JWT via connectionParams; never throw — return false to close this socket only
+        const result = authenticateWsConnection(ctx.connectionParams);
+        if (!result.ok) {
+          console.warn(`[WS] Rejected connection — ${result.reason}`);
+          return false;
         }
-
+        if (result.claims) {
+          ctx.extra.jwtClaims = result.claims;
+          console.log(
+            `[WS] Authenticated connection for user ${result.claims.userId}`,
+          );
+        }
         return true;
+      },
+      onSubscribe: (_ctx: any, message: any) => {
+        try {
+          // Validate payload shape lightly; never throw out of this hook
+          if (!message?.payload?.query) {
+            console.warn("[WS] onSubscribe missing query payload");
+          }
+        } catch (err) {
+          console.error("[WS] onSubscribe error (non-fatal):", err);
+        }
       },
       onDisconnect: (_ctx: any) => {
         console.log("WebSocket subscription disconnected");
       },
-      onError: (_ctx: any, err: any) => {
-        console.error("WebSocket subscription error:", err);
+      onError: (_ctx: any, _message: any, errors: any) => {
+        // Log connection/subscription errors without rethrowing
+        console.error("[WS] subscription error (non-fatal):", errors);
       },
     },
     wsServer,

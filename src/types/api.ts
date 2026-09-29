@@ -174,11 +174,23 @@ export interface LimitExceededErrorResponse extends ErrorResponse {
 // Health
 // ---------------------------------------------------------------------------
 
+export interface ComponentHealth {
+  status: "ok" | "degraded" | "down" | "closed";
+  responseTimeMs: number;
+  error?: string;
+  details?: Record<string, unknown> | ProviderHealthSummary;
+}
+
 export interface HealthCheckResponse {
-  status: "ok";
+  status: "ok" | "degraded" | "down";
   timestamp: string;
   gitHash?: string;
   providers?: ProviderHealthSummary;
+  components?: {
+    database: ComponentHealth;
+    redis: ComponentHealth;
+    providers: ComponentHealth;
+  };
 }
 
 export interface ProviderHealthSummary {

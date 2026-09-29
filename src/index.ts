@@ -303,12 +303,79 @@ async function getProviderHealthSummary(): Promise<ProviderHealthSummary> {
 }
 
 app.get("/health", async (_req: Request, res: Response) => {
-  const providerHealth = await getProviderHealthSummary();
+  const startDb = Date.now();
+  let dbStatus: "ok" | "down" = "down";
+  let dbError: string | undefined;
+  try {
+    await pool.query("SELECT 1");
+    dbStatus = "ok";
+  } catch (err: any) {
+    dbError = err.message || "Database check failed";
+  }
+  const dbResponseTimeMs = Date.now() - startDb;
+
+  const startRedis = Date.now();
+  let redisStatus: "ok" | "closed" | "down" = "down";
+  let redisError: string | undefined;
+  try {
+    if (redisClient?.isOpen) {
+      await redisClient.ping();
+      redisStatus = "ok";
+    } else {
+      redisStatus = "closed";
+    }
+  } catch (err: any) {
+    redisError = err.message || "Redis ping failed";
+  }
+  const redisResponseTimeMs = Date.now() - startRedis;
+
+  const startProvider = Date.now();
+  let providerHealth: ProviderHealthSummary;
+  try {
+    providerHealth = await getProviderHealthSummary();
+  } catch {
+    providerHealth = {
+      overall: "down",
+      providers: {},
+      healthyCount: 0,
+      totalCount: 0,
+    };
+  }
+  const providerResponseTimeMs = Date.now() - startProvider;
+
+  const isDegraded =
+    dbStatus !== "ok" ||
+    redisStatus !== "ok" ||
+    providerHealth.overall !== "healthy";
+  const overallStatus: "ok" | "degraded" | "down" =
+    dbStatus === "down" && redisStatus === "down"
+      ? "down"
+      : isDegraded
+        ? "degraded"
+        : "ok";
+
   const body: HealthCheckResponse = {
-    status: "ok",
+    status: overallStatus,
     timestamp: new Date().toISOString(),
     gitHash: process.env.BUILD_HASH,
     providers: providerHealth,
+    components: {
+      database: {
+        status: dbStatus,
+        responseTimeMs: dbResponseTimeMs,
+        error: dbError,
+      },
+      redis: {
+        status: redisStatus,
+        responseTimeMs: redisResponseTimeMs,
+        error: redisError,
+      },
+      providers: {
+        status: providerHealth.overall === "healthy" ? "ok" : providerHealth.overall,
+        responseTimeMs: providerResponseTimeMs,
+        details: providerHealth,
+      },
+    },
   };
   res.json(body);
 });

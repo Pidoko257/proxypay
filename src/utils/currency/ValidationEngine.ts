@@ -293,7 +293,7 @@ export class ValidationEngine {
 
     // Validate roundingMode if provided
     if (options.roundingMode !== undefined) {
-      const validRoundingModes: RoundingMode[] = ['round', 'floor', 'ceil'];
+      const validRoundingModes: RoundingMode[] = ['round', 'floor', 'ceil', 'half-even', 'bankers'];
       if (!validRoundingModes.includes(options.roundingMode)) {
         errors.push(`roundingMode must be one of: ${validRoundingModes.join(', ')}`);
       } else {

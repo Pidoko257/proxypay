@@ -416,12 +416,14 @@ export const WebhookCircuitBreakerTransitionTotal = new Counter({
   registers: [register],
 });
 
-export const WebhookCircuitBreakerState = new Gauge({
-  name: "webhook_circuit_breaker_state",
-  help: "Current webhook circuit breaker state (0=open, 0.5=half_open, 1=closed)",
-  labelNames: ["state"],
-  registers: [register],
-});
+export const WebhookCircuitBreakerState =
+  (register.getSingleMetric("webhook_circuit_breaker_state") as Gauge<string>) ||
+  new Gauge({
+    name: "webhook_circuit_breaker_state",
+    help: "Current webhook circuit breaker state (0=open, 0.5=half_open, 1=closed)",
+    labelNames: ["state"],
+    registers: [register],
+  });
 
 // Webhook Retry Metrics
 export const webhookRetryAttemptsTotal = new Counter({
@@ -485,12 +487,14 @@ export const webhookCircuitBreakerSkippedTotal = new Counter({
 // truth instead of a running total. Not labelled by URL: per-destination detail
 // is in the admin circuit-breaker snapshot, which keeps this at a fixed three
 // series regardless of how many destinations the process has seen.
-export const webhookCircuitBreakerState = new Gauge({
-  name: "webhook_circuit_breaker_state",
-  help: "Current webhook circuit breaker state (1 for the active state)",
-  labelNames: ["state"],
-  registers: [register],
-});
+export const webhookCircuitBreakerState =
+  (register.getSingleMetric("webhook_circuit_breaker_state") as Gauge<string>) ||
+  new Gauge({
+    name: "webhook_circuit_breaker_state",
+    help: "Current webhook circuit breaker state (1 for the active state)",
+    labelNames: ["state"],
+    registers: [register],
+  });
 
 // Deprecated API Endpoint Usage Metrics (#393)
 export const deprecatedEndpointRequestsTotal = new Counter({

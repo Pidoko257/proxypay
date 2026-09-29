@@ -43,6 +43,7 @@ import { createKYCRoutes } from "./routes/kycRoutes";
 import { adminRoutes } from "./routes/admin";
 import invoiceRoutes from "./routes/invoices";
 import webhookCircuitBreakerRoutes from "./routes/webhookCircuitBreaker";
+import providerCircuitBreakerRoutes from "./routes/providerCircuitBreakerRoutes";
 import kycTierUpgradeRoutes from "./routes/kycTierUpgradeRoutes";
 import { userRoutes } from "./routes/users";
 import { createError, errorHandler } from "./middleware/errorHandler";
@@ -535,6 +536,9 @@ app.use("/api/admin", requireAuth, adminRoutes);
 // #573 – webhook circuit breaker state and manual reset. The router applies
 // requireAuth and requireAdmin itself, since it is also useful on its own.
 app.use("/api/admin/webhooks", webhookCircuitBreakerRoutes);
+// Provider circuit breaker state and manual reset endpoints (#678)
+app.use("/api/v1/admin/circuit-breaker", providerCircuitBreakerRoutes);
+app.use("/api/admin/circuit-breaker", providerCircuitBreakerRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
 // #405 – Provider Health Dashboard
 app.use("/api/admin/providers/health", requireAuth, providerHealthRouter);

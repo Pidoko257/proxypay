@@ -23,6 +23,10 @@ import {
   adaptiveRateLimitCurrentCapacity,
   rateLimitViolationsTotal,
 } from "../utils/metrics";
+import {
+  setStandardRateLimitHeaders,
+  toResetEpochSeconds,
+} from "../utils/rateLimitHeaders";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -321,6 +325,13 @@ export function createAdaptiveRateLimitMiddleware(
       res.setHeader("X-RateLimit-Remaining", 0);
       res.setHeader("Retry-After", retryAfterSec);
 
+      // #648: standard RateLimit-* headers.
+      setStandardRateLimitHeaders(res, {
+        limit: Math.ceil(currentRps),
+        remaining: 0,
+        resetEpochSeconds: toResetEpochSeconds(Date.now() + retryAfterMs),
+      });
+
       res.status(429).json({
         error: "Too Many Requests",
         message: `Rate limit exceeded for ${provider}. Retry after ${retryAfterSec}s.`,
@@ -333,6 +344,14 @@ export function createAdaptiveRateLimitMiddleware(
 
     res.setHeader("X-RateLimit-Limit", Math.ceil(currentRps));
     res.setHeader("X-RateLimit-Remaining", Math.floor(bucket.tokens));
+
+    // #648: standard RateLimit-* headers. The bucket refills continuously, so
+    // the reset is the moment one whole token is available again.
+    setStandardRateLimitHeaders(res, {
+      limit: Math.ceil(currentRps),
+      remaining: Math.floor(bucket.tokens),
+      resetEpochSeconds: toResetEpochSeconds(now + Math.ceil(1000 / currentRps) * 1000),
+    });
 
     next();
   };

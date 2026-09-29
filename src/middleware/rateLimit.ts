@@ -1,5 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import { redisClient } from "../config/redis";
+import {
+  setStandardRateLimitHeaders,
+  toResetEpochSeconds,
+} from "../utils/rateLimitHeaders";
 
 /**
  * Rate Limit Configuration
@@ -82,6 +86,13 @@ export function createTierRateLimitMiddleware(tier: UserTier) {
     res.setHeader("X-RateLimit-Limit", limit);
     res.setHeader("X-RateLimit-Remaining", remaining);
     res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+    // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+    setStandardRateLimitHeaders(res, {
+      limit,
+      remaining,
+      resetEpochSeconds: toResetEpochSeconds(resetTime),
+    });
 
     if (!allowed) {
       const retryAfter = windowMs / 1000;
@@ -530,6 +541,13 @@ export function createEndpointRateLimiter(
     res.setHeader("X-RateLimit-Limit", resolved.limit);
     res.setHeader("X-RateLimit-Remaining", remaining);
     res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+    // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+    setStandardRateLimitHeaders(res, {
+      limit: resolved.limit,
+      remaining,
+      resetEpochSeconds: toResetEpochSeconds(resetTime),
+    });
     res.setHeader(
       "X-RateLimit-Policy",
       `${resolved.limit};w=${Math.ceil(resolved.windowMs / 1000)}`,
@@ -585,6 +603,13 @@ export async function globalRateLimit(req: Request, res: Response, next: NextFun
   res.setHeader("X-RateLimit-Remaining", remaining);
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
 
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.GLOBAL_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
+
   if (!allowed) {
     const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
     res.setHeader("Retry-After", String(retryAfterSeconds));
@@ -629,6 +654,13 @@ export const sep24RateLimiter = async (req: Request, res: Response, next: NextFu
   res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.SEP24_LIMIT);
   res.setHeader("X-RateLimit-Remaining", remaining);
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.SEP24_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
 
   if (!allowed) {
     const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
@@ -776,6 +808,13 @@ export const cancelTransactionRateLimiter = async (
   res.setHeader("X-RateLimit-Remaining", String(remaining));
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
 
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.CANCELLATION_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
+
   if (!allowed) {
     res.setHeader("Retry-After", String(retryAfterSeconds));
     return res.status(429).json({
@@ -809,6 +848,13 @@ export const sep31RateLimiter = async (req: Request, res: Response, next: NextFu
   res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.SEP31_LIMIT);
   res.setHeader("X-RateLimit-Remaining", remaining);
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.SEP31_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
 
   if (!allowed) {
     const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
@@ -853,6 +899,13 @@ export const sep12RateLimiter = async (req: Request, res: Response, next: NextFu
   res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.SEP12_LIMIT);
   res.setHeader("X-RateLimit-Remaining", remaining);
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.SEP12_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
 
   if (!allowed) {
     const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
@@ -902,6 +955,13 @@ export const rateLimitExport = async (
   res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.EXPORT_LIMIT);
   res.setHeader("X-RateLimit-Remaining", remaining);
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.EXPORT_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
 
   if (!allowed) {
     const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
@@ -1007,6 +1067,13 @@ export const assetIssuanceRateLimiter = async (
   res.setHeader("X-RateLimit-Remaining", remaining);
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
 
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.ASSET_ISSUANCE_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
+
   if (!allowed) {
     const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);
     res.setHeader("Retry-After", String(retryAfterSeconds));
@@ -1067,6 +1134,13 @@ export const sep30RecoveryRateLimiter = async (
   res.setHeader("X-RateLimit-Limit", RATE_LIMIT_CONFIG.RECOVERY_LIMIT);
   res.setHeader("X-RateLimit-Remaining", remaining);
   res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  // #648: standard RateLimit-* headers (IETF draft) alongside the legacy X- ones.
+  setStandardRateLimitHeaders(res, {
+    limit: RATE_LIMIT_CONFIG.RECOVERY_LIMIT,
+    remaining,
+    resetEpochSeconds: toResetEpochSeconds(resetTime),
+  });
 
   if (!allowed) {
     const retryAfterSeconds = Math.ceil((resetTime - Date.now()) / 1000);

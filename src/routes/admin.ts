@@ -33,7 +33,7 @@ import {
 } from "../config/database";
 import { UserModel } from "../models/users";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
-import { StellarService } from "../services/stellar/stellarService";
+import { StellarService, ClawbackDestinationError } from "../services/stellar/stellarService";
 import { ledgerService } from "../services/ledgerService";
 import highThroughputService from "../services/stellar/highThroughputService";
 import multer from "multer";
@@ -3399,6 +3399,20 @@ router.post(
         transactionId,
       });
     } catch (err) {
+      // #647: the destination account or its trustline is gone on Stellar, so
+      // the clawback cannot be issued. Report it as a validation failure with a
+      // precise reason instead of a generic 500.
+      if (err instanceof ClawbackDestinationError) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          err.message,
+          {
+            message: err.message,
+            error: err.message,
+            clawbackFailure: err.failure,
+          },
+        );
+      }
       console.error("Error executing clawback:", err);
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,

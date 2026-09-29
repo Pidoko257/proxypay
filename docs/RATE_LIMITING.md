@@ -8,13 +8,13 @@ This document describes the rate limiting architecture, policies, response heade
 
 ProxyPay implements sliding-window and token-bucket rate limiting to ensure fair usage, prevent denial-of-service, and maintain service availability. Limits are enforced per IP address for unauthenticated traffic and per API key / merchant ID for authenticated traffic.
 
-| Endpoint Category | Public (Unauthenticated) | Authenticated Merchant | Admin / System |
-| :--- | :--- | :--- | :--- |
-| **Authentication & Tokens** (`/api/v1/auth/*`) | 10 req / min | 30 req / min | 120 req / min |
-| **Transactions - Reads** (`GET /api/v1/transactions/*`) | 60 req / min | 300 req / min | 1200 req / min |
-| **Transactions - Writes** (`POST /api/v1/transactions/*`) | 20 req / min | 120 req / min | 600 req / min |
-| **SEP-6 & SEP-12 Endpoints** (`/sep6/*`, `/sep12/*`) | 30 req / min | 150 req / min | 600 req / min |
-| **Public Information** (`GET /health`, `/info`) | 120 req / min | 600 req / min | Unlimited |
+| Endpoint Category                                         | Public (Unauthenticated) | Authenticated Merchant | Admin / System |
+| :-------------------------------------------------------- | :----------------------- | :--------------------- | :------------- |
+| **Authentication & Tokens** (`/api/v1/auth/*`)            | 10 req / min             | 30 req / min           | 120 req / min  |
+| **Transactions - Reads** (`GET /api/v1/transactions/*`)   | 60 req / min             | 300 req / min          | 1200 req / min |
+| **Transactions - Writes** (`POST /api/v1/transactions/*`) | 20 req / min             | 120 req / min          | 600 req / min  |
+| **SEP-6 & SEP-12 Endpoints** (`/sep6/*`, `/sep12/*`)      | 30 req / min             | 150 req / min          | 600 req / min  |
+| **Public Information** (`GET /health`, `/info`)           | 120 req / min            | 600 req / min          | Unlimited      |
 
 ---
 
@@ -22,10 +22,41 @@ ProxyPay implements sliding-window and token-bucket rate limiting to ensure fair
 
 Every API response includes standardized HTTP headers indicating the current quota status:
 
+### Standard headers (`RateLimit-*`)
+
+These follow the IETF draft standard
+([`draft-ietf-httpapi-ratelimit-headers`](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)),
+so generic HTTP clients, SDKs and proxies can parse the limit without
+special-casing header names:
+
+- `RateLimit-Limit`: Maximum number of allowed requests in the current window.
+- `RateLimit-Remaining`: Number of remaining requests permitted within the current window.
+- `RateLimit-Reset`: Unix epoch timestamp (in seconds) when the current window resets.
+
+All three are also listed in the CORS `Access-Control-Expose-Headers` value, so
+browser clients can read them cross-origin.
+
+### Legacy headers (`X-RateLimit-*`)
+
+Retained for backwards compatibility with existing integrations. They are
+additive to the standard headers, not a replacement, and are emitted with the
+same values:
+
 - `X-RateLimit-Limit`: Maximum number of allowed requests in the current window.
 - `X-RateLimit-Remaining`: Number of remaining requests permitted within the current window.
-- `X-RateLimit-Reset`: Unix epoch timestamp (in seconds) when the current window resets.
+- `X-RateLimit-Reset`: Reset instant. Most limiters use the Unix epoch timestamp
+  in seconds; some legacy limiters return an ISO-8601 string.
 - `Retry-After`: Included on `429 Too Many Requests` responses; specifies the number of seconds to wait before retrying.
+
+Prefer the `RateLimit-*` family in new integrations. `RateLimit-Reset` is
+always Unix seconds, so it does not need the format detection the `X-` prefixed
+header sometimes requires.
+
+```bash
+# Read the remaining quota without parsing the response body
+curl -sI https://api.example.com/api/transactions \
+  | grep -i '^ratelimit-'
+```
 
 ---
 
@@ -58,10 +89,15 @@ async function makeRequestWithRetry(url: string, maxRetries = 3) {
       return await axios.get(url);
     } catch (err: any) {
       if (err.response?.status === 429 && attempt < maxRetries) {
-        const retryAfterSeconds = parseInt(err.response.headers["retry-after"] || "1", 10);
+        const retryAfterSeconds = parseInt(
+          err.response.headers["retry-after"] || "1",
+          10,
+        );
         const jitter = Math.random() * 200;
-        const delayMs = (retryAfterSeconds * 1000) + jitter;
-        console.warn(`[RateLimit] 429 received. Backing off for ${delayMs}ms (attempt ${attempt + 1})`);
+        const delayMs = retryAfterSeconds * 1000 + jitter;
+        console.warn(
+          `[RateLimit] 429 received. Backing off for ${delayMs}ms (attempt ${attempt + 1})`,
+        );
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }

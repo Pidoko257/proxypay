@@ -63,6 +63,42 @@ export class MultisigThresholdError extends Error {
   }
 }
 
+/**
+ * Why a clawback destination could not be validated on Stellar (#647).
+ *
+ * - `ACCOUNT_NOT_FOUND`  – the destination account no longer exists on the
+ *   network (merged away or never created).
+ * - `TRUSTLINE_NOT_FOUND` – the account exists but no longer holds a trustline
+ *   for the clawback asset, so there is nothing to claw back.
+ */
+export type ClawbackDestinationFailure =
+  | "ACCOUNT_NOT_FOUND"
+  | "TRUSTLINE_NOT_FOUND";
+
+/**
+ * Raised before a clawback is submitted when the destination account is no
+ * longer a valid clawback target. Failing fast keeps the accounting reversal
+ * (`ledgerService.postClawback`) from running for a clawback that the network
+ * would reject anyway.
+ */
+export class ClawbackDestinationError extends Error {
+  constructor(
+    public readonly failure: ClawbackDestinationFailure,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ClawbackDestinationError";
+  }
+}
+
+/** Result of a successful {@link StellarService.validateClawbackDestination}. */
+export interface ClawbackDestinationCheck {
+  accountId: string;
+  assetCode: string;
+  /** Balance available to claw back, as a string in asset units. */
+  balance: string;
+}
+
 export class StellarService {
   private server: StellarSdk.Horizon.Server;
   private issuerKeypair: StellarSdk.Keypair | null = null;
@@ -451,6 +487,70 @@ export class StellarService {
   }
 
   /**
+   * Verifies that `fromAddress` is still a valid clawback destination (#647).
+   *
+   * A clawback fails at the network level when the destination account has been
+   * merged away or has removed its trustline for the asset. Detecting that
+   * before the transaction is built turns an opaque Horizon error into a clear,
+   * actionable message and stops the caller from posting an accounting reversal
+   * for a clawback that never happened.
+   *
+   * @throws {ClawbackDestinationError} when the account or trustline is gone.
+   */
+  async validateClawbackDestination(
+    fromAddress: string,
+    asset: StellarSdk.Asset = getConfiguredPaymentAsset(),
+  ): Promise<ClawbackDestinationCheck> {
+    const assetCode = asset.isNative() ? "XLM" : asset.getCode();
+
+    let account: StellarSdk.Horizon.AccountResponse;
+    try {
+      account = await this.server.loadAccount(fromAddress);
+    } catch (error: any) {
+      // Horizon returns 404 for an account that does not exist (or was merged).
+      if (error?.status === 404 || error?.response?.status === 404) {
+        throw new ClawbackDestinationError(
+          "ACCOUNT_NOT_FOUND",
+          `Clawback destination account ${fromAddress} no longer exists on Stellar`,
+        );
+      }
+      throw error;
+    }
+
+    // Native XLM is held by the account itself; issued assets need a trustline.
+    if (!asset.isNative()) {
+      const trustline = account.balances.find(
+        (b) =>
+          b.asset_type !== "native" &&
+          "asset_code" in b &&
+          b.asset_code === asset.getCode() &&
+          "asset_issuer" in b &&
+          b.asset_issuer === asset.getIssuer(),
+      );
+
+      if (!trustline) {
+        throw new ClawbackDestinationError(
+          "TRUSTLINE_NOT_FOUND",
+          `Clawback destination ${fromAddress} has no trustline for ${assetCode}`,
+        );
+      }
+
+      return {
+        accountId: fromAddress,
+        assetCode,
+        balance: "balance" in trustline ? trustline.balance : "0",
+      };
+    }
+
+    const native = account.balances.find((b) => b.asset_type === "native");
+    return {
+      accountId: fromAddress,
+      assetCode,
+      balance: native ? native.balance : "0",
+    };
+  }
+
+  /**
    * Executes a clawback operation for a specific address and amount.
    */
   async executeClawback(
@@ -479,6 +579,11 @@ export class StellarService {
     }
 
     try {
+      // #647: confirm the destination still exists and still trusts the asset
+      // before building the clawback, so the caller gets a precise error
+      // instead of an opaque Horizon failure after signing.
+      await this.validateClawbackDestination(fromAddress, paymentAsset);
+
       const account = await this.server.loadAccount(
         this.issuerKeypair.publicKey(),
       );

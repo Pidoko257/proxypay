@@ -129,8 +129,8 @@ export class CurrencyConfig {
       throw new Error('Currency rule must specify useGrouping as boolean');
     }
 
-    if (!['round', 'floor', 'ceil'].includes(rule.formatting.roundingMode)) {
-      throw new Error('Currency rule must have valid rounding mode (round, floor, or ceil)');
+    if (!['round', 'floor', 'ceil', 'half-even', 'bankers'].includes(rule.formatting.roundingMode)) {
+      throw new Error('Currency rule must have valid rounding mode (round, floor, ceil, half-even, or bankers)');
     }
 
     // Validate validation configuration
@@ -352,8 +352,8 @@ export class CurrencyConfig {
       throw new Error('Currency rule must specify useGrouping as boolean');
     }
 
-    if (!['round', 'floor', 'ceil'].includes(rule.formatting.roundingMode)) {
-      throw new Error('Currency rule must have valid rounding mode (round, floor, or ceil)');
+    if (!['round', 'floor', 'ceil', 'half-even', 'bankers'].includes(rule.formatting.roundingMode)) {
+      throw new Error('Currency rule must have valid rounding mode (round, floor, ceil, half-even, or bankers)');
     }
 
     // Validate validation configuration
@@ -451,7 +451,7 @@ export class CurrencyConfig {
           throw new Error(`Invalid useGrouping for ${update.code}`);
         }
 
-        if (update.formatting.roundingMode !== undefined && !['round', 'floor', 'ceil'].includes(update.formatting.roundingMode)) {
+        if (update.formatting.roundingMode !== undefined && !['round', 'floor', 'ceil', 'half-even', 'bankers'].includes(update.formatting.roundingMode)) {
           throw new Error(`Invalid roundingMode for ${update.code}`);
         }
       }

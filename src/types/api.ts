@@ -174,37 +174,23 @@ export interface LimitExceededErrorResponse extends ErrorResponse {
 // Health
 // ---------------------------------------------------------------------------
 
-// Component Health Status
-export type ComponentStatus = "healthy" | "degraded" | "down";
-
-export interface ComponentHealthMetrics {
-  status: ComponentStatus;
-  responseTime: number; // milliseconds
-  lastChecked: string; // ISO 8601 timestamp
-  error?: string; // Error message if unhealthy
-}
-
-export interface DetailedHealthCheckResponse {
-  status: "ok" | "degraded" | "error";
-  timestamp: string;
-  gitHash?: string;
-  components: {
-    database: ComponentHealthMetrics;
-    redis: ComponentHealthMetrics;
-    providers: ComponentHealthMetrics & {
-      providers?: Record<string, "up" | "down" | "unknown">;
-      healthyCount?: number;
-      totalCount?: number;
-    };
-  };
-  overallStatus: "healthy" | "degraded" | "down";
+export interface ComponentHealth {
+  status: "ok" | "degraded" | "down" | "closed";
+  responseTimeMs: number;
+  error?: string;
+  details?: Record<string, unknown> | ProviderHealthSummary;
 }
 
 export interface HealthCheckResponse {
-  status: "ok";
+  status: "ok" | "degraded" | "down";
   timestamp: string;
   gitHash?: string;
   providers?: ProviderHealthSummary;
+  components?: {
+    database: ComponentHealth;
+    redis: ComponentHealth;
+    providers: ComponentHealth;
+  };
 }
 
 export interface ProviderHealthSummary {

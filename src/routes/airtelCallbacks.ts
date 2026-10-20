@@ -1,15 +1,8 @@
-import { Router, Request, Response } from "express";
+﻿import { Router, Request, Response } from "express";
 import { createProviderCallbackVerifier } from "../middleware/providerCallbackSignature";
 import { ingestRateLimiter } from "../middleware/ingestRateLimit";
+import { callbackIdempotency } from "../middleware/callbackIdempotency";
 
-/**
- * Airtel Money callback routes.
- *
- * Airtel Money delivers transaction state updates to our webhook endpoint.
- * Every request is rate-limited and authenticated via HMAC-SHA256 signature
- * verification before any processing happens. The shared secret is read from
- * `providers.airtel.callbackSecret` (env `AIRTEL_CALLBACK_SECRET`).
- */
 const router = Router();
 
 // Rate-limit ingest traffic before signature verification and DB writes.
@@ -29,9 +22,12 @@ const verifyAirtelCallbackSignature = createProviderCallbackVerifier({
 // Signature verification is applied to all incoming Airtel callback requests.
 router.use(verifyAirtelCallbackSignature);
 
+// Callback idempotency deduplication to prevent processing duplicate provider events.
+router.use(callbackIdempotency({ provider: "airtel" }));
+
 router.post("/callback", async (req: Request, res: Response) => {
   // Future callback processing can be added here.
-  // Currently the Airtel callback is authenticated and acknowledged.
+  // Currently the Airtel callback is authenticated, deduplicated, and acknowledged.
   res.status(200).json({ status: "accepted" });
 });
 

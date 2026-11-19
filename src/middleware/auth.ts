@@ -172,6 +172,35 @@ export const requireAuth = async (
 };
 
 /**
+ * Middleware to require an administrative role.
+ * Must run after `requireAuth` (or `authenticateToken`) has populated `req.user`.
+ * Allows users whose role is `admin` or `superadmin`.
+ */
+export const requireAdmin = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  const role = (req as AuthRequest).user?.role ?? req.userRole;
+
+  if (!role) {
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Authentication required",
+    });
+  }
+
+  if (role !== "admin" && role !== "superadmin") {
+    return res.status(403).json({
+      error: "Forbidden",
+      message: "Administrative privileges required",
+    });
+  }
+
+  return next();
+};
+
+/**
  * JWT Authentication middleware that verifies JWT tokens
  * and attaches user information to the request object
  * Includes IP geofencing validation for operational regions
@@ -277,24 +306,6 @@ export function optionalAuthentication(
 export async function verifyTokenStateful(token: string, binding?: string): Promise<JWTPayload> {
   // Run standard cryptographic verification
   const decoded = verifyToken(token);
-  
-  // Fast Redis check to ensure token wasn't issued before a password change
-  if (redisClient.isOpen && decoded.userId && decoded.iat) {
-    const invalidatedAtRaw = await redisClient.get(`user:${decoded.userId}:jwt_invalidated_at`);
-    const invalidatedAt = invalidatedAtRaw ? String(invalidatedAtRaw) : null;
-    if (invalidatedAt && decoded.iat <= parseInt(invalidatedAt, 10)) {
-      throw new Error("Token has been revoked due to password change");
-    }
-  }
+ 
 
-  if (redisClient.isOpen && decoded.sessionId) {
-    const sessionRaw = await redisClient.get(`jwt:session:${decoded.sessionId}`);
-    if (!sessionRaw) throw new Error("Session has been revoked or expired");
-    const session = JSON.parse(sessionRaw) as { userId: string; binding?: string };
-    if (session.userId !== decoded.userId || (binding && session.binding !== binding)) {
-      throw new Error("Session binding validation failed");
-    }
-  }
-  
-  return decoded;
-}
+/* … truncated 943 chars — edit only what you need near the top … */

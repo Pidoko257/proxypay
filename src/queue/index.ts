@@ -59,6 +59,16 @@ export { queueOptions } from "./config";
 export { capturePersistentFailure, queryDLQ, replayDLQEntry } from "./dlq";
 export type { DLQEntry, CaptureOptions, DLQQueryOptions } from "./dlq";
 export { startProviderBalanceAlertWorker, scheduleProviderBalanceAlertJob };
+export {
+  sarGenerationQueue,
+  enqueueSarGeneration,
+  closeSarGenerationQueue,
+} from "./sarGenerationQueue";
+export type { SarGenerationJobData } from "./sarGenerationQueue";
+export {
+  startSarGenerationWorker,
+  closeSarGenerationWorker,
+} from "./sarGenerationWorker";
 
 // Account Merge Queue Exports
 export {

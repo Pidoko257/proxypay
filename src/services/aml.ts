@@ -1,5 +1,8 @@
 import * as crypto from "crypto";
 import { pool } from "../config/database";
+import logger from "../utils/logger";
+import { sarGenerationFailuresTotal } from "../utils/metrics";
+import { enqueueSarGeneration } from "../queue/sarGenerationQueue";
 
 export type AMLTransactionType = "deposit" | "withdraw";
 export type AMLAlertStatus = "pending_review" | "reviewed" | "dismissed";
@@ -424,15 +427,7 @@ export class AMLService {
 
       // AUTOMATION: If severity is high, automatically prepare SAR draft
       if (alert.severity === "high") {
-        console.log(`[SAR AUTO-PREPARE] High severity alert ${alert.id} detected. Preparing SAR...`);
-        try {
-          const { generateSAR } = require("../compliance/sar");
-          generateSAR(alert.userId, alert.id).catch((err: any) => {
-            console.error(`[SAR AUTO-PREPARE ERROR] Failed for alert ${alert.id}:`, err);
-          });
-        } catch (err) {
-          console.error(`[SAR AUTO-PREPARE ERROR] Failed to load sar service:`, err);
-        }
+        await this.scheduleSarPreparation(alert);
       }
     } catch (error) {
       console.error("Failed to persist AML alert to database:", error);
@@ -441,6 +436,28 @@ export class AMLService {
       if (this.alerts.length > this.config.alertBufferSize) {
         this.alerts = this.alerts.slice(0, this.config.alertBufferSize);
       }
+    }
+  }
+
+  /**
+   * Enqueue SAR preparation as a durable job so it survives process exits
+   * and is retried with backoff. Enqueue failures are logged via the
+   * structured logger and counted so on-call can alert on them; they do not
+   * fail the caller because the alert itself is already persisted.
+   */
+  private async scheduleSarPreparation(alert: AMLAlert): Promise<void> {
+    try {
+      await enqueueSarGeneration({ userId: alert.userId, alertId: alert.id });
+      logger.info(
+        { alertId: alert.id },
+        "[SAR AUTO-PREPARE] Enqueued SAR generation for high-severity alert",
+      );
+    } catch (err) {
+      sarGenerationFailuresTotal.inc({ stage: "enqueue" });
+      logger.error(
+        { alertId: alert.id, err },
+        "[SAR AUTO-PREPARE] Failed to enqueue SAR generation",
+      );
     }
   }
 

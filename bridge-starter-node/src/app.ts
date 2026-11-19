@@ -50,6 +50,65 @@ export class ApiError extends Error {
   }
 }
 
+// ── Required translation gating ─────────────────────────────────────────────
+// Locales that MUST be fully translated before a deploy is allowed.
+// Keep in sync with the translations validator config consumed by CI.
+export const REQUIRED_LOCALES = ["en", "es", "fr", "de"] as const;
+
+// Critical user-facing keys (payment / compliance). A runtime fallback for
+// any of these means a required translation is missing and must be alerted.
+export const CRITICAL_TRANSLATION_KEYS = [
+  "payment.checkout.title",
+  "payment.checkout.confirm",
+  "payment.receipt.subject",
+  "payment.failed.body",
+  "compliance.terms.accept",
+  "compliance.privacy.notice",
+  "compliance.refund.policy",
+] as const;
+
+// ── Runtime fallback detection ──────────────────────────────────────────────
+// i18next emits a "missingKey" event whenever it falls back to a fallback
+// locale (or the key itself) for a requested translation. We surface those
+// events as structured logs and escalate critical payment/compliance keys to
+// an error-level alert so monitoring can page before bad copy ships.
+export interface MissingKeyEvent {
+  lng?: string;
+  ns?: string;
+  key?: string;
+  fallbackValue?: string;
+}
+
+export function reportTranslationFallback(event: MissingKeyEvent): void {
+  const key = event.key ?? "";
+  const isCritical = (CRITICAL_TRANSLATION_KEYS as readonly string[]).includes(key);
+
+  const payload = {
+    locale: event.lng,
+    namespace: event.ns,
+    key,
+    fallbackValue: event.fallbackValue,
+    critical: isCritical,
+  };
+
+  if (isCritical) {
+    logger.error(payload, "Critical translation fallback used");
+    return;
+  }
+
+  logger.warn(payload, "Translation fallback used");
+}
+
+// Attach the fallback listener to an i18next instance. Kept dependency-free
+// (structural typing) so this module does not import i18next directly.
+export function registerTranslationFallbackAlerting(i18n: {
+  on: (event: "missingKey", cb: (lng: string, ns: string, key: string, fallbackValue: string) => void) => void;
+}): void {
+  i18n.on("missingKey", (lng, ns, key, fallbackValue) => {
+    reportTranslationFallback({ lng, ns, key, fallbackValue });
+  });
+}
+
 const app = express();
 
 // Preserve raw request body buffer for signature verification middleware.

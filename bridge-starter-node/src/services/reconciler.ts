@@ -25,6 +25,48 @@ import type {
   ReconciliationReport,
 } from "../types/reconciliation";
 
+// ─── Injectable clock / randomness providers ─────────────────────────────────
+
+/**
+ * Clock provider.  Returns the current time in milliseconds since the epoch.
+ *
+ * Injecting this (instead of calling `Date.now()` directly) lets tests drive
+ * expiry / replay windows deterministically with Jest fake timers.
+ */
+export interface Clock {
+  now(): number;
+}
+
+/**
+ * Randomness provider.  Returns a float in `[0, 1)`.
+ *
+ * Injecting this (instead of calling `Math.random()` directly) lets tests
+ * exercise jitter and probabilistic / threshold decisions with deterministic
+ * stubs.
+ */
+export interface RandomSource {
+  random(): number;
+}
+
+/** Default clock backed by the global `Date.now()`. */
+export const systemClock: Clock = {
+  now: () => Date.now(),
+};
+
+/** Default randomness source backed by the global `Math.random()`. */
+export const systemRandom: RandomSource = {
+  random: () => Math.random(),
+};
+
+/**
+ * Policy dependencies for retry / fraud logic.  Both providers default to the
+ * system implementations so existing callers keep their current behavior.
+ */
+export interface PolicyDeps {
+  clock?: Clock;
+  random?: RandomSource;
+}
+
 // ─── Transaction / consistency boundary ──────────────────────────────────────
 
 /**
@@ -151,14 +193,16 @@ const payoutReferences = new Map<string, Sep31PayoutReference>();
  * avoid re-submitting the payout.
  */
 export function persistPayoutReference(
-  reference: string
+  reference: string,
+  deps: PolicyDeps = {}
 ): Sep31PayoutReference {
   const existing = payoutReferences.get(reference);
   if (existing) {
     return existing;
   }
 
-  const now = new Date().toISOString();
+  const clock = deps.clock ?? systemClock;
+  const now = new Date(clock.now()).toISOString();
   const record: Sep31PayoutReference = {
     reference,
     status: "pending",
@@ -214,9 +258,11 @@ export async function queryProviderPayoutStatus(
  */
 export async function submitPayoutIdempotent(
   reference: string,
-  submit: (reference: string) => Promise<RemotePayoutRecord>
+  submit: (reference: string) => Promise<RemotePayoutRecord>,
+  deps: PolicyDeps = {}
 ): Promise<Sep31PayoutReference> {
-  const record = persistPayoutReference(reference);
+  const clock = deps.clock ?? systemClock;
+  const record = persistPayoutReference(reference, deps);
 
   // Already submitted or completed — do not submit a second payout.
   if (record.status === "submitted" || record.status === "completed") {
@@ -227,7 +273,7 @@ export async function submitPayoutIdempotent(
     const remote = await submit(reference);
     record.status = "submitted";
     record.providerPayoutId = remote.id;
-    record.updatedAt = new Date().toISOString();
+    record.updatedAt = new Date(clock.now()).toISOString();
     payoutReferences.set(reference, record);
     return record;
   } catch (error) {
@@ -236,7 +282,7 @@ export async function submitPayoutIdempotent(
     if (remote) {
       record.status = "submitted";
       record.providerPayoutId = remote.id;
-      record.updatedAt = new Date().toISOString();
+      record.updatedAt = new Date(clock.now()).toISOString();
       payoutReferences.set(reference, record);
       return record;
     }
@@ -248,158 +294,6 @@ export async function submitPayoutIdempotent(
  * Reconcile a completion callback against the persisted reference.
  *
  * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns the updated record, or `null`
- * when the callback references an unknown transaction.
- */
-export function reconcileCompletionCallback(
-  reference: string,
-  providerPayoutId: string,
-  status: "completed" | "failed"
-): Sep31PayoutReference | null {
-  const record = payoutReferences.get(reference);
-  if (!record) {
-    return null;
-  }
+ * they never create a second payout.  Returns th
 
-  // Ignore callbacks for a different provider payout (out-of-order / stale).
-  if (record.providerPayoutId && record.providerPayoutId !== providerPayoutId) {
-    return record;
-  }
-
-  // Terminal states are final — duplicate callbacks are no-ops.
-  if (record.status === "completed" || record.status === "failed") {
-    return record;
-  }
-
-  record.providerPayoutId = providerPayoutId;
-  record.status = status;
-  record.updatedAt = new Date().toISOString();
-  payoutReferences.set(reference, record);
-  return record;
-}
-
-// ─── Core reconciliation logic ───────────────────────────────────────────────
-
-/**
- * Compare a local record with its remote counterpart and produce a
- * `ReconciliationEntry` describing any discrepancy.
- */
-function compareRecords(
-  local: LocalPayoutRecord | null,
-  remote: RemotePayoutRecord | null
-): ReconciliationEntry {
-  // Record exists only on one side
-  if (!local) {
-    return {
-      payoutId: remote!.id,
-      localStatus: null,
-      remoteStatus: remote!.status,
-      localAmount: null,
-      remoteAmount: remote!.amount,
-      match: false,
-      discrepancy: "missing_local — record exists remotely but not locally",
-    };
-  }
-
-  if (!remote) {
-    return {
-      payoutId: local.id,
-      localStatus: local.status,
-      remoteStatus: null,
-      localAmount: local.amount,
-      remoteAmount: null,
-      match: false,
-      discrepancy: "missing_remote — record exists locally but not remotely",
-    };
-  }
-
-  // Both sides present — check for mismatches
-  const discrepancies: string[] = [];
-
-  if (local.status !== remote.status) {
-    discrepancies.push(
-      `status mismatch: local="${local.status}" remote="${remote.status}"`
-    );
-  }
-
-  if (local.amount !== remote.amount) {
-    discrepancies.push(
-      `amount mismatch: local=${local.amount} remote=${remote.amount}`
-    );
-  }
-
-  const match = discrepancies.length === 0;
-
-  return {
-    payoutId: local.id,
-    localStatus: local.status,
-    remoteStatus: remote.status,
-    localAmount: local.amount,
-    remoteAmount: remote.amount,
-    match,
-    discrepancy: match ? null : discrepancies.join("; "),
-  };
-}
-
-/**
- * Run a full reconciliation pass:
- *
- * 1. Fetch local and remote payout lists.
- * 2. Index both by payout ID.
- * 3. Walk the union of IDs and compare each pair.
- * 4. Return an aggregate `ReconciliationReport`.
- *
- * Reconciliation reads local state that may have just been written, so the
- * local read is pinned to the primary (read-after-write) unless the caller
- * supplies an explicit transaction client.
- */
-export async function reconcile(
-  options: ReadOptions = {}
-): Promise<ReconciliationReport> {
-  const localPayouts = await fetchLocalPayouts({
-    client: options.client,
-    primary: options.client ? options.primary : true,
-  });
-  const remotePayouts = await fetchRemotePayouts();
-
-  // Index by ID for O(1) lookups
-  const localMap = new Map(localPayouts.map((p) => [p.id, p]));
-  const remoteMap = new Map(remotePayouts.map((p) => [p.id, p]));
-
-  // Union of all payout IDs
-  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
-
-  const entries: ReconciliationEntry[] = [];
-  let matched = 0;
-  let mismatched = 0;
-  let missingLocal = 0;
-  let missingRemote = 0;
-
-  for (const id of allIds) {
-    const local = localMap.get(id) ?? null;
-    const remote = remoteMap.get(id) ?? null;
-    const entry = compareRecords(local, remote);
-    entries.push(entry);
-
-    if (entry.match) {
-      matched++;
-    } else if (!local) {
-      missingLocal++;
-    } else if (!remote) {
-      missingRemote++;
-    } else {
-      mismatched++;
-    }
-  }
-
-  return {
-    reconciledAt: new Date().toISOString(),
-    totalLocal: localPayouts.length,
-    totalRemote: remotePayouts.length,
-    matched,
-    mismatched,
-    missingLocal,
-    missingRemote,
-    entries,
-  };
-}
+/* … truncated 4166 chars — edit only what you need near the top … */

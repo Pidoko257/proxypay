@@ -44,6 +44,27 @@ export interface ReadOptions {
   consistency?: ReadConsistency;
 }
 
+/**
+ * Injectable clock provider. Returns the current time in milliseconds since
+ * the Unix epoch. Defaults to `Date.now` so production behavior is unchanged,
+ * while tests can supply a deterministic clock (e.g. Jest fake timers).
+ */
+export type Clock = () => number;
+
+/**
+ * Injectable randomness provider. Returns a number in `[0, 1)` like
+ * `Math.random`. Defaults to `Math.random` so jitter and probabilistic
+ * threshold decisions keep their existing distribution, while tests can
+ * supply a deterministic stub.
+ */
+export type Random = () => number;
+
+/** Default clock backed by the global `Date.now`. */
+export const defaultClock: Clock = () => Date.now();
+
+/** Default randomness backed by the global `Math.random`. */
+export const defaultRandom: Random = () => Math.random();
+
 /** A payout record as stored in the local ledger. */
 export interface LocalPayoutRecord {
   /** Unique payout / transaction ID. */

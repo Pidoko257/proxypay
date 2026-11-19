@@ -204,10 +204,24 @@ export function encryptField(value: string | null | undefined): string | null | 
   return serializePayload(encryptAES(value, key));
 }
 
+/** Matches the serialised `iv:authTag:ciphertext` hex format produced by encryptAES. */
+const SERIALIZED_PAYLOAD_RE = new RegExp(
+  `^[0-9a-f]{${IV_LENGTH * 2}}:[0-9a-f]{${AUTH_TAG_LENGTH * 2}}:[0-9a-f]*$`,
+  "i",
+);
+
 /**
  * Decrypt a PII field with the global key.
  * Detects version prefixes dynamically to select the appropriate decryption key.
  * Returns null/undefined/empty as-is.
+ *
+ * Values that are not in an encrypted format at all (e.g. rows written before
+ * PII encryption was introduced) are returned unchanged. Anything that *is* an
+ * encrypted payload but fails to decrypt — wrong key, tampered data, corrupt
+ * ciphertext — throws. It never returns ciphertext in place of plaintext.
+ * Call sites that must tolerate bad rows should use `decryptFieldOrNull`.
+ *
+ * @throws Error when an encrypted payload cannot be decrypted.
  */
 export function decryptField(raw: string | null | undefined): string | null | undefined {
   if (raw == null || raw === "") return raw;
@@ -218,36 +232,37 @@ export function decryptField(raw: string | null | undefined): string | null | un
   // A versioned payload has format: version:iv:authTag:ciphertext (parts.length >= 4)
   if (parts.length >= 4 && keys.has(parts[0].toLowerCase())) {
     const version = parts[0].toLowerCase();
-    const keyMaterial = keys.get(version)!;
-    const key = deriveKey(keyMaterial);
-    try {
-      const payload = deserializePayload(parts.slice(1).join(":"));
-      return decryptAES(payload, key);
-    } catch (err) {
-      console.warn(
-        `[Encryption] Decryption failed for versioned payload '${version}'. Returning raw value. Error: ${
-          err instanceof Error ? err.message : err
-        }`
-      );
-      return raw;
-    }
+    const key = deriveKey(keys.get(version)!);
+    const payload = deserializePayload(parts.slice(1).join(":"));
+    return decryptAES(payload, key);
   }
+
+  // Not an encrypted payload — legacy plaintext column value, pass through.
+  if (!SERIALIZED_PAYLOAD_RE.test(raw)) return raw;
 
   // Fallback to legacy/default decryption
   const keyMaterial = keys.get("legacy") || env.DB_ENCRYPTION_KEY;
   const key = deriveKey(keyMaterial);
+  return decryptAES(deserializePayload(raw), key);
+}
+
+/**
+ * Tolerant variant of `decryptField` for read paths that must not fail as a
+ * whole because of one undecryptable value. On failure it logs a warning (never
+ * the value or key) and returns `null` — it never returns the ciphertext.
+ *
+ * @param context  Short label identifying the field, included in the warning.
+ */
+export function decryptFieldOrNull(raw: string | null | undefined, context: string): string | null | undefined {
   try {
-    return decryptAES(deserializePayload(raw), key);
+    return decryptField(raw);
   } catch (err) {
-    // Only warn if it looks like it was meant to be an encrypted payload (has colons)
-    if (raw.includes(":")) {
-      console.warn(
-        `[Encryption] Decryption failed for legacy-format payload. Returning raw value. Error: ${
-          err instanceof Error ? err.message : err
-        }`
-      );
-    }
-    return raw;
+    console.warn(
+      `[Encryption] Failed to decrypt ${context}; returning null. Error: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
   }
 }
 

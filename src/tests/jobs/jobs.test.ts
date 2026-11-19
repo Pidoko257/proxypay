@@ -87,7 +87,10 @@ describe("runCleanupJob", () => {
       .mockResolvedValueOnce({ rowCount: 0 });
     mockQueryWrite.mockResolvedValueOnce({ rows: [{ released: 0 }] });
     await runCleanupJob();
-    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining("30 days"));
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("INTERVAL '1 day'"),
+      [30],
+    );
     delete process.env.LOG_RETENTION_DAYS;
   });
 });
@@ -167,7 +170,8 @@ describe("runStatusCheckJob", () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await runStatusCheckJob();
     expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining("30 minutes"),
+      expect.stringContaining("INTERVAL '1 minute'"),
+      [30],
     );
     delete process.env.STUCK_TRANSACTION_MINUTES;
   });

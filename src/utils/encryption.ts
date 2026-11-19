@@ -286,20 +286,59 @@ export function decryptFieldForUser(raw: string | null | undefined, userId: stri
 // Deterministic mode preserved for indexed phone-number lookups.
 // ---------------------------------------------------------------------------
 
-const DETERMINISTIC_IV = Buffer.alloc(IV_LENGTH, 0);
-
 /**
- * @deprecated Use encryptField / encryptFieldForUser for new PII fields.
- * Kept for backward-compat with phone_number, email, two_factor_secret callers.
+ * Derives a synthetic IV for deterministic (searchable) encryption:
+ * HMAC-SHA-256(ivKey, plaintext) truncated to IV_LENGTH bytes.
+ *
+ * The same plaintext always yields the same IV (so equal values encrypt to
+ * equal ciphertext and can be matched with `=`), while different plaintexts
+ * get different IVs. This avoids the AES-GCM nonce reuse of a fixed IV, which
+ * lets an attacker who sees two ciphertexts recover the GHASH authentication
+ * key and XOR the plaintexts together.
+ *
+ * The IV key is domain-separated from the encryption key via HKDF `info`.
  */
-export function encrypt(text: string | null | undefined, deterministic = false): string | null | undefined {
-  if (text == null || text === "") return text;
-  const key = deriveKey(env.DB_ENCRYPTION_KEY);
-  const iv = deterministic ? DETERMINISTIC_IV : crypto.randomBytes(IV_LENGTH);
+function deriveDeterministicIv(plaintext: string, keyMaterial: string): Buffer {
+  const ivKey = deriveKey(keyMaterial, "pii-deterministic-iv");
+  return crypto.createHmac("sha256", ivKey).update(plaintext, "utf8").digest().subarray(0, IV_LENGTH);
+}
+
+function encryptWithIv(text: string, key: Buffer, iv: Buffer): string {
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
   const ciphertext = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]).toString("hex");
   const authTag = cipher.getAuthTag().toString("hex");
   return `${iv.toString("hex")}:${authTag}:${ciphertext}`;
+}
+
+/**
+ * @deprecated Use encryptField / encryptFieldForUser for new PII fields.
+ * Kept for backward-compat with phone_number, email, two_factor_secret callers.
+ *
+ * @param deterministic  When true, the IV is derived from HMAC(key, plaintext)
+ *                       so equal inputs produce equal ciphertext (searchable).
+ */
+export function encrypt(text: string | null | undefined, deterministic = false): string | null | undefined {
+  if (text == null || text === "") return text;
+  const key = deriveKey(env.DB_ENCRYPTION_KEY);
+  const iv = deterministic
+    ? deriveDeterministicIv(text, env.DB_ENCRYPTION_KEY)
+    : crypto.randomBytes(IV_LENGTH);
+  return encryptWithIv(text, key, iv);
+}
+
+/**
+ * Returns every ciphertext a deterministically-encrypted value may be stored
+ * as, for use in equality lookups (`WHERE col = ANY($1)`).
+ *
+ * The first entry is the current HMAC-derived-IV form. The second is the form
+ * written by older releases that used an all-zero IV; it is only ever compared
+ * against existing rows — never persisted — so it introduces no new nonce
+ * reuse. Drop it once stored values have been re-encrypted.
+ */
+export function deterministicLookupValues(text: string): string[] {
+  const current = encrypt(text, true) as string;
+  const legacyZeroIv = encryptWithIv(text, deriveKey(env.DB_ENCRYPTION_KEY), Buffer.alloc(IV_LENGTH, 0));
+  return [current, legacyZeroIv];
 }
 
 /**

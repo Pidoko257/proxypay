@@ -93,3 +93,114 @@ export interface ReconciliationReport {
   missingRemote: number;
   entries: ReconciliationEntry[];
 }
+
+/**
+ * Shared provider adapter contract.
+ *
+ * Every supported provider implementation (and its mock / recorded sanitized
+ * fixtures) must satisfy this interface so the same contract test suite can
+ * run against all of them. It covers authentication, collection, payout,
+ * status lookup, callback handling, and batch partial-failure behavior.
+ */
+export interface ProviderAdapter {
+  /** Stable provider identifier (e.g. "mtn", "airtel"). */
+  readonly provider: string;
+
+  /** Authenticate against the provider and return a usable session token. */
+  authenticate(credentials: ProviderCredentials): Promise<AuthSession>;
+
+  /** Collect (pull) funds from a customer into the provider account. */
+  collect(request: CollectionRequest): Promise<CollectionResult>;
+
+  /** Send a payout to a recipient. */
+  payout(request: PayoutRequest): Promise<PayoutResult>;
+
+  /** Look up the current status of a previously initiated operation. */
+  getStatus(reference: string): Promise<StatusResult>;
+
+  /** Parse and validate an inbound provider callback / webhook payload. */
+  handleCallback(payload: unknown): Promise<CallbackResult>;
+
+  /**
+   * Execute a batch of payouts. Must not throw on individual failures;
+   * instead it returns per-item results so partial failures are observable.
+   */
+  payoutBatch(requests: PayoutRequest[]): Promise<BatchResult<PayoutResult>>;
+}
+
+/** Credentials used to authenticate with a provider. */
+export interface ProviderCredentials {
+  apiKey: string;
+  apiSecret: string;
+  /** Optional base URL override (used by mocks / fixtures). */
+  baseUrl?: string;
+}
+
+/** Result of a successful authentication. */
+export interface AuthSession {
+  token: string;
+  /** ISO-8601 expiry timestamp. */
+  expiresAt: string;
+}
+
+/** A request to collect funds from a customer. */
+export interface CollectionRequest {
+  /** Client-generated idempotency reference. */
+  reference: string;
+  amount: number;
+  currency: string;
+  recipient: string;
+}
+
+/** Result of a collection request. */
+export interface CollectionResult {
+  reference: string;
+  status: PayoutStatus;
+  providerReference: string;
+}
+
+/** A request to send a payout. */
+export interface PayoutRequest {
+  /** Client-generated idempotency reference. */
+  reference: string;
+  amount: number;
+  currency: string;
+  recipient: string;
+}
+
+/** Result of a payout request. */
+export interface PayoutResult {
+  reference: string;
+  status: PayoutStatus;
+  providerReference: string;
+}
+
+/** Result of a status lookup. */
+export interface StatusResult {
+  reference: string;
+  status: PayoutStatus;
+  providerReference: string;
+}
+
+/** Result of parsing an inbound callback. */
+export interface CallbackResult {
+  reference: string;
+  status: PayoutStatus;
+  /** Whether the callback signature / payload was valid. */
+  valid: boolean;
+}
+
+/** Per-item outcome within a batch operation. */
+export interface BatchItemResult<T> {
+  reference: string;
+  ok: boolean;
+  result: T | null;
+  error: string | null;
+}
+
+/** Aggregated result of a batch operation, preserving partial failures. */
+export interface BatchResult<T> {
+  items: BatchItemResult<T>[];
+  succeeded: number;
+  failed: number;
+}

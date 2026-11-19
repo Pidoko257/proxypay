@@ -207,12 +207,19 @@ export class UserModel {
     try {
       await client.query('BEGIN');
 
-      // Get current user status for audit
-      const currentUser = await this.findById(id);
-      if (!currentUser) {
+      // Read the current status on the same client, inside the transaction,
+      // and lock the row. Concurrent status changes for this user now queue
+      // behind us, so the audit entry's old_status is always the value this
+      // UPDATE actually replaced (never a stale read from a replica).
+      const currentResult = await client.query(
+        "SELECT status FROM users WHERE id = $1 FOR UPDATE",
+        [id],
+      );
+      if (currentResult.rows.length === 0) {
         await client.query('ROLLBACK');
         return null;
       }
+      const currentUser = { status: currentResult.rows[0].status as UserStatus };
 
       // Update user status
       const updateQuery = "UPDATE users SET status = $1 WHERE id = $2 RETURNING *";

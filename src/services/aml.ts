@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import { pool } from "../config/database";
+import { AMLAlertModel } from "../models/amlAlert";
 
 export type AMLTransactionType = "deposit" | "withdraw";
 export type AMLAlertStatus = "pending_review" | "reviewed" | "dismissed";
@@ -355,8 +356,38 @@ export class AMLService {
     return this.getAlerts({ status: "pending_review" });
   }
 
-  reviewAlert(alertId: string, input: AMLReviewInput): AMLAlert | null {
+  /**
+   * Record a compliance review decision for an alert.
+   *
+   * The decision is persisted to `aml_alerts` (status, reviewed_at,
+   * reviewed_by, review_notes) and to `aml_alert_review_history` inside a
+   * single DB transaction, so it survives pod restarts. The in-memory buffer
+   * is only kept in sync as a cache, and is used as the source of truth only
+   * for alerts that never made it to the database (see `recordAlert`).
+   *
+   * Database errors are propagated: silently falling back to memory would
+   * lose the review on the next restart, which is exactly the bug this guards
+   * against.
+   */
+  async reviewAlert(
+    alertId: string,
+    input: AMLReviewInput,
+  ): Promise<AMLAlert | null> {
+    const persisted = await new AMLAlertModel().review(
+      alertId,
+      input,
+      input.reviewedBy,
+    );
+
     const idx = this.alerts.findIndex((alert) => alert.id === alertId);
+
+    if (persisted) {
+      if (idx !== -1) this.alerts[idx] = persisted;
+      return persisted;
+    }
+
+    // Not in the database: only alerts that failed to persist on creation
+    // live solely in the in-memory buffer.
     if (idx === -1) return null;
 
     const nowIso = new Date().toISOString();

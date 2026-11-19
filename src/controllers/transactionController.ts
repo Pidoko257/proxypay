@@ -1331,7 +1331,7 @@ export const reviewAmlAlertHandler = async (req: Request, res: Response) => {
       });
     }
 
-    const updated = amlService.reviewAlert(alertId, {
+    const updated = await amlService.reviewAlert(alertId, {
       status,
       reviewedBy,
       reviewNotes,

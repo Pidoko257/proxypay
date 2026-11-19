@@ -265,6 +265,52 @@ transactionRoutes.post(
   authenticateToken,
   checkAccountStatusStrict,
   geoFencingMiddleware,
-  TimeoutPresets.long
+  TimeoutPresets.long,
+  haltOnTimedout,
+  normalizeProvider,
+  validateTransaction,
+  validateNetworkMiddleware,
+  geolocateMiddleware,
+  withdrawHandler,
+);
 
-/* … truncated 2400 chars — edit only what you need near the top … */
+// Metadata mutation endpoints — require authentication and ownership/role guard
+transactionRoutes.patch(
+  "/:id/notes",
+  authenticateToken,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  updateNotesHandler,
+);
+
+transactionRoutes.put(
+  "/:id/metadata",
+  authenticateToken,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  updateMetadataHandler,
+);
+
+transactionRoutes.patch(
+  "/:id/metadata",
+  authenticateToken,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  patchMetadataHandler,
+);
+
+transactionRoutes.delete(
+  "/:id/metadata",
+  authenticateToken,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  deleteMetadataKeysHandler,
+);
+
+transactionRoutes.post(
+  "/search/metadata",
+  authenticateToken,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  searchByMetadataHandler,
+);

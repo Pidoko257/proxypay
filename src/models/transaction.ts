@@ -167,6 +167,19 @@ export function validateMetadataSchema(
   return result.data as Record<string, unknown>;
 }
 
+/**
+ * Statuses after which a transaction's idempotency key is released (#619).
+ * Restored: the definition was lost in a merge while updateStatus still
+ * references it, so every successful status update threw a ReferenceError.
+ */
+const TERMINAL_IDEMPOTENCY_STATUSES = new Set<TransactionStatus>([
+  TransactionStatus.Completed,
+  TransactionStatus.Failed,
+  TransactionStatus.Cancelled,
+  TransactionStatus.Reversed,
+  TransactionStatus.ClawedBack,
+]);
+
 function phoneSearchTokens(phoneNumber: string): string[] {
   const normalized = phoneNumber.replace(/^\+/, "");
   return Array.from({ length: normalized.length }, (_, index) =>
@@ -198,6 +211,24 @@ export function tokenizeNotes(text: string | null | undefined): string[] {
  */
 export function notesSearchTokens(text: string | null | undefined): string[] {
   return tokenizeNotes(text).map((word) => hashSearchValue(`notes:${word}`));
+}
+
+/**
+ * Thrown by updateStatus when the transaction's status no longer matches the
+ * caller's expected `currentStatus`, i.e. a concurrent update won the race.
+ */
+export class TransactionStatusConflictError extends Error {
+  constructor(
+    public readonly transactionId: string,
+    public readonly expectedStatus: TransactionStatus,
+    public readonly actualStatus: TransactionStatus,
+    public readonly requestedStatus: TransactionStatus,
+  ) {
+    super(
+      `Transaction ${transactionId} status changed concurrently: expected ${expectedStatus}, found ${actualStatus} (requested ${requestedStatus})`,
+    );
+    this.name = "TransactionStatusConflictError";
+  }
 }
 
 export class InvalidNotesSearchQueryError extends Error {
@@ -468,6 +499,15 @@ export class TransactionModel {
     return mapTransactionRow(res.rows[0]);
   }
 
+  /**
+   * Set a transaction's status.
+   *
+   * When `currentStatus` is given, the transition is validated against it and
+   * the UPDATE only applies if the row still has that status (compare-and-set
+   * in a single statement). If another worker changed the status first, a
+   * TransactionStatusConflictError is thrown instead of silently overwriting
+   * its result (last-writer-wins).
+   */
   async updateStatus(id: string, status: TransactionStatus, userId?: string, currentStatus?: TransactionStatus) {
     if (currentStatus) {
       transactionStatusWorkflowService.validateBaseTransition(id, currentStatus, status);
@@ -476,14 +516,40 @@ export class TransactionModel {
     const params: any[] = [status, id];
 
     if (userId) {
-      q += ` AND user_id=$3`;
       params.push(userId);
+      q += ` AND user_id=$${params.length}`;
+    }
+
+    if (currentStatus) {
+      params.push(currentStatus);
+      q += ` AND status=$${params.length}`;
     }
 
     q += ` RETURNING user_id, provider, reference_number, updated_at`;
 
     const res = await queryWrite(q, params);
-    if (!res.rowCount) return;
+    if (!res.rowCount) {
+      if (currentStatus) {
+        // Distinguish "not found" from "status changed underneath us". Read
+        // from the primary so replica lag can't hide the concurrent write.
+        let existsQ = `SELECT status FROM transactions WHERE id=$1`;
+        const existsParams: any[] = [id];
+        if (userId) {
+          existsQ += ` AND user_id=$2`;
+          existsParams.push(userId);
+        }
+        const existing = await queryWrite(existsQ, existsParams);
+        if (existing.rowCount) {
+          throw new TransactionStatusConflictError(
+            id,
+            currentStatus,
+            existing.rows[0].status,
+            status,
+          );
+        }
+      }
+      return;
+    }
 
     const row = res.rows[0];
 

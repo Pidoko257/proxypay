@@ -3,6 +3,8 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { WebhookService, WebhookEvent } from "../services/webhook";
 import { ingestRateLimiter } from "../middleware/ingestRateLimit";
+import { requireAuth, requireAdmin } from "../middleware/auth";
+import { logger } from "../utils/logger";
 
 const router = Router();
 const transactionModel = new TransactionModel();
@@ -85,7 +87,7 @@ router.get("/settings", (req: Request, res: Response) => {
 });
 
 /** PATCH /webhooks/settings - toggle compression on/off. Body: { "compression": true | false } */
-router.patch("/settings", (req: Request, res: Response) => {
+router.patch("/settings", requireAuth, requireAdmin, (req: Request, res: Response) => {
   const { compression } = req.body as { compression?: unknown };
   if (compression === undefined) {
     return res.status(400).json({ error: "Missing field: compression (boolean)" });
@@ -163,18 +165,12 @@ router.post("/", async (req: Request, res: Response) => {
   }
 });
 
-router.post("/test", (req: Request, res: Response) => {
-  console.log("[webhook-test] Received payload:", req.body);
+router.post("/test", requireAuth, requireAdmin, (req: Request, res: Response) => {
+  logger.debug("[webhook-test] Received test payload", { body: req.body });
   res.json({
     received: true,
     timestamp: new Date().toISOString(),
     payload: req.body,
-    headers: {
-      "content-type": req.get("content-type"),
-      "x-webhook-signature": req.get("x-webhook-signature"),
-      "content-encoding": req.get("content-encoding"),
-      "user-agent": req.get("user-agent"),
-    },
   });
 });
 

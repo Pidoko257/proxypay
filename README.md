@@ -53,3 +53,6 @@ transaction, so application pool sizes can be larger. Set
 
 <!-- handsoff-issue-781 -->
 - #781: Retry external object deletion after database purge
+
+<!-- handsoff-issue-888 -->
+- #888: `WEBHOOK_SECRET` and `WEBHOOK_URL` are missing from `.env.example`

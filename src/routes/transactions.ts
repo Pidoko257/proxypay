@@ -135,6 +135,9 @@ transactionRoutes.get(
   },
 );
 
+const DEFAULT_SHARE_TOKEN_EXPIRY = 60 * 60; // 1 hour
+const MAX_SHARE_TOKEN_EXPIRY = 7 * 24 * 60 * 60; // 7 days
+
 // Create a shareable URL (public or private) for a transaction receipt
 transactionRoutes.post(
   "/:id/receipt/share",
@@ -144,20 +147,28 @@ transactionRoutes.post(
   async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const { expiresIn = 60 * 60 } = req.body || {};
+      const requestedExpiry = Number(
+        req.body?.expiresIn ?? DEFAULT_SHARE_TOKEN_EXPIRY,
+      );
+      // Cap the lifetime so callers can't mint effectively non-expiring links;
+      // fall back to the default for missing/invalid/non-positive values.
+      const expiresIn =
+        Number.isFinite(requestedExpiry) && requestedExpiry > 0
+          ? Math.min(requestedExpiry, MAX_SHARE_TOKEN_EXPIRY)
+          : DEFAULT_SHARE_TOKEN_EXPIRY;
       const transaction = await transactionModel.findById(id);
       if (!transaction)
         throw createError(ERROR_CODES.NOT_FOUND, "Transaction not found", {
           error: "Transaction not found",
         });
-      const token = generateShareToken(id, Number(expiresIn));
+      const token = generateShareToken(id, expiresIn);
       const host = req.get("host") || "";
       const protocol = req.protocol;
       const url = `${protocol}://${host}/api/transactions/shared/receipt/${token}`;
 
       res.json({
         url,
-        expiresAt: Math.floor(Date.now() / 1000) + Number(expiresIn),
+        expiresAt: Math.floor(Date.now() / 1000) + expiresIn,
       });
     } catch (err) {
       console.error("Failed to create shareable receipt URL:", err);

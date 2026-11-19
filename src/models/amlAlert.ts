@@ -333,6 +333,46 @@ export class AMLAlertModel {
     }
   }
 
+  /**
+   * Persist an escalation of an existing alert (e.g. a sanction match added
+   * after the rule-based evaluation already stored the alert).
+   */
+  async updateEscalation(
+    alertId: string,
+    update: Pick<AMLAlert, "severity" | "ruleHits" | "reasons">,
+  ): Promise<AMLAlert | null> {
+    const query = `
+      UPDATE aml_alerts
+      SET
+        severity = $1,
+        rule_hits = $2,
+        reasons = $3,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $4
+      RETURNING
+        id,
+        transaction_id AS "transactionId",
+        user_id AS "userId",
+        severity,
+        status,
+        rule_hits AS "ruleHits",
+        reasons,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        reviewed_at AS "reviewedAt",
+        reviewed_by AS "reviewedBy",
+        review_notes AS "reviewNotes"
+    `;
+
+    const result = await pool.query(query, [
+      update.severity,
+      JSON.stringify(update.ruleHits),
+      update.reasons,
+      alertId,
+    ]);
+    return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
+  }
+
   async getReviewHistory(alertId: string): Promise<AMLReviewHistoryEntry[]> {
     const query = `
       SELECT

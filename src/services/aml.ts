@@ -321,11 +321,13 @@ export class AMLService {
             createdAt: nowIso,
             updatedAt: nowIso,
           };
-          this.recordAlert(result.alert);
+          await this.recordAlert(result.alert);
         } else {
+          const wasHigh = result.alert.severity === "high";
           result.alert.severity = "high";
           result.alert.ruleHits.push(sanctionHit);
           result.alert.reasons.push(sanctionHit.message);
+          await this.persistEscalation(result.alert, wasHigh);
         }
       }
     }
@@ -436,6 +438,34 @@ export class AMLService {
       if (this.alerts.length > this.config.alertBufferSize) {
         this.alerts = this.alerts.slice(0, this.config.alertBufferSize);
       }
+    }
+  }
+
+  /**
+   * Re-persist an alert that was escalated in memory after its initial
+   * insert, and trigger SAR preparation if it has just become high severity.
+   */
+  private async persistEscalation(
+    alert: AMLAlert,
+    wasHigh: boolean,
+  ): Promise<void> {
+    try {
+      const { AMLAlertModel } = await import("../models/amlAlert.js");
+      await new AMLAlertModel().updateEscalation(alert.id, {
+        severity: alert.severity,
+        ruleHits: alert.ruleHits,
+        reasons: alert.reasons,
+      });
+    } catch (error) {
+      logger.error(
+        { alertId: alert.id, err: error },
+        "Failed to persist AML alert escalation",
+      );
+      throw error;
+    }
+
+    if (!wasHigh && alert.severity === "high") {
+      await this.scheduleSarPreparation(alert);
     }
   }
 

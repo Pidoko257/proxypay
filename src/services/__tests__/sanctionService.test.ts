@@ -1,4 +1,8 @@
-import { sanctionService, SanctionScreeningError } from "../sanctionService";
+import {
+  sanctionService,
+  SanctionScreeningError,
+  SanctionListUpdateError,
+} from "../sanctionService";
 import { pool } from "../../config/database";
 
 // Mock the pool.query and pool.connect
@@ -95,10 +99,84 @@ describe("SanctionService", () => {
       (pool.connect as jest.fn).mockResolvedValue(mockClient);
 
       await expect(sanctionService.updateSanctionList([{ name: "E1", source: "UN", external_id: "E1" }]))
-        .rejects.toThrow("DB Error");
+        .rejects.toBeInstanceOf(SanctionListUpdateError);
 
       expect(mockClient.query).toHaveBeenCalledWith("ROLLBACK");
       expect(mockClient.release).toHaveBeenCalled();
+    });
+
+    describe("batching", () => {
+      const originalBatchSize = process.env.SANCTION_UPSERT_BATCH_SIZE;
+      beforeEach(() => {
+        process.env.SANCTION_UPSERT_BATCH_SIZE = "2";
+      });
+      afterAll(() => {
+        if (originalBatchSize === undefined) delete process.env.SANCTION_UPSERT_BATCH_SIZE;
+        else process.env.SANCTION_UPSERT_BATCH_SIZE = originalBatchSize;
+      });
+
+      const makeEntities = (n: number) =>
+        Array.from({ length: n }, (_, i) => ({
+          name: `Entity ${i}`,
+          source: "UN",
+          external_id: `E${i}`,
+        }));
+
+      it("upserts each batch as one multi-row INSERT in its own transaction", async () => {
+        const mockClient = { query: jest.fn(), release: jest.fn() };
+        (pool.connect as jest.fn).mockResolvedValue(mockClient);
+
+        const result = await sanctionService.updateSanctionList(makeEntities(5));
+
+        const inserts = mockClient.query.mock.calls.filter(([q]) => String(q).includes("INSERT"));
+        expect(inserts).toHaveLength(3); // 2 + 2 + 1
+        expect(inserts[0][1]).toHaveLength(10); // 2 rows x 5 columns
+        expect(inserts[2][1]).toHaveLength(5);
+        expect(mockClient.query.mock.calls.filter(([q]) => q === "COMMIT")).toHaveLength(3);
+        expect(result).toEqual({ total: 5, upserted: 5, failedBatches: [] });
+      });
+
+      it("keeps committed batches when a later batch fails", async () => {
+        let insertCalls = 0;
+        const mockClient = {
+          query: jest.fn().mockImplementation((q: string) => {
+            if (q.includes("INSERT")) {
+              insertCalls += 1;
+              if (insertCalls === 2) throw new Error("bad row");
+            }
+          }),
+          release: jest.fn(),
+        };
+        (pool.connect as jest.fn).mockResolvedValue(mockClient);
+
+        const err = await sanctionService
+          .updateSanctionList(makeEntities(5))
+          .catch((e) => e);
+
+        expect(err).toBeInstanceOf(SanctionListUpdateError);
+        expect(err.result.upserted).toBe(3);
+        expect(err.result.failedBatches).toEqual([
+          { index: 1, offset: 2, size: 2, error: "bad row" },
+        ]);
+        // batch 0 and batch 2 committed, only batch 1 rolled back
+        expect(mockClient.query.mock.calls.filter(([q]) => q === "COMMIT")).toHaveLength(2);
+        expect(mockClient.query.mock.calls.filter(([q]) => q === "ROLLBACK")).toHaveLength(1);
+        expect(mockClient.release).toHaveBeenCalledTimes(1);
+      });
+
+      it("de-duplicates conflict keys so one statement never touches a row twice", async () => {
+        const mockClient = { query: jest.fn(), release: jest.fn() };
+        (pool.connect as jest.fn).mockResolvedValue(mockClient);
+
+        const result = await sanctionService.updateSanctionList([
+          { name: "Old", source: "UN", external_id: "E1" },
+          { name: "New", source: "UN", external_id: "E1" },
+        ]);
+
+        const insert = mockClient.query.mock.calls.find(([q]) => String(q).includes("INSERT"));
+        expect(insert[1]).toEqual(["New", null, "UN", null, "E1"]);
+        expect(result.total).toBe(1);
+      });
     });
   });
 

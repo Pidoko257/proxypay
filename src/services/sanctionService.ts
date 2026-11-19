@@ -35,6 +35,42 @@ export class SanctionScreeningError extends Error {
   }
 }
 
+export interface SanctionListUpdateResult {
+  total: number;
+  upserted: number;
+  failedBatches: { index: number; offset: number; size: number; error: string }[];
+}
+
+export class SanctionListUpdateError extends Error {
+  constructor(public readonly result: SanctionListUpdateResult) {
+    super(
+      `Sanction list partially updated: ${result.upserted}/${result.total} rows applied, ` +
+        `${result.failedBatches.length} batch(es) failed`,
+    );
+    this.name = "SanctionListUpdateError";
+  }
+}
+
+const DEFAULT_SANCTION_UPSERT_BATCH_SIZE = 500;
+
+/**
+ * A multi-row INSERT ... ON CONFLICT DO UPDATE fails if the same conflict key
+ * appears twice in one statement, so keep only the last occurrence of each
+ * (external_id, source). Entities without an external_id never conflict.
+ */
+function dedupeSanctionEntities(entities: SanctionEntity[]): SanctionEntity[] {
+  const byKey = new Map<string, SanctionEntity>();
+  const withoutId: SanctionEntity[] = [];
+  for (const entity of entities) {
+    if (!entity.external_id) {
+      withoutId.push(entity);
+      continue;
+    }
+    byKey.set(`${entity.source}::${entity.external_id}`, entity);
+  }
+  return [...byKey.values(), ...withoutId];
+}
+
 const SEED_SANCTIONS: SanctionEntity[] = [
   {
     name: "John Doe",
@@ -280,40 +316,100 @@ export class SanctionService {
 
   /**
    * Batch updates the internal sanction list in the database.
+   *
+   * Entities are upserted in independent batches (default 500 rows, see
+   * SANCTION_UPSERT_BATCH_SIZE), each as one multi-row
+   * INSERT ... ON CONFLICT DO UPDATE in its own transaction. A failing batch
+   * only rolls back its own rows; batches that already committed stay applied
+   * and the remaining batches are still attempted. If any batch fails, a
+   * SanctionListUpdateError describing the failed batches is thrown after all
+   * batches have run.
    */
-  async updateSanctionList(entities: SanctionEntity[]): Promise<void> {
+  async updateSanctionList(
+    entities: SanctionEntity[],
+  ): Promise<SanctionListUpdateResult> {
+    const batchSize = Math.max(
+      1,
+      parseInt(process.env.SANCTION_UPSERT_BATCH_SIZE || "", 10) ||
+        DEFAULT_SANCTION_UPSERT_BATCH_SIZE,
+    );
+
+    const unique = dedupeSanctionEntities(entities);
+    const result: SanctionListUpdateResult = {
+      total: unique.length,
+      upserted: 0,
+      failedBatches: [],
+    };
+
     const client = await pool.connect();
     try {
-      await client.query("BEGIN");
+      for (let offset = 0; offset < unique.length; offset += batchSize) {
+        const batch = unique.slice(offset, offset + batchSize);
+        const batchIndex = offset / batchSize;
 
-      for (const entity of entities) {
+        const values: unknown[] = [];
+        const tuples = batch.map((entity, i) => {
+          const base = i * 5;
+          values.push(
+            entity.name,
+            entity.country ?? null,
+            entity.source,
+            entity.category ?? null,
+            entity.external_id ?? null,
+          );
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+        });
+
         const query = `
           INSERT INTO sanction_list (name, country, source, category, external_id)
-          VALUES ($1, $2, $3, $4, $5)
+          VALUES ${tuples.join(", ")}
           ON CONFLICT (external_id, source) DO UPDATE SET
             name = EXCLUDED.name,
             country = EXCLUDED.country,
             category = EXCLUDED.category,
             updated_at = CURRENT_TIMESTAMP
         `;
-        await client.query(query, [
-          entity.name,
-          entity.country ?? null,
-          entity.source,
-          entity.category ?? null,
-          entity.external_id ?? null,
-        ]);
-      }
 
-      await client.query("COMMIT");
-      console.log(`Successfully synced ${entities.length} sanction entities.`);
-    } catch (error) {
-      await client.query("ROLLBACK");
-      console.error("Failed to update sanction list:", error);
-      throw error;
+        try {
+          await client.query("BEGIN");
+          await client.query(query, values);
+          await client.query("COMMIT");
+          result.upserted += batch.length;
+        } catch (error) {
+          try {
+            await client.query("ROLLBACK");
+          } catch (rollbackError) {
+            console.error("[sanctionService] ROLLBACK failed:", rollbackError);
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          result.failedBatches.push({
+            index: batchIndex,
+            offset,
+            size: batch.length,
+            error: message,
+          });
+          console.error(
+            `[sanctionService] Sanction upsert batch ${batchIndex} (rows ${offset}-${offset + batch.length - 1}) failed and was rolled back:`,
+            error,
+          );
+        }
+      }
     } finally {
       client.release();
     }
+
+    console.log(
+      `[sanctionService] Synced ${result.upserted}/${result.total} sanction entities in batches of ${batchSize}` +
+        (result.failedBatches.length
+          ? ` (${result.failedBatches.length} batch(es) failed)`
+          : "."),
+    );
+
+    if (result.failedBatches.length > 0) {
+      throw new SanctionListUpdateError(result);
+    }
+
+    return result;
   }
 
   private manualReviewQueue: SanctionReviewItem[] = [];

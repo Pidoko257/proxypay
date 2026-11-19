@@ -2,6 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { AccountingService } from './accounting';
+import logger from '../utils/logger';
 
 // KYC Provider: Entrust Identity Verification (formerly Onfido)
 // Documentation: https://documentation.identity.entrust.com/api/latest/
@@ -208,19 +209,32 @@ export class KYCService {
       timeout: 30000,
     });
 
-    // Add request/response interceptors for logging
+    // Request/response interceptors: structured, PII-free logging only.
+    // Never log request/response bodies (error.response?.data included) —
+    // KYC provider payloads contain applicant PII.
     this.api.interceptors.request.use((config) => {
-      console.log(`KYC API Request: ${config.method?.toUpperCase()} ${config.url}`);
+      logger.debug({ url: config.url, method: config.method }, 'KYC API request');
       return config;
     });
 
     this.api.interceptors.response.use(
       (response) => {
-        console.log(`KYC API Response: ${response.status} ${response.config.url}`);
+        logger.debug(
+          { url: response.config.url, method: response.config.method, status: response.status },
+          'KYC API response',
+        );
         return response;
       },
       (error) => {
-        console.error(`KYC API Error: ${error.response?.status} ${error.config?.url}`, error.response?.data);
+        logger.warn(
+          {
+            url: error.config?.url,
+            method: error.config?.method,
+            status: error.response?.status,
+            code: error.code,
+          },
+          'KYC API error',
+        );
         return Promise.reject(error);
       }
     );
@@ -240,8 +254,10 @@ export class KYCService {
         validatedData.dob,
       );
       if (existing) {
-        console.log(
-          `[KYCService] Duplicate applicant detected for ${validatedData.first_name} ${validatedData.last_name} (dob: ${validatedData.dob ?? 'n/a'}) — returning existing record ${existing.id}`,
+        // Do not log name/DOB — only the existing record id.
+        logger.info(
+          { applicantId: existing.id },
+          '[KYCService] Duplicate applicant detected — returning existing record',
         );
         return existing;
       }
@@ -346,8 +362,9 @@ export class KYCService {
 
     const existing = await this.findSep12HistoryByRequest(validated.customerId, validated.requestId);
     if (existing) {
-      console.log(
-        `[KYCService] Duplicate SEP-12 customer update for ${validated.customerId} (request ${validated.requestId}) — returning existing version ${existing.version}`,
+      logger.info(
+        { customerId: validated.customerId, requestId: validated.requestId, version: existing.version },
+        '[KYCService] Duplicate SEP-12 customer update — returning existing version',
       );
       return existing;
     }
@@ -378,16 +395,18 @@ export class KYCService {
 
     const existing = await this.findSep12HistoryByRequest(validated.customerId, validated.requestId);
     if (existing) {
-      console.log(
-        `[KYCService] Duplicate SEP-12 document update for ${validated.customerId} (request ${validated.requestId}) — returning existing version ${existing.version}`,
+      logger.info(
+        { customerId: validated.customerId, requestId: validated.requestId, version: existing.version },
+        '[KYCService] Duplicate SEP-12 document update — returning existing version',
       );
       return existing;
     }
 
     const existingDoc = await this.findSep12HistoryByDocument(validated.customerId, validated.documentId);
     if (existingDoc) {
-      console.log(
-        `[KYCService] Duplicate SEP-12 document ${validated.documentId} for ${validated.customerId} — returning existing version ${existingDoc.version}`,
+      logger.info(
+        { customerId: validated.customerId, documentId: validated.documentId, version: existingDoc.version },
+        '[KYCService] Duplicate SEP-12 document — returning existing version',
       );
       return existingDoc;
     }

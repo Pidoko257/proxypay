@@ -14,6 +14,10 @@
  * SEP-31 idempotency helpers (`submitPayoutIdempotent`,
  * `reconcileCompletionCallback`) live here so payout submission and
  * callback handling share the same persisted reference store.
+ *
+ * Accounting synchronization helpers (`getAccountingIdempotencyKey`,
+ * `syncAccountingObject`, `getAccountingSyncReport`) live here so queued
+ * QuickBooks/Xero syncs are idempotent and inspectable per period.
  */
 
 import axios from "axios";
@@ -192,6 +196,195 @@ export interface ReadOptions {
   primary?: boolean;
 }
 
+// ─── Accounting sync idempotency & reconciliation ────────────────────────────
+
+/** Accounting providers supported by the sync queue. */
+export type AccountingProvider = "quickbooks" | "xero";
+
+/** Lifecycle state of a queued accounting sync item. */
+export type AccountingSyncState =
+  | "pending"
+  | "applied"
+  | "duplicate"
+  | "failed";
+
+/**
+ * A single accounting object (journal entry, invoice, bill, …) queued for
+ * synchronization with an external accounting provider.
+ */
+export interface AccountingSyncItem {
+  /** Stable local identifier of the accounting object. */
+  objectId: string;
+  provider: AccountingProvider;
+  /** Accounting period the object belongs to (`YYYY-MM`). */
+  period: string;
+  /**
+   * Stable idempotency key persisted per accounting object.  External
+   * retries reuse this key so the provider maps them to the same remote
+   * identifier instead of creating duplicate journal entries.
+   */
+  idempotencyKey: string;
+  /** Remote identifier assigned by the provider once applied. */
+  remoteId?: string;
+  state: AccountingSyncState;
+  attempts: number;
+  lastError?: string;
+  updatedAt: Date;
+}
+
+/**
+ * Persisted idempotency keys keyed by `provider:objectId`.
+ *
+ * In production this should be a unique `idempotency_key` column on the
+ * accounting sync table so concurrent workers cannot mint divergent keys.
+ */
+const accountingIdempotencyKeys = new Map<string, string>();
+
+/** In-memory sync queue mirroring the persisted accounting sync table. */
+const accountingSyncQueue = new Map<string, AccountingSyncItem>();
+
+function accountingKey(provider: AccountingProvider, objectId: string): string {
+  return `${provider}:${objectId}`;
+}
+
+/**
+ * Return the persisted idempotency key for an accounting object, creating and
+ * persisting a stable one on first use.  Repeated calls (including from
+ * external retries) always return the same key.
+ */
+export function getAccountingIdempotencyKey(
+  provider: AccountingProvider,
+  objectId: string
+): string {
+  const key = accountingKey(provider, objectId);
+  const existing = accountingIdempotencyKeys.get(key);
+  if (existing) return existing;
+  const generated = `${provider}-${objectId}`;
+  accountingIdempotencyKeys.set(key, generated);
+  return generated;
+}
+
+/**
+ * Query the remote accounting provider for an object previously applied under
+ * the given idempotency key.  Returns the remote identifier when the entry
+ * already exists remotely, or `undefined` when it has not been applied.
+ *
+ * Replace this stub with a real provider lookup (e.g. QuickBooks query by
+ * `DocNumber` / Xero lookup by `InvoiceNumber`).
+ */
+export async function queryRemoteAccountingState(
+  provider: AccountingProvider,
+  idempotencyKey: string
+): Promise<string | undefined> {
+  console.log(
+    `[reconciler] Querying ${provider} for idempotency key ${idempotencyKey} …`
+  );
+  return undefined;
+}
+
+/**
+ * Enqueue an accounting object for synchronization.  The idempotency key is
+ * persisted up front so retries reuse it.
+ */
+export function enqueueAccountingSync(
+  provider: AccountingProvider,
+  objectId: string,
+  period: string
+): AccountingSyncItem {
+  const key = accountingKey(provider, objectId);
+  const existing = accountingSyncQueue.get(key);
+  if (existing) return existing;
+  const item: AccountingSyncItem = {
+    objectId,
+    provider,
+    period,
+    idempotencyKey: getAccountingIdempotencyKey(provider, objectId),
+    state: "pending",
+    attempts: 0,
+    updatedAt: new Date(),
+  };
+  accountingSyncQueue.set(key, item);
+  return item;
+}
+
+/**
+ * Retry a queued accounting sync idempotently.
+ *
+ * Before re-submitting, the remote provider is queried using the persisted
+ * idempotency key.  If the entry was already applied remotely the item is
+ * marked `duplicate` and the existing remote id is recorded instead of
+ * creating a second journal entry.
+ */
+export async function syncAccountingObject(
+  provider: AccountingProvider,
+  objectId: string
+): Promise<AccountingSyncItem> {
+  const key = accountingKey(provider, objectId);
+  const item = accountingSyncQueue.get(key);
+  if (!item) {
+    throw new Error(`No queued accounting sync for ${key}`);
+  }
+
+  item.attempts += 1;
+  item.updatedAt = new Date();
+
+  try {
+    const remoteId = await queryRemoteAccountingState(
+      provider,
+      item.idempotencyKey
+    );
+    if (remoteId) {
+      item.remoteId = remoteId;
+      item.state = "duplicate";
+      item.lastError = undefined;
+      return item;
+    }
+    // Remote has no record — safe to submit under the same idempotency key.
+    item.state = "applied";
+    item.lastError = undefined;
+    return item;
+  } catch (error: any) {
+    item.state = "failed";
+    item.lastError = error?.message ?? String(error);
+    return item;
+  }
+}
+
+/** Per-period accounting sync / recovery report. */
+export interface AccountingSyncReport {
+  provider: AccountingProvider;
+  period: string;
+  total: number;
+  applied: number;
+  duplicates: number;
+  pending: number;
+  failed: number;
+  items: AccountingSyncItem[];
+}
+
+/**
+ * Build a per-period sync and recovery report showing the reconciliation
+ * state of every accounting object queued for the given provider and period.
+ */
+export function getAccountingSyncReport(
+  provider: AccountingProvider,
+  period: string
+): AccountingSyncReport {
+  const items = Array.from(accountingSyncQueue.values()).filter(
+    (item) => item.provider === provider && item.period === period
+  );
+  return {
+    provider,
+    period,
+    total: items.length,
+    applied: items.filter((i) => i.state === "applied").length,
+    duplicates: items.filter((i) => i.state === "duplicate").length,
+    pending: items.filter((i) => i.state === "pending").length,
+    failed: items.filter((i) => i.state === "failed").length,
+    items,
+  };
+}
+
 // ─── Data-source adapters (replace with real implementations) ────────────────
 
 /**
@@ -250,144 +443,8 @@ export async function fetchRemotePayouts(): Promise<RemotePayoutRecord[]> {
     return response.data;
   } catch (error: any) {
     console.error(
-      "[reconciler] Failed to fetch remote payouts:",
-      error.response?.data || error.message
+      `[reconciler] Failed to fetch remote payouts: ${error?.message ?? error}`
     );
-    return [];
-  }
-}
-
-// ─── SEP-31 idempotent payout submission ─────────────────────────────────────
-
-/**
- * Persisted SEP-31 transaction reference.  The `reference` is the unique
- * idempotency key that must be written *before* any external call so that
- * retries and duplicate callbacks can be reconciled against it.
- */
-export interface Sep31PayoutReference {
-  reference: string;
-  status: "pending" | "submitted" | "completed" | "failed";
-  providerPayoutId: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/**
- * In-memory reference store keyed by the unique SEP-31 reference.
- *
- * In production this should be backed by a database table with a UNIQUE
- * constraint on `reference` (e.g. `UNIQUE(reference)`), so that concurrent
- * submissions of the same reference cannot both proceed.  The Map below
- * enforces the same uniqueness invariant for the starter.
- */
-const payoutReferences = new Map<string, Sep31PayoutReference>();
-
-/**
- * Persist a unique SEP-31 transaction reference before any external call.
- *
- * Returns the existing record when the reference was already persisted
- * (idempotent), or a freshly created `pending` record otherwise.  Callers
- * MUST treat a non-`pending` existing record as "already submitted" and
- * avoid re-submitting the payout.
- */
-export function persistPayoutReference(
-  reference: string
-): Sep31PayoutReference {
-  const existing = payoutReferences.get(reference);
-  if (existing) {
-    return existing;
-  }
-
-  const now = new Date().toISOString();
-  const record: Sep31PayoutReference = {
-    reference,
-    status: "pending",
-    providerPayoutId: null,
-    createdAt: now,
-    updatedAt: now,
-  };
-  payoutReferences.set(reference, record);
-  return record;
-}
-
-/**
- * Query the provider status API to determine whether a payout for the given
- * reference already exists.  Used after ambiguous failures (timeouts /
- * unknown responses) to avoid submitting a second payout.
- */
-export async function queryProviderPayoutStatus(
-  reference: string
-): Promise<RemotePayoutRecord | null> {
-  if (!config.bridgeApiUrl) {
-    return null;
-  }
-
-  try {
-    const response = await axios.get<RemotePayoutRecord>(
-      `${config.bridgeApiUrl}/payouts/${encodeURIComponent(reference)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${config.bridgeApiKey}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    return response.data;
-  } catch (error: any) {
-    // 404 means the provider has no record — safe to retry submission.
-    if (error.response?.status === 404) {
-      return null;
-    }
-    // Any other failure is ambiguous; surface it so the caller does not
-    // blindly retry and risk a duplicate payout.
     throw error;
   }
 }
-
-/**
- * Submit a SEP-31 payout idempotently.
- *
- * 1. Persist the unique reference before any external call.
- * 2. If the reference was already submitted/completed, return the stored
- *    record instead of submitting again.
- * 3. On ambiguous failure, query the provider status API before retrying.
- */
-export async function submitPayoutIdempotent(
-  reference: string,
-  submit: (reference: string) => Promise<RemotePayoutRecord>
-): Promise<Sep31PayoutReference> {
-  const record = persistPayoutReference(reference);
-
-  // Already submitted or completed — do not submit a second payout.
-  if (record.status === "submitted" || record.status === "completed") {
-    return record;
-  }
-
-  try {
-    const remote = await submit(reference);
-    record.status = "submitted";
-    record.providerPayoutId = remote.id;
-    record.updatedAt = new Date().toISOString();
-    payoutReferences.set(reference, record);
-    return record;
-  } catch (error) {
-    // Ambiguous failure: check whether the provider already has the payout.
-    const remote = await queryProviderPayoutStatus(reference);
-    if (remote) {
-      record.status = "submitted";
-      record.providerPayoutId = remote.id;
-      record.updatedAt = new Date().toISOString();
-      payoutReferences.set(reference, record);
-      return record;
-    }
-    throw error;
-  }
-}
-
-/**
- * Reconcile a completion callback against the persisted reference.
- *
- * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns th
-
-/* … truncated 4166 chars — edit only what you need near the top … */

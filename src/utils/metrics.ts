@@ -601,3 +601,11 @@ export const notificationSystemUp = new Gauge({
   help: "1 when every notification channel is healthy, 0 otherwise",
   registers: [register],
 });
+
+// AML / SAR Metrics
+export const sarGenerationFailuresTotal = new Counter({
+  name: "aml_sar_generation_failures_total",
+  help: "SAR auto-preparation failures (enqueue errors, failed attempts, exhausted retries)",
+  labelNames: ["stage"],
+  registers: [register],
+});

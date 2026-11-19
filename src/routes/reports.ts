@@ -416,7 +416,7 @@ reportsRoutes.get(
         );
       }
 
-      const report = amlService.generateReport(startDate, endDate);
+      const report = await amlService.generateReport(startDate, endDate);
       return res.json(report);
     } catch (error) {
       console.error("Error generating AML report:", error);

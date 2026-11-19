@@ -374,7 +374,32 @@ export async function deactivateUserAccount(userId: string, dbPool?: Pool) {
 
     // await pool.query(`DELETE FROM user_api_keys WHERE user_id = $1`, [userId]);
 
-    // 5. Archive transaction history (optional: 
+    // 5. Archive transaction history (optional: keep for compliance)
+    // await pool.query(
+    //   `UPDATE user_transactions
+    //    SET user_id = NULL, anonymized = true
+    //    WHERE user_id = $1`,
+    //   [userId],
+    // );
+
+    // 6. Log the deactivation
+    // await pool.query(
+    //   `INSERT INTO audit_log (action, user_id, timestamp)
+    //    VALUES ($1, $2, CURRENT_TIMESTAMP)`,
+    //   ["account_deactivated", userId],
+    // );
+
+    await client.query("COMMIT");
+  } catch (err) {
+    if (client) {
+      await client.query("ROLLBACK");
+    }
+    console.error("deactivateUserAccount error:", err);
+    throw err;
+  } finally {
+    if (client) client.release();
+  }
+}
 
 export async function invalidateUserOnPasswordChange(userId: string): Promise<void> {
   const userModel = new UserModel();

@@ -61,6 +61,7 @@ import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 import { logBulkAdminAudit, searchAuditLogs } from "../utils/log-audit-event";
+import logger from "../utils/logger";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -162,11 +163,10 @@ const logImpersonationAuditEvent = (
   req: Request,
   details: Record<string, unknown>,
 ) => {
-  console.log("[ADMIN IMPERSONATION]", {
-    event,
-    ...buildAuditContext(req),
-    ...details,
-  });
+  logger.info(
+    { ...buildAuditContext(req), ...details, event },
+    "Admin impersonation event",
+  );
 };
 
 /**

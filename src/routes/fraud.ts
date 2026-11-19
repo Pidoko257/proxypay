@@ -17,6 +17,11 @@ fraudRoutes.get('/history/:userId', requireAuth, async (req: Request, res: Respo
   try {
     const { userId } = req.params;
 
+    if (req.jwtUser?.userId !== userId && req.userRole !== 'admin') {
+      res.status(403).json({ error: 'Forbidden: cannot access another user\'s fraud history' });
+      return;
+    }
+
     const pagination = parseRequestPagination(req, res);
     if (!pagination) {
       return;

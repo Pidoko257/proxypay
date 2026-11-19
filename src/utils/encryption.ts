@@ -20,8 +20,24 @@ export interface EncryptedPayload {
 // ---------------------------------------------------------------------------
 
 /**
+ * Returns the secret HKDF salt from configuration.
+ *
+ * The salt is deliberately read from the environment rather than hard-coded so
+ * it can be treated as a secret and rotated independently of the source code.
+ * There is no plaintext fallback: a missing salt is a fatal misconfiguration.
+ */
+function getHkdfSalt(): Buffer {
+  const salt = env.DB_ENCRYPTION_HKDF_SALT;
+  if (!salt) {
+    throw new Error("DB_ENCRYPTION_HKDF_SALT is not configured — refusing to derive encryption keys");
+  }
+  return Buffer.from(salt, "utf8");
+}
+
+/**
  * Derives a 32-byte AES key from raw key material using HKDF-SHA-256.
- * Deterministic — same inputs always produce the same key.
+ * Deterministic — same inputs (and the same DB_ENCRYPTION_HKDF_SALT) always
+ * produce the same key.
  *
  * @param keyMaterial  Raw key material (env var value or per-user secret)
  * @param info         Context label that domain-separates derived keys
@@ -29,7 +45,7 @@ export interface EncryptedPayload {
 export function deriveKey(keyMaterial: string, info = "pii-encryption"): Buffer {
   const ikm = Buffer.from(keyMaterial, "utf8");
   // HKDF extract
-  const prk = crypto.createHmac("sha256", "proxypay-hkdf-salt").update(ikm).digest();
+  const prk = crypto.createHmac("sha256", getHkdfSalt()).update(ikm).digest();
   // HKDF expand (single block — 32 bytes is exactly one SHA-256 output)
   const infoBuffer = Buffer.from(info, "utf8");
   const t = crypto.createHmac("sha256", prk)

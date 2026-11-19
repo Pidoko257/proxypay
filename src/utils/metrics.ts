@@ -611,3 +611,13 @@ export const jobFailuresTotal = new Counter({
   labelNames: ["job_name"],
   registers: [register],
 });
+
+/**
+ * Background workers (e.g. NotificationWorker) that failed to start.
+ */
+export const workerStartFailuresTotal = new Counter({
+  name: "worker_start_failures_total",
+  help: "Total number of background worker startup failures",
+  labelNames: ["worker_name"],
+  registers: [register],
+});

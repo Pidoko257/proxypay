@@ -46,7 +46,12 @@ import { runNotificationHealthCheckJob } from "./notificationHealthCheckJob";
 import { runComplianceExpiryAlertJob } from "./complianceExpiryAlertJob";
 import { runProviderSessionRefreshJob } from "./providerSessionRefreshJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
-import { JobConfig, runJob, setJobFailureAlerting } from "./jobRunner";
+import {
+  JobConfig,
+  handleWorkerStartFailure,
+  runJob,
+  setJobFailureAlerting,
+} from "./jobRunner";
 
 const JOBS: JobConfig[] = [
   {
@@ -267,7 +272,7 @@ export function startJobs(): void {
   // Start the notification worker which listens for Redis pub/sub events
   // and drives user-facing notifications in real-time. This replaces any
   // DB-polling notification mechanisms.
-  startNotificationWorker().catch((err) => {
-    console.warn("Failed to start NotificationWorker:", err);
-  });
+  startNotificationWorker().catch((err) =>
+    handleWorkerStartFailure("NotificationWorker", err),
+  );
 }

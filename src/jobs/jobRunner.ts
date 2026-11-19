@@ -1,6 +1,6 @@
 import type { PagerDutyService } from "../services/pagerDutyService";
 import logger from "../utils/logger";
-import { jobFailuresTotal } from "../utils/metrics";
+import { jobFailuresTotal, workerStartFailuresTotal } from "../utils/metrics";
 
 export interface JobConfig {
   name: string;
@@ -56,4 +56,39 @@ export async function runJob(
         );
     }
   }
+}
+
+/**
+ * Handle a background worker that failed to start. The app keeps running,
+ * so make the degraded state visible: increment
+ * worker_start_failures_total{worker_name}, log at error level, and page
+ * on-call via PagerDuty.
+ */
+export async function handleWorkerStartFailure(
+  workerName: string,
+  err: unknown,
+  alerting: PagerDutyService | null = failureAlerting,
+): Promise<void> {
+  workerStartFailuresTotal.inc({ worker_name: workerName });
+  logger.error(
+    { err, worker_name: workerName },
+    `[scheduler] ${workerName} failed to start`,
+  );
+
+  if (!alerting) return;
+  await alerting
+    .triggerAlert({
+      summary: `[CRITICAL] ${workerName} failed to start: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      dedupKey: `worker-start-failure-${workerName}`,
+      source: "proxypay-scheduler",
+      details: { worker_name: workerName },
+    })
+    .catch((alertErr) =>
+      logger.error(
+        { err: alertErr, worker_name: workerName },
+        "Failed to send PagerDuty alert for worker start failure",
+      ),
+    );
 }

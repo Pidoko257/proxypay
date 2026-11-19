@@ -1,5 +1,6 @@
 const loggerErrorMock = jest.fn();
 const jobFailuresIncMock = jest.fn();
+const workerStartFailuresIncMock = jest.fn();
 
 jest.mock("../../src/utils/logger", () => ({
   __esModule: true,
@@ -13,9 +14,16 @@ jest.mock("../../src/utils/logger", () => ({
 jest.mock("../../src/utils/metrics", () => ({
   ...jest.requireActual("../../src/utils/metrics"),
   jobFailuresTotal: { inc: (...args: unknown[]) => jobFailuresIncMock(...args) },
+  workerStartFailuresTotal: {
+    inc: (...args: unknown[]) => workerStartFailuresIncMock(...args),
+  },
 }));
 
-import { runJob, JobConfig } from "../../src/jobs/jobRunner";
+import {
+  handleWorkerStartFailure,
+  runJob,
+  JobConfig,
+} from "../../src/jobs/jobRunner";
 import type { PagerDutyService } from "../../src/services/pagerDutyService";
 
 function makePagerDuty() {
@@ -98,5 +106,39 @@ describe("runJob failure handling", () => {
       runJob(job, pd as unknown as PagerDutyService),
     ).resolves.toBeUndefined();
     expect(loggerErrorMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("handleWorkerStartFailure", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("increments the metric, logs at error level and pages on-call", async () => {
+    const pd = makePagerDuty();
+
+    await handleWorkerStartFailure(
+      "NotificationWorker",
+      new Error("redis unavailable"),
+      pd as unknown as PagerDutyService,
+    );
+
+    expect(workerStartFailuresIncMock).toHaveBeenCalledWith({
+      worker_name: "NotificationWorker",
+    });
+    expect(loggerErrorMock).toHaveBeenCalledTimes(1);
+    expect(pd.triggerAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dedupKey: "worker-start-failure-NotificationWorker",
+        summary: expect.stringContaining("redis unavailable"),
+      }),
+    );
+  });
+
+  it("still records the failure when PagerDuty is not configured", async () => {
+    await expect(
+      handleWorkerStartFailure("NotificationWorker", new Error("x"), null),
+    ).resolves.toBeUndefined();
+
+    expect(workerStartFailuresIncMock).toHaveBeenCalledTimes(1);
+    expect(loggerErrorMock).toHaveBeenCalledTimes(1);
   });
 });

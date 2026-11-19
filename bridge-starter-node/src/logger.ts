@@ -114,3 +114,89 @@ export default logger;
 export function childLogger(bindings: Record<string, unknown>): Logger {
   return logger.child(bindings);
 }
+
+/**
+ * Bounded error-code taxonomy for provider failures.
+ *
+ * Prometheus labels must stay low-cardinality, so provider failures are
+ * mapped to this small fixed set of codes instead of free-form error
+ * reasons. Free-form details belong in structured logs (see
+ * `logProviderFailure`), never in metric labels.
+ */
+export const PROVIDER_ERROR_CODES = [
+  "timeout",
+  "connection",
+  "rate_limited",
+  "auth",
+  "bad_request",
+  "server_error",
+  "invalid_response",
+  "unknown",
+] as const;
+
+export type ProviderErrorCode = (typeof PROVIDER_ERROR_CODES)[number];
+
+/**
+ * Map an arbitrary provider failure to a bounded error code.
+ *
+ * Accepts an Error, a string reason, or an HTTP status code and returns one
+ * of the fixed `PROVIDER_ERROR_CODES`. Anything unrecognised collapses to
+ * "unknown" so the label set can never grow unbounded.
+ */
+export function toProviderErrorCode(
+  failure: unknown,
+  status?: number,
+): ProviderErrorCode {
+  if (typeof status === "number") {
+    if (status === 401 || status === 403) return "auth";
+    if (status === 408 || status === 504) return "timeout";
+    if (status === 429) return "rate_limited";
+    if (status >= 400 && status < 500) return "bad_request";
+    if (status >= 500) return "server_error";
+  }
+
+  const raw =
+    failure instanceof Error
+      ? `${failure.name} ${failure.message}`
+      : typeof failure === "string"
+        ? failure
+        : "";
+  const text = raw.toLowerCase();
+
+  if (!text) return "unknown";
+  if (/timeout|timed out|etimedout|deadline/.test(text)) return "timeout";
+  if (/econnrefused|econnreset|enotfound|eai_again|socket|network|connection/.test(text))
+    return "connection";
+  if (/rate.?limit|too many requests|429/.test(text)) return "rate_limited";
+  if (/unauthor|forbidden|invalid.?api.?key|401|403/.test(text)) return "auth";
+  if (/invalid.?response|parse|malformed|unexpected.?payload/.test(text))
+    return "invalid_response";
+  if (/bad.?request|validation|400/.test(text)) return "bad_request";
+  if (/server.?error|internal|5\d\d/.test(text)) return "server_error";
+
+  return "unknown";
+}
+
+/**
+ * Log a provider failure with its bounded error code plus the free-form
+ * details. The bounded code is safe to use as a Prometheus label; the
+ * free-form `reason`/`error` fields stay in structured logs only.
+ */
+export function logProviderFailure(
+  provider: string,
+  failure: unknown,
+  status?: number,
+): ProviderErrorCode {
+  const code = toProviderErrorCode(failure, status);
+  logger.error(
+    {
+      provider,
+      errorCode: code,
+      status,
+      reason: failure instanceof Error ? failure.message : failure,
+      err: failure instanceof Error ? failure : undefined,
+    },
+    "Provider failure",
+  );
+  return code;
+}

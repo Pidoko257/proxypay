@@ -25,6 +25,242 @@ import type {
   ReconciliationReport,
 } from "../types/reconciliation";
 
+// ─── Per-workload queue policies & backpressure ──────────────────────────────
+
+/**
+ * Workloads that share the queue infrastructure but have very different
+ * resource and provider constraints.  Each gets its own bounded policy so a
+ * burst in one workload cannot starve or overload the others.
+ */
+export type QueueWorkload = "payment" | "reconciliation" | "notification";
+
+/**
+ * Admission behavior applied when a queue is at capacity.
+ *
+ * - `reject`  : fail fast — the caller must handle the rejection.
+ * - `defer`   : hold the job until capacity frees up (bounded wait).
+ * - `drop-oldest`: evict the oldest queued job to admit the new one.
+ */
+export type AdmissionBehavior = "reject" | "defer" | "drop-oldest";
+
+/**
+ * Bounded queue policy for a single workload.
+ *
+ * `concurrency` caps in-flight jobs, `capacity` caps queued (waiting) jobs,
+ * and `rateBudget` caps provider calls per rolling window so downstream
+ * dependencies are never overwhelmed.
+ */
+export interface QueuePolicy {
+  workload: QueueWorkload;
+  concurrency: number;
+  capacity: number;
+  /** Max provider calls allowed within `rateWindowMs`. */
+  rateBudget: number;
+  rateWindowMs: number;
+  admission: AdmissionBehavior;
+  /** Max time a `defer` admission will wait for capacity before rejecting. */
+  deferTimeoutMs: number;
+}
+
+/**
+ * Distinct, bounded policies per workload.
+ *
+ * - payment:        low concurrency, tight provider budget (money movement).
+ * - reconciliation: moderate concurrency, batch-friendly, defers on pressure.
+ * - notification:   high concurrency, cheap provider, drops oldest on pressure.
+ */
+export const QUEUE_POLICIES: Record<QueueWorkload, QueuePolicy> = {
+  payment: {
+    workload: "payment",
+    concurrency: 4,
+    capacity: 100,
+    rateBudget: 20,
+    rateWindowMs: 1_000,
+    admission: "reject",
+    deferTimeoutMs: 0,
+  },
+  reconciliation: {
+    workload: "reconciliation",
+    concurrency: 8,
+    capacity: 500,
+    rateBudget: 50,
+    rateWindowMs: 1_000,
+    admission: "defer",
+    deferTimeoutMs: 5_000,
+  },
+  notification: {
+    workload: "notification",
+    concurrency: 32,
+    capacity: 2_000,
+    rateBudget: 200,
+    rateWindowMs: 1_000,
+    admission: "drop-oldest",
+    deferTimeoutMs: 0,
+  },
+};
+
+/** Visible saturation metrics for a single queue. */
+export interface QueueMetrics {
+  workload: QueueWorkload;
+  depth: number;
+  capacity: number;
+  active: number;
+  concurrency: number;
+  rejected: number;
+  deferred: number;
+  dropped: number;
+  /** depth / capacity, clamped to [0, 1]. */
+  saturation: number;
+}
+
+/** Error thrown when a queue rejects admission under backpressure. */
+export class QueueSaturatedError extends Error {
+  constructor(public readonly workload: QueueWorkload) {
+    super(`Queue "${workload}" is saturated and rejected admission`);
+    this.name = "QueueSaturatedError";
+  }
+}
+
+interface QueueState {
+  policy: QueuePolicy;
+  active: number;
+  waiting: Array<() => void>;
+  rejected: number;
+  deferred: number;
+  dropped: number;
+  /** Timestamps of provider calls within the current rate window. */
+  rateHits: number[];
+}
+
+const queueStates = new Map<QueueWorkload, QueueState>();
+
+function getQueueState(workload: QueueWorkload): QueueState {
+  let state = queueStates.get(workload);
+  if (!state) {
+    state = {
+      policy: QUEUE_POLICIES[workload],
+      active: 0,
+      waiting: [],
+      rejected: 0,
+      deferred: 0,
+      dropped: 0,
+      rateHits: [],
+    };
+    queueStates.set(workload, state);
+  }
+  return state;
+}
+
+function pruneRateWindow(state: QueueState, now: number): void {
+  const cutoff = now - state.policy.rateWindowMs;
+  while (state.rateHits.length > 0 && state.rateHits[0] <= cutoff) {
+    state.rateHits.shift();
+  }
+}
+
+/**
+ * Acquire a slot for a job under the workload's bounded policy.
+ *
+ * Enforces concurrency, queue capacity, provider rate budget, and the
+ * configured admission behavior.  Resolves once the job may run; the caller
+ * MUST invoke the returned `release` function when the job finishes.
+ */
+export async function acquireQueueSlot(
+  workload: QueueWorkload
+): Promise<() => void> {
+  const state = getQueueState(workload);
+  const { policy } = state;
+
+  // Provider rate budget — wait for the window to free up if exhausted.
+  for (;;) {
+    const now = Date.now();
+    pruneRateWindow(state, now);
+    if (state.rateHits.length < policy.rateBudget) {
+      state.rateHits.push(now);
+      break;
+    }
+    const waitMs = state.rateHits[0] + policy.rateWindowMs - now;
+    await new Promise((resolve) => setTimeout(resolve, Math.max(waitMs, 1)));
+  }
+
+  // Concurrency available — run immediately.
+  if (state.active < policy.concurrency) {
+    state.active += 1;
+    return makeRelease(state);
+  }
+
+  // At concurrency limit — apply admission behavior against queue capacity.
+  const depth = state.waiting.length;
+  if (depth >= policy.capacity) {
+    if (policy.admission === "drop-oldest" && depth > 0) {
+      const evicted = state.waiting.shift();
+      state.dropped += 1;
+      // The evicted waiter is released so its caller can observe the drop.
+      evicted?.();
+    } else if (policy.admission === "reject") {
+      state.rejected += 1;
+      throw new QueueSaturatedError(workload);
+    }
+  }
+
+  state.deferred += 1;
+  return new Promise<() => void>((resolve, reject) => {
+    let settled = false;
+    const onSlot = () => {
+      if (settled) return;
+      settled = true;
+      state.active += 1;
+      resolve(makeRelease(state));
+    };
+    state.waiting.push(onSlot);
+
+    if (policy.admission === "defer" && policy.deferTimeoutMs > 0) {
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const idx = state.waiting.indexOf(onSlot);
+        if (idx !== -1) state.waiting.splice(idx, 1);
+        state.rejected += 1;
+        reject(new QueueSaturatedError(workload));
+      }, policy.deferTimeoutMs);
+    }
+  });
+}
+
+function makeRelease(state: QueueState): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    state.active = Math.max(0, state.active - 1);
+    const next = state.waiting.shift();
+    if (next) next();
+  };
+}
+
+/** Snapshot saturation metrics for a single workload queue. */
+export function getQueueMetrics(workload: QueueWorkload): QueueMetrics {
+  const state = getQueueState(workload);
+  const depth = state.waiting.length;
+  const capacity = state.policy.capacity;
+  return {
+    workload,
+    depth,
+    capacity,
+    active: state.active,
+    concurrency: state.policy.concurrency,
+    rejected: state.rejected,
+    deferred: state.deferred,
+    dropped: state.dropped,
+    saturation: capacity > 0 ? Math.min(depth / capacity, 1) : 0,
+  };
+}
+
+/** Snapshot saturation metrics for every configured workload queue. */
+export function getAllQueueMetrics(): QueueMetrics[] {
+  return (Object.keys(QUEUE_POLICIES) as QueueWorkload[]).map(getQueueMetrics);
+}
+
 // ─── Transaction / consistency boundary ──────────────────────────────────────
 
 /**
@@ -248,158 +484,6 @@ export async function submitPayoutIdempotent(
  * Reconcile a completion callback against the persisted reference.
  *
  * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns the updated record, or `null`
- * when the callback references an unknown transaction.
- */
-export function reconcileCompletionCallback(
-  reference: string,
-  providerPayoutId: string,
-  status: "completed" | "failed"
-): Sep31PayoutReference | null {
-  const record = payoutReferences.get(reference);
-  if (!record) {
-    return null;
-  }
+ * they never create a second payout.  Returns th
 
-  // Ignore callbacks for a different provider payout (out-of-order / stale).
-  if (record.providerPayoutId && record.providerPayoutId !== providerPayoutId) {
-    return record;
-  }
-
-  // Terminal states are final — duplicate callbacks are no-ops.
-  if (record.status === "completed" || record.status === "failed") {
-    return record;
-  }
-
-  record.providerPayoutId = providerPayoutId;
-  record.status = status;
-  record.updatedAt = new Date().toISOString();
-  payoutReferences.set(reference, record);
-  return record;
-}
-
-// ─── Core reconciliation logic ───────────────────────────────────────────────
-
-/**
- * Compare a local record with its remote counterpart and produce a
- * `ReconciliationEntry` describing any discrepancy.
- */
-function compareRecords(
-  local: LocalPayoutRecord | null,
-  remote: RemotePayoutRecord | null
-): ReconciliationEntry {
-  // Record exists only on one side
-  if (!local) {
-    return {
-      payoutId: remote!.id,
-      localStatus: null,
-      remoteStatus: remote!.status,
-      localAmount: null,
-      remoteAmount: remote!.amount,
-      match: false,
-      discrepancy: "missing_local — record exists remotely but not locally",
-    };
-  }
-
-  if (!remote) {
-    return {
-      payoutId: local.id,
-      localStatus: local.status,
-      remoteStatus: null,
-      localAmount: local.amount,
-      remoteAmount: null,
-      match: false,
-      discrepancy: "missing_remote — record exists locally but not remotely",
-    };
-  }
-
-  // Both sides present — check for mismatches
-  const discrepancies: string[] = [];
-
-  if (local.status !== remote.status) {
-    discrepancies.push(
-      `status mismatch: local="${local.status}" remote="${remote.status}"`
-    );
-  }
-
-  if (local.amount !== remote.amount) {
-    discrepancies.push(
-      `amount mismatch: local=${local.amount} remote=${remote.amount}`
-    );
-  }
-
-  const match = discrepancies.length === 0;
-
-  return {
-    payoutId: local.id,
-    localStatus: local.status,
-    remoteStatus: remote.status,
-    localAmount: local.amount,
-    remoteAmount: remote.amount,
-    match,
-    discrepancy: match ? null : discrepancies.join("; "),
-  };
-}
-
-/**
- * Run a full reconciliation pass:
- *
- * 1. Fetch local and remote payout lists.
- * 2. Index both by payout ID.
- * 3. Walk the union of IDs and compare each pair.
- * 4. Return an aggregate `ReconciliationReport`.
- *
- * Reconciliation reads local state that may have just been written, so the
- * local read is pinned to the primary (read-after-write) unless the caller
- * supplies an explicit transaction client.
- */
-export async function reconcile(
-  options: ReadOptions = {}
-): Promise<ReconciliationReport> {
-  const localPayouts = await fetchLocalPayouts({
-    client: options.client,
-    primary: options.client ? options.primary : true,
-  });
-  const remotePayouts = await fetchRemotePayouts();
-
-  // Index by ID for O(1) lookups
-  const localMap = new Map(localPayouts.map((p) => [p.id, p]));
-  const remoteMap = new Map(remotePayouts.map((p) => [p.id, p]));
-
-  // Union of all payout IDs
-  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
-
-  const entries: ReconciliationEntry[] = [];
-  let matched = 0;
-  let mismatched = 0;
-  let missingLocal = 0;
-  let missingRemote = 0;
-
-  for (const id of allIds) {
-    const local = localMap.get(id) ?? null;
-    const remote = remoteMap.get(id) ?? null;
-    const entry = compareRecords(local, remote);
-    entries.push(entry);
-
-    if (entry.match) {
-      matched++;
-    } else if (!local) {
-      missingLocal++;
-    } else if (!remote) {
-      missingRemote++;
-    } else {
-      mismatched++;
-    }
-  }
-
-  return {
-    reconciledAt: new Date().toISOString(),
-    totalLocal: localPayouts.length,
-    totalRemote: remotePayouts.length,
-    matched,
-    mismatched,
-    missingLocal,
-    missingRemote,
-    entries,
-  };
-}
+/* … truncated 4166 chars — edit only what you need near the top … */

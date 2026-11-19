@@ -22,6 +22,20 @@ interface SorobanConfig {
   retryMaxDelayMs: number;
 }
 
+interface I18nConfig {
+  /** Locales that must have complete translations before deploy. */
+  requiredLocales: string[];
+  /** Default/fallback locale used by i18next. */
+  fallbackLocale: string;
+  /**
+   * Translation keys that must exist in every required locale. These cover
+   * critical payment/compliance messages that must never fall back at runtime.
+   */
+  requiredKeys: string[];
+  /** Emit an alert when i18next falls back for a critical key. */
+  alertOnCriticalFallback: boolean;
+}
+
 interface Config {
   port: number;
   bridgeApiUrl: string;
@@ -29,6 +43,7 @@ interface Config {
   webhookSecret: string;
   stellar: StellarConfig;
   soroban: SorobanConfig;
+  i18n: I18nConfig;
 }
 
 const STELLAR_NETWORKS: Record<
@@ -48,6 +63,19 @@ const STELLAR_NETWORKS: Record<
     networkPassphrase: "Test SDF Future Network ; October 2022",
   },
 };
+
+const DEFAULT_REQUIRED_LOCALES = ["en"];
+
+const DEFAULT_REQUIRED_KEYS = [
+  "payment.status.pending",
+  "payment.status.completed",
+  "payment.status.failed",
+  "payment.error.insufficient_funds",
+  "payment.error.invalid_destination",
+  "compliance.kyc.required",
+  "compliance.aml.flagged",
+  "compliance.disclaimer",
+];
 
 function resolveStellarNetwork(): StellarConfig["network"] {
   const raw = (process.env.STELLAR_NETWORK || "testnet").toLowerCase();
@@ -99,6 +127,26 @@ function resolvePositiveInt(name: string, fallback: number): number {
   return value;
 }
 
+function resolveList(name: string, fallback: string[]): string[] {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  const values = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  return values.length > 0 ? values : fallback;
+}
+
+function resolveBoolean(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  return raw.trim().toLowerCase() === "true";
+}
+
 const stellarNetwork = resolveStellarNetwork();
 const stellarNetworkDefaults = STELLAR_NETWORKS[stellarNetwork];
 
@@ -125,5 +173,11 @@ export const config: Config = {
     maxRetries: resolvePositiveInt("SOROBAN_MAX_RETRIES", 3),
     retryBaseDelayMs: resolvePositiveInt("SOROBAN_RETRY_BASE_DELAY_MS", 500),
     retryMaxDelayMs: resolvePositiveInt("SOROBAN_RETRY_MAX_DELAY_MS", 8_000),
+  },
+  i18n: {
+    requiredLocales: resolveList("I18N_REQUIRED_LOCALES", DEFAULT_REQUIRED_LOCALES),
+    fallbackLocale: process.env.I18N_FALLBACK_LOCALE || "en",
+    requiredKeys: resolveList("I18N_REQUIRED_KEYS", DEFAULT_REQUIRED_KEYS),
+    alertOnCriticalFallback: resolveBoolean("I18N_ALERT_ON_CRITICAL_FALLBACK", true),
   },
 };

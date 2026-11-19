@@ -66,6 +66,8 @@ const STELLAR_NETWORKS: Record<
   },
 };
 
+const isProduction = process.env.NODE_ENV === "production";
+
 function resolveStellarNetwork(): StellarConfig["network"] {
   const raw = (process.env.STELLAR_NETWORK || "testnet").toLowerCase();
   if (raw === "testnet" || raw === "public" || raw === "futurenet") {
@@ -116,6 +118,21 @@ function resolvePositiveInt(name: string, fallback: number): number {
   return value;
 }
 
+function resolveIntInRange(
+  name: string,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const value = resolvePositiveInt(name, fallback);
+  if (value < min || value > max) {
+    throw new Error(
+      `Invalid ${name} "${value}". Expected an integer between ${min} and ${max}.`
+    );
+  }
+  return value;
+}
+
 function resolveAdmissionBehavior(
   name: string,
   fallback: QueueAdmissionBehavior
@@ -136,17 +153,45 @@ function resolveQueuePolicy(
   prefix: string,
   defaults: QueuePolicy
 ): QueuePolicy {
+  const concurrency = resolveIntInRange(
+    `${prefix}_CONCURRENCY`,
+    defaults.concurrency,
+    1,
+    1_000
+  );
+  const capacity = resolveIntInRange(
+    `${prefix}_CAPACITY`,
+    defaults.capacity,
+    1,
+    1_000_000
+  );
+  const providerRatePerSecond = resolveIntInRange(
+    `${prefix}_PROVIDER_RATE_PER_SECOND`,
+    defaults.providerRatePerSecond,
+    1,
+    100_000
+  );
+  const providerRateBurst = resolveIntInRange(
+    `${prefix}_PROVIDER_RATE_BURST`,
+    defaults.providerRateBurst,
+    1,
+    100_000
+  );
+  if (providerRateBurst < providerRatePerSecond) {
+    throw new Error(
+      `Invalid ${prefix}_PROVIDER_RATE_BURST "${providerRateBurst}". Must be >= ${prefix}_PROVIDER_RATE_PER_SECOND (${providerRatePerSecond}).`
+    );
+  }
+  if (concurrency > capacity) {
+    throw new Error(
+      `Invalid ${prefix}_CONCURRENCY "${concurrency}". Must be <= ${prefix}_CAPACITY (${capacity}).`
+    );
+  }
   return {
-    concurrency: resolvePositiveInt(`${prefix}_CONCURRENCY`, defaults.concurrency),
-    capacity: resolvePositiveInt(`${prefix}_CAPACITY`, defaults.capacity),
-    providerRatePerSecond: resolvePositiveInt(
-      `${prefix}_PROVIDER_RATE_PER_SECOND`,
-      defaults.providerRatePerSecond
-    ),
-    providerRateBurst: resolvePositiveInt(
-      `${prefix}_PROVIDER_RATE_BURST`,
-      defaults.providerRateBurst
-    ),
+    concurrency,
+    capacity,
+    providerRatePerSecond,
+    providerRateBurst,
     admission: resolveAdmissionBehavior(
       `${prefix}_ADMISSION`,
       defaults.admission
@@ -154,14 +199,66 @@ function resolveQueuePolicy(
   };
 }
 
+function resolvePort(): number {
+  return resolveIntInRange("PORT", 3000, 1, 65_535);
+}
+
+function resolveSorobanConfig(): SorobanConfig {
+  const maxRetries = resolveIntInRange("SOROBAN_MAX_RETRIES", 3, 0, 100);
+  const retryBaseDelayMs = resolveIntInRange(
+    "SOROBAN_RETRY_BASE_DELAY_MS",
+    500,
+    1,
+    600_000
+  );
+  const retryMaxDelayMs = resolveIntInRange(
+    "SOROBAN_RETRY_MAX_DELAY_MS",
+    8_000,
+    1,
+    600_000
+  );
+  if (retryMaxDelayMs < retryBaseDelayMs) {
+    throw new Error(
+      `Invalid SOROBAN_RETRY_MAX_DELAY_MS "${retryMaxDelayMs}". Must be >= SOROBAN_RETRY_BASE_DELAY_MS (${retryBaseDelayMs}).`
+    );
+  }
+  return {
+    rpcUrl: process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
+    contractId: process.env.SOROBAN_CONTRACT_ID || "",
+    maxFeeStroops: resolveIntInRange("SOROBAN_MAX_FEE_STROOPS", 1_000_000, 1, 1_000_000_000),
+    maxInstructions: resolveIntInRange("SOROBAN_MAX_INSTRUCTIONS", 100_000_000, 1, 1_000_000_000),
+    maxCpuInsns: resolveIntInRange("SOROBAN_MAX_CPU_INSNS", 100_000_000, 1, 1_000_000_000),
+    maxMemoryBytes: resolveIntInRange("SOROBAN_MAX_MEMORY_BYTES", 41_943_040, 1, 1_073_741_824),
+    maxRetries,
+    retryBaseDelayMs,
+    retryMaxDelayMs,
+  };
+}
+
+function resolveRequiredInProduction(name: string, value: string): string {
+  if (isProduction && !value.trim()) {
+    throw new Error(`${name} is required in production.`);
+  }
+  return value;
+}
+
 const stellarNetwork = resolveStellarNetwork();
 const stellarNetworkDefaults = STELLAR_NETWORKS[stellarNetwork];
 
 export const config: Config = {
-  port: Number(process.env.PORT) || 3000,
-  bridgeApiUrl: process.env.BRIDGE_API_URL || "",
-  bridgeApiKey: process.env.BRIDGE_API_KEY || "",
-  webhookSecret: process.env.WEBHOOK_SECRET || "",
+  port: resolvePort(),
+  bridgeApiUrl: resolveRequiredInProduction(
+    "BRIDGE_API_URL",
+    process.env.BRIDGE_API_URL || ""
+  ),
+  bridgeApiKey: resolveRequiredInProduction(
+    "BRIDGE_API_KEY",
+    process.env.BRIDGE_API_KEY || ""
+  ),
+  webhookSecret: resolveRequiredInProduction(
+    "WEBHOOK_SECRET",
+    process.env.WEBHOOK_SECRET || ""
+  ),
   stellar: {
     network: stellarNetwork,
     horizonUrl: process.env.STELLAR_HORIZON_URL || stellarNetworkDefaults.horizonUrl,
@@ -170,17 +267,7 @@ export const config: Config = {
     assetCode: resolveAssetCode(),
     assetIssuer: resolveAssetIssuer(),
   },
-  soroban: {
-    rpcUrl: process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
-    contractId: process.env.SOROBAN_CONTRACT_ID || "",
-    maxFeeStroops: resolvePositiveInt("SOROBAN_MAX_FEE_STROOPS", 1_000_000),
-    maxInstructions: resolvePositiveInt("SOROBAN_MAX_INSTRUCTIONS", 100_000_000),
-    maxCpuInsns: resolvePositiveInt("SOROBAN_MAX_CPU_INSNS", 100_000_000),
-    maxMemoryBytes: resolvePositiveInt("SOROBAN_MAX_MEMORY_BYTES", 41_943_040),
-    maxRetries: resolvePositiveInt("SOROBAN_MAX_RETRIES", 3),
-    retryBaseDelayMs: resolvePositiveInt("SOROBAN_RETRY_BASE_DELAY_MS", 500),
-    retryMaxDelayMs: resolvePositiveInt("SOROBAN_RETRY_MAX_DELAY_MS", 8_000),
-  },
+  soroban: resolveSorobanConfig(),
   queues: {
     payment: resolveQueuePolicy("QUEUE_PAYMENT", {
       concurrency: 4,

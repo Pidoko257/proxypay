@@ -1,7 +1,25 @@
 import express, { Request, Response, NextFunction } from "express";
 import webhookRoutes from "./routes/webhook";
-import { config } from "./config/env";
+import { config, validateEnv } from "./config/env";
 import logger from "./logger";
+
+// ── Startup configuration validation ────────────────────────────────────────
+// Fail fast on invalid operational configuration before the server binds a
+// port. In production any validation error is fatal; in other environments
+// the error is logged loudly so misconfiguration is never silent.
+function assertValidConfig(): void {
+  const result = validateEnv(process.env);
+  if (result.ok) return;
+
+  const summary = result.errors.join("; ");
+  if (config.nodeEnv === "production") {
+    logger.error({ errors: result.errors }, "Invalid environment configuration");
+    throw new Error(`Invalid environment configuration: ${summary}`);
+  }
+  logger.warn({ errors: result.errors }, "Invalid environment configuration (non-production)");
+}
+
+assertValidConfig();
 
 // ── Shared typed error contract ─────────────────────────────────────────────
 // Stable, machine-readable error codes. These codes are part of the public
@@ -258,16 +276,12 @@ app.get(
 app.use("/api", webhookRoutes);
 
 // ── Shared error middleware ─────────────────────────────────────────────────
-// Maps expected domain errors (ApiError) to their stable status + code, and
-// falls back to a generic INTERNAL_ERROR for anything unexpected.
+// Maps ApiError to its stable status/code and everything else to a generic
+// 500 so internal details never leak to clients.
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ApiError) {
     const body: ErrorResponse = {
-      error: {
-        code: err.code,
-        message: err.message,
-        ...(err.details !== undefined ? { details: err.details } : {}),
-      },
+      error: { code: err.code, message: err.message, details: err.details },
     };
     res.status(err.status).json(body);
     return;
@@ -275,14 +289,9 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
   logger.error({ err }, "Unhandled error");
   const body: ErrorResponse = {
-    error: {
-      code: ErrorCode.INTERNAL_ERROR,
-      message: "Internal server error",
-    },
+    error: { code: ErrorCode.INTERNAL_ERROR, message: "Internal server error" },
   };
-  res.status(STATUS_BY_CODE[ErrorCode.INTERNAL_ERROR]).json(body);
+  res.status(500).json(body);
 });
 
-app.listen(config.port, () => {
-  logger.info({ port: config.port }, "Server started");
-});
+export default app;

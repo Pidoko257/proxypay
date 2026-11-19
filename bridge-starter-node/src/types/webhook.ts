@@ -26,7 +26,7 @@ export interface StellarTrustline {
   balance: string;
 }
 
-ex type StellarPayoutValidationErrorCode =
+export type StellarPayoutValidationErrorCode =
   | 'NETWORK_MISMATCH'
   | 'ASSET_ISSUER_MISMATCH'
   | 'ASSET_CODE_MISMATCH'
@@ -44,4 +44,24 @@ export interface StellarPayoutValidationError {
 export interface StellarPayoutValidationResult {
   valid: boolean;
   errors: StellarPayoutValidationError[];
+}
+
+export type CallbackProvider = 'stripe' | 'github' | 'generic';
+
+export type CallbackSignatureAlgorithm = 'sha256' | 'sha1' | 'sha512';
+
+export interface CallbackSignatureConfig {
+  provider: CallbackProvider;
+  secret: string;
+  algorithm: CallbackSignatureAlgorithm;
+  header: string;
+  encoding: 'hex' | 'base64';
+  prefix?: string;
+}
+
+export interface SignedCallbackFixture {
+  provider: CallbackProvider;
+  config: CallbackSignatureConfig;
+  rawBody: string;
+  headers: Record<string, string>;
 }

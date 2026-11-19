@@ -61,6 +61,8 @@ import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 import { logBulkAdminAudit, searchAuditLogs } from "../utils/log-audit-event";
+import logger from "../utils/logger";
+import { adminUnlock } from "../auth/lockout";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -128,12 +130,54 @@ const normalizeBulkIds = (value: unknown): string[] => {
 
 const MAX_BULK_IDS = 100;
 
-/**
- * Mock services (replace with real DB/services)
- */
-const users: User[] = [];
 const transactionModel = new TransactionModel();
 const complianceDocumentModel = new ComplianceDocumentModel();
+
+const DEFAULT_DASHBOARD_CONFIG: DashboardConfig = {
+  layout: "grid",
+  widgets: [],
+} as DashboardConfig;
+
+/**
+ * Wraps an async handler so rejected promises reach the Express error
+ * handler (Express 4 does not do this automatically).
+ */
+const asyncRoute =
+  (handler: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    handler(req, res).catch(next);
+  };
+
+const userNotFound = () =>
+  createError(ERROR_CODES.NOT_FOUND, "User not found", {
+    message: "User not found",
+  });
+
+/** Loads a user's dashboard config from the database (404 if user missing). */
+const loadDashboardConfig = async (userId: string): Promise<DashboardConfig> => {
+  const stored = await new UserModel().getDashboardConfig(userId);
+  if (stored === undefined) throw userNotFound();
+  return (stored as DashboardConfig | null) ?? DEFAULT_DASHBOARD_CONFIG;
+};
+
+/** Persists a user's dashboard config to the database (404 if user missing). */
+const saveDashboardConfig = async (
+  userId: string,
+  config: DashboardConfig,
+): Promise<void> => {
+  const updated = await new UserModel().updateDashboardConfig(userId, config);
+  if (!updated) throw userNotFound();
+};
+
+const requireActorId = (req: Request): string => {
+  const userId = (req as AuthRequest).user?.id;
+  if (!userId) {
+    throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+      message: "Authentication required",
+    });
+  }
+  return userId;
+};
 
 const isAdminRole = (role?: string) =>
   role === "admin" || role === "super-admin";
@@ -162,11 +206,10 @@ const logImpersonationAuditEvent = (
   req: Request,
   details: Record<string, unknown>,
 ) => {
-  console.log("[ADMIN IMPERSONATION]", {
-    event,
-    ...buildAuditContext(req),
-    ...details,
-  });
+  logger.info(
+    { ...buildAuditContext(req), ...details, event },
+    "Admin impersonation event",
+  );
 };
 
 /**
@@ -675,9 +718,9 @@ router.post(
   "/users/:id/impersonation-token",
   requireAdmin,
   requireSuperAdmin,
-  (req: Request, res: Response) => {
+  asyncRoute(async (req: Request, res: Response) => {
     const actor = (req as AuthRequest).user;
-    const targetUser = users.find((u) => u.id === req.params.id);
+    const targetUser = await new UserModel().findById(req.params.id);
     const reason =
       typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
 
@@ -772,7 +815,7 @@ router.post(
       },
       guidance: READ_ONLY_IMPERSONATION_MESSAGE,
     });
-  },
+  }),
 );
 
 // POST /api/admin/users/bulk/unlock
@@ -811,10 +854,11 @@ router.post(
       }
 
       const results: BulkActionResult[] = [];
+      const userModel = new UserModel();
 
       for (const userId of userIds) {
         try {
-          const user = users.find((u) => u.id === userId);
+          const user = await userModel.findById(userId);
           if (!user) {
             results.push({
               userId,
@@ -824,7 +868,7 @@ router.post(
             continue;
           }
 
-          user.locked = false;
+          await adminUnlock(user.phoneNumber, adminUser.id);
           results.push({ userId, status: "success" });
         } catch (error) {
           results.push({
@@ -872,19 +916,25 @@ router.put(
   "/users/:id",
   requireAdmin,
   logAdminAction("UPDATE_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  asyncRoute(async (req: Request, res: Response) => {
+    const userModel = new UserModel();
+    const existing = await userModel.findById(req.params.id);
 
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
+    if (!existing) throw userNotFound();
+
+    // Only explicitly supported fields may be changed; arbitrary body keys
+    // are ignored to prevent mass assignment (role, status, etc.).
+    const { email, displayName } = req.body ?? {};
+    if (typeof email === "string" && email.trim()) {
+      await userModel.updateEmail(existing.id, email.trim());
+    }
+    if (typeof displayName === "string" || displayName === null) {
+      await userModel.updateDisplayName(existing.id, displayName);
     }
 
-    Object.assign(user, req.body);
-
+    const user = await userModel.findById(existing.id);
     res.json({ message: "User updated", user });
-  },
+  }),
 );
 
 // POST /api/admin/users/:id/unlock
@@ -892,19 +942,15 @@ router.post(
   "/users/:id/unlock",
   requireAdmin,
   logAdminAction("UNLOCK_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  asyncRoute(async (req: Request, res: Response) => {
+    const user = await new UserModel().findById(req.params.id);
 
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
+    if (!user) throw userNotFound();
 
-    user.locked = false;
+    await adminUnlock(user.phoneNumber, (req as AuthRequest).user?.id);
 
     res.json({ message: "User account unlocked" });
-  },
+  }),
 );
 
 // POST /api/admin/users/:id/freeze
@@ -1126,25 +1172,14 @@ router.get(
   "/users/:id/dashboard-config",
   requireAdmin,
   logAdminAction("GET_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
-
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
-
-    const config = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
+  asyncRoute(async (req: Request, res: Response) => {
+    const config = await loadDashboardConfig(req.params.id);
 
     res.json({
-      userId: user.id,
+      userId: req.params.id,
       config,
     });
-  },
+  }),
 );
 
 // PUT /api/admin/users/:id/dashboard-config
@@ -1152,15 +1187,7 @@ router.put(
   "/users/:id/dashboard-config",
   requireAdmin,
   logAdminAction("UPDATE_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
-
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
-
+  asyncRoute(async (req: Request, res: Response) => {
     const { config } = req.body;
 
     // Validate the dashboard config against the JSON schema
@@ -1176,14 +1203,14 @@ router.put(
     }
 
     // Save the configuration
-    user.dashboard_config = config;
+    await saveDashboardConfig(req.params.id, config);
 
     res.json({
       message: "Dashboard configuration saved",
-      userId: user.id,
-      config: user.dashboard_config,
+      userId: req.params.id,
+      config,
     });
-  },
+  }),
 );
 
 // GET /api/admin/dashboard/config — get current user's dashboard config
@@ -1191,16 +1218,11 @@ router.get(
   "/dashboard/config",
   requireAdmin,
   logAdminAction("GET_MY_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
-    const user = users.find((u) => u.id === userId);
-    const config: DashboardConfig = user?.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
+    const config = await loadDashboardConfig(userId);
     res.json({ userId, config });
-  },
+  }),
 );
 
 // PUT /api/admin/dashboard/config — replace entire dashboard config
@@ -1208,9 +1230,8 @@ router.put(
   "/dashboard/config",
   requireAdmin,
   logAdminAction("PUT_MY_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { config } = req.body;
 
     if (!validateDashboardConfig(config)) {
@@ -1224,15 +1245,10 @@ router.put(
       );
     }
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
-    user.dashboard_config = config;
+    await saveDashboardConfig(userId, config);
 
     res.json({ message: "Dashboard configuration saved", userId, config });
-  },
+  }),
 );
 
 // PATCH /api/admin/dashboard/widgets/reorder — reorder widgets
@@ -1240,9 +1256,8 @@ router.patch(
   "/dashboard/widgets/reorder",
   requireAdmin,
   logAdminAction("REORDER_DASHBOARD_WIDGETS"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { fromIndex, toIndex } = req.body;
 
     if (typeof fromIndex !== "number" || typeof toIndex !== "number") {
@@ -1253,24 +1268,16 @@ router.patch(
       );
     }
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
+    const current = await loadDashboardConfig(userId);
 
-    const current: DashboardConfig = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
-
-    user.dashboard_config = reorderWidgets(current, fromIndex, toIndex);
+    const config = reorderWidgets(current, fromIndex, toIndex);
+    await saveDashboardConfig(userId, config);
     res.json({
       message: "Widgets reordered",
       userId,
-      config: user.dashboard_config,
+      config,
     });
-  },
+  }),
 );
 
 // PATCH /api/admin/dashboard/widgets/:widgetId/visibility — toggle visibility
@@ -1278,29 +1285,20 @@ router.patch(
   "/dashboard/widgets/:widgetId/visibility",
   requireAdmin,
   logAdminAction("TOGGLE_WIDGET_VISIBILITY"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { widgetId } = req.params;
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
+    const current = await loadDashboardConfig(userId);
 
-    const current: DashboardConfig = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
-
-    user.dashboard_config = toggleWidgetVisibility(current, widgetId);
+    const config = toggleWidgetVisibility(current, widgetId);
+    await saveDashboardConfig(userId, config);
     res.json({
       message: "Widget visibility toggled",
       userId,
-      config: user.dashboard_config,
+      config,
     });
-  },
+  }),
 );
 
 // PATCH /api/admin/dashboard/widgets/:widgetId/refresh-rate — set refresh rate
@@ -1308,9 +1306,8 @@ router.patch(
   "/dashboard/widgets/:widgetId/refresh-rate",
   requireAdmin,
   logAdminAction("SET_WIDGET_REFRESH_RATE"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { widgetId } = req.params;
     const { refreshRateSecs } = req.body;
 
@@ -1322,28 +1319,16 @@ router.patch(
       );
     }
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
+    const current = await loadDashboardConfig(userId);
 
-    const current: DashboardConfig = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
-
-    user.dashboard_config = setWidgetRefreshRate(
-      current,
-      widgetId,
-      refreshRateSecs,
-    );
+    const config = setWidgetRefreshRate(current, widgetId, refreshRateSecs);
+    await saveDashboardConfig(userId, config);
     res.json({
       message: "Widget refresh rate updated",
       userId,
-      config: user.dashboard_config,
+      config,
     });
-  },
+  }),
 );
 
 // provider balance route

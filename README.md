@@ -53,3 +53,6 @@ transaction, so application pool sizes can be larger. Set
 
 <!-- handsoff-issue-781 -->
 - #781: Retry external object deletion after database purge
+
+<!-- handsoff-issue-827 -->
+- #827: Make graceful shutdown honor a validated deadline

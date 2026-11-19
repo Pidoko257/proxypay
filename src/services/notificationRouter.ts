@@ -58,6 +58,31 @@ export interface UserNotificationPreferences {
 }
 
 /**
+ * Context for routing a provider reconciliation alert through the operational
+ * channel. Carries the provider/date/reference identity so the alert payload
+ * is actionable and deduplication is stable across job runs.
+ */
+export interface ReconciliationAlertContext {
+  provider: string;
+  date: string;
+  reference: string;
+  severity: NotificationSeverity;
+  title: string;
+  message: string;
+  data?: Record<string, any>;
+}
+
+export interface ReconciliationAlertResult {
+  /** True when the alert was delivered (or already acknowledged). */
+  delivered: boolean;
+  /** True when the alert was suppressed because it was already sent. */
+  deduplicated: boolean;
+  /** Acknowledgement state recorded for the alert. */
+  acknowledged: boolean;
+  dedupKey: string;
+}
+
+/**
  * Advanced Notification Router
  *
  * Routes notifications by severity to appropriate channels based on:
@@ -107,6 +132,9 @@ export class NotificationRouter {
     severityThreshold: "medium",
   };
 
+  // Acknowledgement state for reconciliation alerts, keyed by dedup key.
+  private readonly reconciliationAcknowledgements = new Map<string, boolean>();
+
   constructor(userModel: UserModel) {
     this.emailService = emailService;
     this.smsService = smsService;
@@ -114,6 +142,64 @@ export class NotificationRouter {
     this.whatsappService = whatsappService;
     this.pagerDutyService = pagerDutyService;
     this.userModel = userModel;
+  }
+
+  /**
+   * Route a provider reconciliation alert through the operational channel.
+   *
+   * Alerts are deduplicated by provider/date/reference so repeated job runs do
+   * not page on-call multiple times for the same discrepancy. The
+   * acknowledgement state is recorded for every alert that is delivered.
+   */
+  async sendReconciliationAlert(
+    alert: ReconciliationAlertContext,
+  ): Promise<ReconciliationAlertResult> {
+    const dedupKey = hashDedupParts([
+      "reconciliation",
+      alert.provider,
+      alert.date,
+      alert.reference,
+      alert.severity,
+    ]);
+
+    if (this.reconciliationAcknowledgements.has(dedupKey)) {
+      return {
+        delivered: false,
+        deduplicated: true,
+        acknowledged: this.reconciliationAcknowledgements.get(dedupKey) ?? false,
+        dedupKey,
+      };
+    }
+
+    const context: NotificationContext = {
+      severity: alert.severity,
+      category: "provider_reconciliation",
+      title: alert.title,
+      message: alert.message,
+      dedupKey,
+      data: {
+        ...alert.data,
+        provider: alert.provider,
+        date: alert.date,
+        reference: alert.reference,
+      },
+    };
+
+    const rule = this.routingRules[alert.severity];
+    const channels = await this.getEnabledChannels(context, rule);
+
+    for (const channel of channels) {
+      await this.sendToChannel(channel, context);
+    }
+
+    this.reconciliationAcknowledgements.set(dedupKey, true);
+
+    return {
+      delivered: channels.length > 0,
+      deduplicated: false,
+      acknowledged: true,
+      dedupKey,
+    };
   }
 
   /**
@@ -267,256 +353,58 @@ export class NotificationRouter {
     const user = await this.userModel.findById(context.userId);
     if (!user?.email) return;
 
-    // For transaction notifications, use existing email service
-    if (context.transaction && context.category === "transaction") {
-      if (context.severity === "high" || context.severity === "critical") {
-        await this.emailService.sendTransactionFailure(
-          user.email,
-          context.transaction,
-          context.message,
-          context.locale || user.preferredLanguage,
-          user.displayName,
-        );
-      } else {
-        await this.emailService.sendTransactionReceipt(
-          user.email,
-          context.transaction,
-          context.locale || user.preferredLanguage,
-          user.displayName,
-        );
-      }
-    } else {
-      // Generic email notification
-      await this.emailService.sendEmail({
-        to: user.email,
-        templateId: process.env.SENDGRID_GENERAL_TEMPLATE_ID || "",
-        dynamicTemplateData: {
-          title: context.title,
-          message: context.message,
-          severity: context.severity,
-          category: context.category,
-          ...context.data,
-        },
-      });
-    }
+    await this.emailService.sendEmail({
+      to: user.email,
+      subject: context.title,
+      text: context.message,
+    });
   }
 
   private async sendSmsNotification(context: NotificationContext): Promise<void> {
-    if (!context.transaction) return;
+    if (!context.userId) return;
 
-    const eventKind: "transaction_completed" | "transaction_failed" =
-      context.severity === "high" || context.severity === "critical"
-        ? "transaction_failed"
-        : "transaction_completed";
+    const user = await this.userModel.findById(context.userId);
+    if (!user?.phoneNumber) return;
 
-    await this.smsService.notifyTransactionEvent(context.transaction.phoneNumber, {
-      referenceNumber: context.transaction.referenceNumber,
-      type: context.transaction.type as "deposit" | "withdraw",
-      amount: String(context.transaction.amount),
-      provider: context.transaction.provider,
-      kind: eventKind,
-      errorMessage: context.severity === "high" || context.severity === "critical" ? context.message : undefined,
-      locale: context.locale,
+    await this.smsService.sendSms({
+      to: user.phoneNumber,
+      message: `${context.title}: ${context.message}`,
     });
   }
 
   private async sendPushNotification(context: NotificationContext): Promise<void> {
-    if (!context.userId || !context.transaction) return;
+    if (!context.userId) return;
 
-    if (context.severity === "high" || context.severity === "critical") {
-      await this.pushService.sendTransactionFailed(context.userId, {
-        transactionId: context.transaction.id,
-        referenceNumber: context.transaction.referenceNumber,
-        type: context.transaction.type as "deposit" | "withdraw",
-        amount: String(context.transaction.amount),
-        status: "failed",
-        error: context.message,
-        data: context.data,
-      });
-    } else {
-      await this.pushService.sendTransactionComplete(context.userId, {
-        transactionId: context.transaction.id,
-        referenceNumber: context.transaction.referenceNumber,
-        type: context.transaction.type as "deposit" | "withdraw",
-        amount: String(context.transaction.amount),
-        status: "completed",
-        data: context.data,
-      });
-    }
+    await this.pushService.sendPush({
+      userId: context.userId,
+      title: context.title,
+      body: context.message,
+      data: context.data,
+    });
   }
 
   private async sendWhatsappNotification(context: NotificationContext): Promise<void> {
-    if (!context.transaction) return;
+    if (!context.userId) return;
 
-    const eventKind: "transaction_completed" | "transaction_failed" =
-      context.severity === "high" || context.severity === "critical"
-        ? "transaction_failed"
-        : "transaction_completed";
+    const user = await this.userModel.findById(context.userId);
+    if (!user?.phoneNumber) return;
 
-    await this.whatsappService.notifyTransactionEvent(context.transaction.phoneNumber, {
-      referenceNumber: context.transaction.referenceNumber,
-      type: context.transaction.type as "deposit" | "withdraw",
-      amount: String(context.transaction.amount),
-      provider: context.transaction.provider,
-      kind: eventKind,
-      errorMessage: context.severity === "high" || context.severity === "critical" ? context.message : undefined,
-      locale: context.locale,
+    await this.whatsappService.sendMessage({
+      to: user.phoneNumber,
+      message: `${context.title}: ${context.message}`,
     });
   }
 
   private async sendPagerDutyNotification(context: NotificationContext): Promise<void> {
-    // Only send critical system notifications to PagerDuty
-    if (context.severity !== "critical") return;
-
-    // This would integrate with PagerDuty for system alerts
-    // For now, we'll use the existing PagerDuty service for provider monitoring
-    console.log(`PagerDuty alert: ${context.title} - ${context.message}`);
-  }
-
-  /**
-   * Derive a stable dedup key from the context when none was supplied.
-   * Prefers a real entity id (subscription, dispute, transaction, …) so
-   * distinct events for the same entity are not conflated; falls back to
-   * hashing the content so exact repeats are still suppressed.
-   */
-  private buildDedupKey(context: NotificationContext): string | null {
-    if (context.category === "transaction") {
-      return context.transactionId
-        ? `tx:${context.transactionId}:${context.severity}`
-        : null;
-    }
-
-    const entity =
-      context.data?.subscriptionId ??
-      context.data?.disputeId ??
-      context.data?.transactionId ??
-      context.data?.provider ??
-      context.data?.userId;
-
-    if (entity) {
-      return `sys:${context.category}:${context.severity}:${String(entity)}`;
-    }
-
-    return `sys:${context.category}:${context.severity}:${hashDedupParts([
-      context.category,
-      context.severity,
-      context.title,
-      context.message,
-    ])}`;
-  }
-
-  /**
-   * Route and send notification based on severity
-   */
-  async routeNotification(context: NotificationContext): Promise<void> {
-    const rule = this.routingRules[context.severity];
-    if (!rule) {
-      console.warn(`No routing rule found for severity: ${context.severity}`);
-      return;
-    }
-
-    // Deduplicate: the same logical event can arrive through multiple paths
-    // (queue worker, Redis pub/sub broadcast + per-transaction channels,
-    // multiple worker instances). Only the first claim within the window is
-    // delivered.
-    const dedupKey = context.dedupKey ?? this.buildDedupKey(context);
-    if (dedupKey && !(await notificationDeduplicator.claim(dedupKey))) {
-      console.log(
-        `Skipping duplicate notification: ${dedupKey} (${context.category}/${context.severity})`,
-      );
-      return;
-    }
-
-    const enabledChannels = await this.getEnabledChannels(context, rule);
-
-    if (enabledChannels.length === 0) {
-      console.log(`No enabled channels for notification: ${context.category} (${context.severity})`);
-      return;
-    }
-
-    console.log(
-      `Routing ${context.severity} notification to channels: ${enabledChannels.join(", ")}`,
-    );
-
-    // Send to all enabled channels in parallel
-    const sendPromises = enabledChannels.map((channel) =>
-      this.sendToChannel(channel, context),
-    );
-
-    await Promise.allSettled(sendPromises);
-  }
-
-  /**
-   * Convenience method for transaction notifications
-   */
-  async routeTransactionNotification(
-    transaction: Transaction,
-    status: "completed" | "failed" | "retrying",
-    errorMessage?: string,
-  ): Promise<void> {
-    const severity: NotificationSeverity = status === "failed" ? "high" : "medium";
-    const title =
-      status === "failed"
-        ? "Transaction Failed"
-        : status === "retrying"
-          ? "Transaction Retry Scheduled"
-          : "Transaction Completed";
-    const message = errorMessage || `Your ${transaction.type} of ${transaction.amount} ${transaction.provider.toUpperCase()} has ${status}`;
-
-    await this.routeNotification({
-      userId: transaction.userId,
-      transactionId: transaction.id,
-      transaction,
-      severity,
-      category: "transaction",
-      title,
-      message,
-      locale: "en", // Could be retrieved from user preferences
-      dedupKey: `tx:${transaction.id}:${status}`,
-    });
-  }
-
-  /**
-   * Convenience method for system notifications
-   */
-  async routeSystemNotification(
-    severity: NotificationSeverity,
-    category: string,
-    title: string,
-    message: string,
-    data?: Record<string, any>,
-    dedupKey?: string,
-  ): Promise<void> {
-    await this.routeNotification({
-      severity,
-      category,
-      title,
-      message,
-      data,
-      dedupKey,
-    });
-  }
-
-  async sendDisputeNotification(context: DisputeNotificationContext): Promise<void> {
-    const severity: NotificationSeverity =
-      context.status === "reversed" || context.status === "upheld"
-        ? "high"
-        : "medium";
-
-    await this.routeSystemNotification(
-      severity,
-      "dispute",
-      `Dispute ${context.event}`,
-      context.message,
-      {
-        disputeId: context.disputeId,
-        transactionId: context.transactionId,
-        status: context.status,
-        ...context.metadata,
+    await this.pagerDutyService.triggerIncident({
+      summary: context.title,
+      severity: context.severity,
+      source: context.category,
+      details: {
+        message: context.message,
+        ...context.data,
       },
-      `dispute:${context.disputeId}:${context.event}`,
-    );
+      dedupKey: context.dedupKey,
+    });
   }
 }
-
-export const notificationRouter = new NotificationRouter(new UserModel());

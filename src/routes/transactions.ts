@@ -216,6 +216,7 @@ transactionRoutes.post(
 
 transactionRoutes.get(
   "/",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   getTransactionHistoryHandler,
@@ -223,6 +224,7 @@ transactionRoutes.get(
 
 transactionRoutes.get(
   "/search",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   searchTransactionsHandler,
@@ -263,106 +265,6 @@ transactionRoutes.post(
   authenticateToken,
   checkAccountStatusStrict,
   geoFencingMiddleware,
-  TimeoutPresets.long,
-  haltOnTimedout,
-  normalizeProvider,
-  validateTransaction,
-  validateNetworkMiddleware,
-  geolocateMiddleware,
-  withdrawHandler,
-);
+  TimeoutPresets.long
 
-/**
- * Refund a failed or disputed transaction by posting a compensating ledger
- * transaction and moving it to the reversed state.
- */
-transactionRoutes.post(
-  "/:id/refund",
-  authenticateToken,
-  requirePermission("dispute:manage"),
-  async (req: Request, res: Response) => {
-    const reason = req.body?.reason;
-    if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
-      throw createError(
-        ERROR_CODES.INVALID_INPUT,
-        'Field "reason" is required and must be a non-empty string',
-        { error: 'Field "reason" is required and must be a non-empty string' },
-      );
-    }
-
-    try {
-      const result = await transactionReversalService.reverse(
-        req.params.id,
-        reason.trim(),
-        req.user?.id,
-      );
-      return res.json({
-        transaction: result.transaction,
-        alreadyRefunded: result.reversal.alreadyReversed,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Refund failed";
-      const code = message.includes("not found")
-        ? ERROR_CODES.NOT_FOUND
-        : message.includes("Cannot reverse") || message.includes("No ledger")
-          ? ERROR_CODES.UNPROCESSABLE_CONTENT
-          : ERROR_CODES.INTERNAL_ERROR;
-      throw createError(code, message, { error: message });
-    }
-  },
-);
-
-transactionRoutes.get(
-  "/:id",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  getTransactionHandler,
-);
-
-transactionRoutes.post(
-  "/:id/cancel",
-  authenticateToken,
-  cancelTransactionRateLimiter,
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  cancelTransactionHandler,
-);
-
-transactionRoutes.patch(
-  "/:id/notes",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  updateNotesHandler,
-);
-
-// Replace metadata
-transactionRoutes.put(
-  "/:id/metadata",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  updateMetadataHandler,
-);
-
-// Merge metadata keys
-transactionRoutes.patch(
-  "/:id/metadata",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  patchMetadataHandler,
-);
-
-// Delete metadata keys
-transactionRoutes.delete(
-  "/:id/metadata",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  deleteMetadataKeysHandler,
-);
-
-// Search by metadata
-transactionRoutes.post(
-  "/search/metadata",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  searchByMetadataHandler,
-);
+/* … truncated 2400 chars — edit only what you need near the top … */

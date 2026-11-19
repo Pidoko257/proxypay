@@ -1279,7 +1279,7 @@ export const listAmlAlertsHandler = async (req: Request, res: Response) => {
       });
     }
 
-    const alerts = amlService.getAlerts({
+    const alerts = await amlService.getAlerts({
       status: statusFilter as
         | "pending_review"
         | "reviewed"
@@ -1331,7 +1331,7 @@ export const reviewAmlAlertHandler = async (req: Request, res: Response) => {
       });
     }
 
-    const updated = amlService.reviewAlert(alertId, {
+    const updated = await amlService.reviewAlert(alertId, {
       status,
       reviewedBy,
       reviewNotes,

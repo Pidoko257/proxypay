@@ -78,6 +78,64 @@ export class AMLAlertModel {
     return this.mapRow(result.rows[0]);
   }
 
+  /**
+   * Return every alert matching the filter (no pagination), newest first.
+   * Used for compliance reporting and SAR collation where a truncated set
+   * would be incorrect.
+   */
+  async findAll(
+    filter: Pick<AMLAlertFilter, "status" | "userId" | "severity" | "startDate" | "endDate"> = {},
+  ): Promise<AMLAlert[]> {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter.status) {
+      params.push(filter.status);
+      conditions.push(`status = $${params.length}`);
+    }
+    if (filter.userId) {
+      params.push(filter.userId);
+      conditions.push(`user_id = $${params.length}`);
+    }
+    if (filter.severity) {
+      params.push(filter.severity);
+      conditions.push(`severity = $${params.length}`);
+    }
+    if (filter.startDate) {
+      params.push(filter.startDate);
+      conditions.push(`created_at >= $${params.length}`);
+    }
+    if (filter.endDate) {
+      params.push(filter.endDate);
+      conditions.push(`created_at <= $${params.length}`);
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const query = `
+      SELECT
+        id,
+        transaction_id AS "transactionId",
+        user_id AS "userId",
+        severity,
+        status,
+        rule_hits AS "ruleHits",
+        reasons,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        reviewed_at AS "reviewedAt",
+        reviewed_by AS "reviewedBy",
+        review_notes AS "reviewNotes"
+      FROM aml_alerts
+      ${whereClause}
+      ORDER BY created_at DESC, id DESC
+    `;
+
+    const result = await pool.query(query, params);
+    return result.rows.map((row) => this.mapRow(row));
+  }
+
   async findById(id: string): Promise<AMLAlert | null> {
     const query = `
       SELECT

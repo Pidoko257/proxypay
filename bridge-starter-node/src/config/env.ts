@@ -22,6 +22,22 @@ interface SorobanConfig {
   retryMaxDelayMs: number;
 }
 
+type QueueAdmissionBehavior = "reject" | "defer";
+
+interface QueuePolicy {
+  concurrency: number;
+  capacity: number;
+  providerRatePerSecond: number;
+  providerRateBurst: number;
+  admission: QueueAdmissionBehavior;
+}
+
+interface QueueConfig {
+  payment: QueuePolicy;
+  reconciliation: QueuePolicy;
+  notification: QueuePolicy;
+}
+
 interface Config {
   port: number;
   bridgeApiUrl: string;
@@ -29,6 +45,7 @@ interface Config {
   webhookSecret: string;
   stellar: StellarConfig;
   soroban: SorobanConfig;
+  queues: QueueConfig;
 }
 
 const STELLAR_NETWORKS: Record<
@@ -99,6 +116,44 @@ function resolvePositiveInt(name: string, fallback: number): number {
   return value;
 }
 
+function resolveAdmissionBehavior(
+  name: string,
+  fallback: QueueAdmissionBehavior
+): QueueAdmissionBehavior {
+  const raw = (process.env[name] || "").trim().toLowerCase();
+  if (raw === "") {
+    return fallback;
+  }
+  if (raw === "reject" || raw === "defer") {
+    return raw;
+  }
+  throw new Error(
+    `Invalid ${name} "${raw}". Expected one of: reject, defer.`
+  );
+}
+
+function resolveQueuePolicy(
+  prefix: string,
+  defaults: QueuePolicy
+): QueuePolicy {
+  return {
+    concurrency: resolvePositiveInt(`${prefix}_CONCURRENCY`, defaults.concurrency),
+    capacity: resolvePositiveInt(`${prefix}_CAPACITY`, defaults.capacity),
+    providerRatePerSecond: resolvePositiveInt(
+      `${prefix}_PROVIDER_RATE_PER_SECOND`,
+      defaults.providerRatePerSecond
+    ),
+    providerRateBurst: resolvePositiveInt(
+      `${prefix}_PROVIDER_RATE_BURST`,
+      defaults.providerRateBurst
+    ),
+    admission: resolveAdmissionBehavior(
+      `${prefix}_ADMISSION`,
+      defaults.admission
+    ),
+  };
+}
+
 const stellarNetwork = resolveStellarNetwork();
 const stellarNetworkDefaults = STELLAR_NETWORKS[stellarNetwork];
 
@@ -125,5 +180,28 @@ export const config: Config = {
     maxRetries: resolvePositiveInt("SOROBAN_MAX_RETRIES", 3),
     retryBaseDelayMs: resolvePositiveInt("SOROBAN_RETRY_BASE_DELAY_MS", 500),
     retryMaxDelayMs: resolvePositiveInt("SOROBAN_RETRY_MAX_DELAY_MS", 8_000),
+  },
+  queues: {
+    payment: resolveQueuePolicy("QUEUE_PAYMENT", {
+      concurrency: 4,
+      capacity: 500,
+      providerRatePerSecond: 20,
+      providerRateBurst: 40,
+      admission: "reject",
+    }),
+    reconciliation: resolveQueuePolicy("QUEUE_RECONCILIATION", {
+      concurrency: 2,
+      capacity: 200,
+      providerRatePerSecond: 5,
+      providerRateBurst: 10,
+      admission: "defer",
+    }),
+    notification: resolveQueuePolicy("QUEUE_NOTIFICATION", {
+      concurrency: 8,
+      capacity: 1_000,
+      providerRatePerSecond: 50,
+      providerRateBurst: 100,
+      admission: "defer",
+    }),
   },
 };

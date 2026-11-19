@@ -18,6 +18,49 @@ import type { ReconciliationReport } from "../types/reconciliation";
 /** Interval between reconciliation passes in loop mode (ms). */
 const LOOP_INTERVAL_MS = Number(process.env.RECONCILE_INTERVAL_MS) || 60_000;
 
+/**
+ * Bounded concurrency policy for the reconciliation workload.
+ *
+ * Reconciliation is provider-heavy and must not starve payment or
+ * notification queues, so it runs with a small concurrency budget and a
+ * bounded queue capacity. When the queue saturates, new passes are
+ * deferred (skipped) rather than piling up unbounded work.
+ */
+const RECONCILE_CONCURRENCY =
+  Number(process.env.RECONCILE_CONCURRENCY) || 2;
+const RECONCILE_QUEUE_CAPACITY =
+  Number(process.env.RECONCILE_QUEUE_CAPACITY) || 10;
+
+// ─── Saturation metrics ──────────────────────────────────────────────────────
+
+interface ReconcileQueueMetrics {
+  active: number;
+  depth: number;
+  capacity: number;
+  concurrency: number;
+  completed: number;
+  deferred: number;
+  rejected: number;
+}
+
+const metrics: ReconcileQueueMetrics = {
+  active: 0,
+  depth: 0,
+  capacity: RECONCILE_QUEUE_CAPACITY,
+  concurrency: RECONCILE_CONCURRENCY,
+  completed: 0,
+  deferred: 0,
+  rejected: 0,
+};
+
+function logMetrics(): void {
+  console.log(
+    `[reconciler] queue metrics → active: ${metrics.active}, depth: ${metrics.depth}/${metrics.capacity}, ` +
+      `concurrency: ${metrics.concurrency}, completed: ${metrics.completed}, ` +
+      `deferred: ${metrics.deferred}, rejected: ${metrics.rejected}`
+  );
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function printReport(report: ReconciliationReport): void {
@@ -66,18 +109,39 @@ function printReport(report: ReconciliationReport): void {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function runOnce(): Promise<void> {
+  // Admission control: defer when the queue is saturated.
+  if (metrics.active >= metrics.concurrency || metrics.depth >= metrics.capacity) {
+    metrics.deferred += 1;
+    console.warn(
+      "[reconciler] queue saturated — deferring reconciliation pass"
+    );
+    logMetrics();
+    return;
+  }
+
+  metrics.active += 1;
+  metrics.depth += 1;
+
   try {
     const report = await reconcile();
     printReport(report);
+    metrics.completed += 1;
   } catch (err) {
     console.error("[reconciler] Reconciliation failed:", err);
     process.exitCode = 1;
+  } finally {
+    metrics.active -= 1;
+    metrics.depth -= 1;
+    logMetrics();
   }
 }
 
 async function runLoop(): Promise<void> {
   console.log(
     `[reconciler] Starting reconciliation loop (interval: ${LOOP_INTERVAL_MS / 1000}s) …`
+  );
+  console.log(
+    `[reconciler] Bounded queue: concurrency=${RECONCILE_CONCURRENCY}, capacity=${RECONCILE_QUEUE_CAPACITY}`
   );
   console.log("[reconciler] Press Ctrl+C to stop.\n");
 

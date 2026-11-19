@@ -99,6 +99,14 @@ transactionRoutes.get(
       if (!transaction)
         return res.status(404).json({ error: "Transaction not found" });
 
+      // Only the transaction owner or an admin may download the invoice.
+      const requesterRole = req.userRole ?? req.jwtUser?.role;
+      const isAdmin =
+        requesterRole === "admin" || requesterRole === "super-admin";
+      if (transaction.userId !== req.jwtUser?.userId && !isAdmin) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
       if (transaction.status !== TransactionStatus.Completed)
         return res.status(400).json({
           error: "Invoice download is available only for completed transactions",

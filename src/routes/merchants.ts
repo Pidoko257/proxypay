@@ -329,7 +329,7 @@ merchantRoutes.get(
   async (req: Request, res: Response) => {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 50;
+      const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 50, 500));
       const status = req.query.status as string | undefined;
       const kycStatus = req.query.kycStatus as string | undefined;
 
@@ -474,7 +474,7 @@ merchantRoutes.get(
     try {
       const { id } = req.params;
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 50;
+      const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 50, 500));
       const status = req.query.status as string | undefined;
 
       const result = await merchantService.getSubAccounts(id, {

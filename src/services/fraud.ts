@@ -5,6 +5,7 @@ import { UserModel } from '../models/users';
 import { FraudAlertModel, FraudRiskLevel, FraudRecommendedAction } from '../models/fraudAlert';
 import { redisClient } from '../config/redis';
 import { queryRead } from '../config/database';
+import { geolocationService } from './geolocation';
 import logger from '../utils/logger';
 import { fraudLoggingService } from './fraudLoggingService';
 import {
@@ -64,6 +65,7 @@ interface FraudConfig {
   highValueThreshold: number;
   newAccountDays: number;
   deviceFingerprintWindowMs: number;
+  ipGeolocationEnabled: boolean;
 }
 
 const defaultConfig: FraudConfig = {
@@ -91,6 +93,7 @@ const defaultConfig: FraudConfig = {
   highValueThreshold: parseFloat(process.env.FRAUD_HIGH_VALUE_THRESHOLD || '1000'),
   newAccountDays: parseInt(process.env.FRAUD_NEW_ACCOUNT_DAYS || '7'),
   deviceFingerprintWindowMs: parseInt(process.env.FRAUD_DEVICE_FINGERPRINT_WINDOW_MS || `${24 * 60 * 60 * 1000}`),
+  ipGeolocationEnabled: process.env.FRAUD_IP_GEOLOCATION_ENABLED === 'true',
 };
 
 export interface FraudTransactionInput {
@@ -217,9 +220,17 @@ export class FraudService {
   }
 
   private async getIPLocation(ipAddress: string): Promise<{ lat: number; lng: number; country: string } | null> {
-    // In production, use a geolocation service like MaxMind or IP-API
-    // For now, return null to disable this check
-    return null;
+    // Feature-flagged so the provider integration can be rolled out independently.
+    if (!this.config.ipGeolocationEnabled) return null;
+
+    try {
+      const location = await geolocationService.lookup(ipAddress);
+      if (location.status !== 'resolved') return null;
+      return { lat: location.lat, lng: location.lon, country: location.country };
+    } catch (error) {
+      logger.error({ err: error }, 'IP geolocation lookup failed');
+      return null;
+    }
   }
 
   private isLocationMismatch(

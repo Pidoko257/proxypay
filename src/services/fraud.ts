@@ -4,6 +4,7 @@ import { TransactionModel } from '../models/transaction';
 import { UserModel } from '../models/users';
 import { FraudAlertModel, FraudRiskLevel, FraudRecommendedAction } from '../models/fraudAlert';
 import { redisClient } from '../config/redis';
+import { queryRead } from '../config/database';
 import logger from '../utils/logger';
 import { fraudLoggingService } from './fraudLoggingService';
 import {
@@ -34,6 +35,9 @@ import {
  *
  * Fraud Score Threshold: 50 (configurable)
  */
+
+const HIGH_RISK_NUMBERS_CACHE_KEY = 'fraud:high_risk_numbers';
+const HIGH_RISK_NUMBERS_CACHE_TTL_SECONDS = 3600;
 
 interface FraudConfig {
   maxTransactionsPerHour: number;
@@ -168,21 +172,27 @@ export class FraudService {
 
   private async loadHighRiskNumbers(): Promise<void> {
     try {
-      // Load from Redis cache or database
-      const cached = await redisClient.get('fraud:high_risk_numbers');
+      const cached = await redisClient.get(HIGH_RISK_NUMBERS_CACHE_KEY);
       if (cached && typeof cached === 'string') {
         const numbers = JSON.parse(cached) as string[];
         this.highRiskNumbers = new Set(numbers);
         logger.info({ count: numbers.length }, 'Loaded high-risk phone numbers from cache');
-      } else {
-        // In production, load from database or external fraud intelligence
-        const sampleNumbers = [
-          '+1234567890', '+0987654321', '+5555555555'
-        ];
-        this.highRiskNumbers = new Set(sampleNumbers);
-        await redisClient.setex('fraud:high_risk_numbers', 3600, JSON.stringify(sampleNumbers));
-        logger.warn({ count: sampleNumbers.length }, 'Using default high-risk phone numbers; configure production fraud intelligence feed');
+        return;
       }
+
+      // Cache miss: load the authoritative list from the database. An empty
+      // table yields an empty set — never fall back to placeholder numbers.
+      const result = await queryRead<{ phone_number: string }>(
+        'SELECT phone_number FROM fraud_high_risk_numbers WHERE is_active = TRUE',
+      );
+      const numbers = result.rows.map((row) => row.phone_number);
+      this.highRiskNumbers = new Set(numbers);
+      await redisClient.setex(
+        HIGH_RISK_NUMBERS_CACHE_KEY,
+        HIGH_RISK_NUMBERS_CACHE_TTL_SECONDS,
+        JSON.stringify(numbers),
+      );
+      logger.info({ count: numbers.length }, 'Loaded high-risk phone numbers from database');
     } catch (error) {
       logger.error({ err: error }, 'Failed to load high risk numbers');
     }

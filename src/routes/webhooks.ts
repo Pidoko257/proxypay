@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { WebhookService, WebhookEvent } from "../services/webhook";
 import { ingestRateLimiter } from "../middleware/ingestRateLimit";
+import { requireAuth, requireAdmin } from "../middleware/auth";
 
 const router = Router();
 const transactionModel = new TransactionModel();
@@ -85,7 +86,7 @@ router.get("/settings", (req: Request, res: Response) => {
 });
 
 /** PATCH /webhooks/settings - toggle compression on/off. Body: { "compression": true | false } */
-router.patch("/settings", (req: Request, res: Response) => {
+router.patch("/settings", requireAuth, requireAdmin, (req: Request, res: Response) => {
   const { compression } = req.body as { compression?: unknown };
   if (compression === undefined) {
     return res.status(400).json({ error: "Missing field: compression (boolean)" });

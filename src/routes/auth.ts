@@ -37,7 +37,7 @@ import {
   registerRateLimiter,
 } from "../middleware/authRateLimit";
 import { ERROR_CODES } from "../constants/errorCodes";
-import { createError } from "../middleware/errorHandler";
+import { createError, type AppError } from "../middleware/errorHandler";
 import { registerSchema } from "../validation/authSchemas";
 
 const emailService = new EmailService();
@@ -256,6 +256,11 @@ authRoutes.post(
         },
       });
     } catch (error) {
+      // Preserve domain errors (ACCOUNT_LOCKED, UNAUTHORIZED, FORBIDDEN, ...)
+      // thrown above so the client receives the intended status code.
+      if (error instanceof Error && (error as AppError).code) {
+        throw error;
+      }
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         error instanceof Error ? error.message : "Unknown error",

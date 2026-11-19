@@ -35,6 +35,59 @@ invoiceRoutes.get(
   }
 );
 
+// NOTE: fixed-segment admin routes must be registered before the
+// parameterized /:id route, otherwise Express matches id = "admin".
+/**
+ * ADMIN: GET /api/admin/invoices/status - Get invoice processing status
+ */
+invoiceRoutes.get(
+  '/admin/status',
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  authenticateToken,
+  requireRole('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const pending = await invoiceModel.countByStatus(InvoiceStatus.Pending);
+      const generated = await invoiceModel.countByStatus(InvoiceStatus.Generated);
+      const sent = await invoiceModel.countByStatus(InvoiceStatus.Sent);
+      const failed = await invoiceModel.countByStatus(InvoiceStatus.Failed);
+
+      res.json({
+        pending,
+        generated,
+        sent,
+        failed,
+        timestamp: new Date(),
+      });
+    } catch (err) {
+      logger.error({ error: err }, 'Failed to fetch invoice status');
+      res.status(500).json({ error: 'Failed to fetch invoice status' });
+    }
+  }
+);
+
+/**
+ * ADMIN: GET /api/admin/invoices/pending - List pending invoices
+ */
+invoiceRoutes.get(
+  '/admin/pending',
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  authenticateToken,
+  requireRole('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(String(req.query.limit)) || 50, 500);
+      const invoices = await invoiceModel.getPendingInvoices(limit);
+      res.json({ data: invoices, count: invoices.length });
+    } catch (err) {
+      logger.error({ error: err }, 'Failed to fetch pending invoices');
+      res.status(500).json({ error: 'Failed to fetch pending invoices' });
+    }
+  }
+);
+
 /**
  * GET /api/invoices/:id - Get a specific invoice
  */
@@ -191,57 +244,6 @@ invoiceRoutes.post(
     } catch (err) {
       logger.error({ error: err }, 'Failed to resend invoice');
       res.status(500).json({ error: 'Failed to resend invoice' });
-    }
-  }
-);
-
-/**
- * ADMIN: GET /api/admin/invoices/status - Get invoice processing status
- */
-invoiceRoutes.get(
-  '/admin/status',
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  authenticateToken,
-  requireRole('admin'),
-  async (req: Request, res: Response) => {
-    try {
-      const pending = await invoiceModel.countByStatus(InvoiceStatus.Pending);
-      const generated = await invoiceModel.countByStatus(InvoiceStatus.Generated);
-      const sent = await invoiceModel.countByStatus(InvoiceStatus.Sent);
-      const failed = await invoiceModel.countByStatus(InvoiceStatus.Failed);
-
-      res.json({
-        pending,
-        generated,
-        sent,
-        failed,
-        timestamp: new Date(),
-      });
-    } catch (err) {
-      logger.error({ error: err }, 'Failed to fetch invoice status');
-      res.status(500).json({ error: 'Failed to fetch invoice status' });
-    }
-  }
-);
-
-/**
- * ADMIN: GET /api/admin/invoices/pending - List pending invoices
- */
-invoiceRoutes.get(
-  '/admin/pending',
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  authenticateToken,
-  requireRole('admin'),
-  async (req: Request, res: Response) => {
-    try {
-      const limit = Math.min(parseInt(String(req.query.limit)) || 50, 500);
-      const invoices = await invoiceModel.getPendingInvoices(limit);
-      res.json({ data: invoices, count: invoices.length });
-    } catch (err) {
-      logger.error({ error: err }, 'Failed to fetch pending invoices');
-      res.status(500).json({ error: 'Failed to fetch pending invoices' });
     }
   }
 );

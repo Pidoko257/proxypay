@@ -1,13 +1,57 @@
-import { TransactionStatus } from "../../models/transaction";
+import { pool } from "../../config/database";
+// Import the service before the model: models/transaction imports the service,
+// so loading the model first leaves TransactionStatus undefined while the
+// service's static transition tables are initialised.
 import {
   TransactionStatusWorkflowService,
   transactionStatusWorkflowService,
 } from "../transactionStatusWorkflowService";
+import { TransactionStatus } from "../../models/transaction";
+
+jest.mock("../../config/database", () => ({
+  pool: { query: jest.fn() },
+}));
+
+// Minimal in-test stand-in for the transaction_status_history table so the
+// service is exercised through real SQL calls rather than an in-memory map.
+type Row = {
+  transaction_id: string;
+  from_status: string | null;
+  to_status: string;
+  reason: string | null;
+  explanation: string;
+  updated_by: string;
+  created_at: Date;
+};
+let table: Row[] = [];
+const mockedQuery = pool.query as unknown as jest.Mock;
 
 describe("TransactionStatusWorkflowService", () => {
   let workflowService: TransactionStatusWorkflowService;
 
   beforeEach(() => {
+    table = [];
+    mockedQuery.mockReset();
+    mockedQuery.mockImplementation(async (sql: string, params: unknown[]) => {
+      if (/INSERT INTO transaction_status_history/.test(sql)) {
+        const [txId, from, to, reason, explanation, updatedBy] = params as string[];
+        const row: Row = {
+          transaction_id: txId,
+          from_status: from,
+          to_status: to,
+          reason,
+          explanation,
+          updated_by: updatedBy,
+          created_at: new Date(),
+        };
+        table.push(row);
+        return { rows: [{ created_at: row.created_at }] };
+      }
+      if (/FROM transaction_status_history/.test(sql)) {
+        return { rows: table.filter((r) => r.transaction_id === params[0]) };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
     workflowService = new TransactionStatusWorkflowService();
   });
 
@@ -86,8 +130,8 @@ describe("TransactionStatusWorkflowService", () => {
   });
 
   describe("DetailedStatus transitions and history tracking", () => {
-    it("transitions detailed status and tracks history", () => {
-      const entry = workflowService.transition(
+    it("transitions detailed status and tracks history", async () => {
+      const entry = await workflowService.transition(
         "tx-001",
         "INITIATED",
         "KYC_VERIFYING",
@@ -100,15 +144,30 @@ describe("TransactionStatusWorkflowService", () => {
       expect(entry.updatedBy).toBe("test-runner");
       expect(entry.reason).toBe("Auto check");
 
-      const history = workflowService.getHistory("tx-001");
+      const history = await workflowService.getHistory("tx-001");
       expect(history.length).toBe(1);
       expect(history[0]).toEqual(entry);
     });
 
-    it("throws error for invalid detailed status transition", () => {
-      expect(() => {
-        workflowService.transition("tx-001", "INITIATED", "COMPLETED");
-      }).toThrow(/Invalid state transition from INITIATED to COMPLETED/i);
+    it("persists history so a fresh instance (e.g. after restart or on another replica) sees it", async () => {
+      await workflowService.transition("tx-002", "INITIATED", "AML_CHECKING");
+      await workflowService.transition("tx-002", "AML_CHECKING", "FUNDS_RESERVED");
+
+      const otherReplica = new TransactionStatusWorkflowService();
+      const history = await otherReplica.getHistory("tx-002");
+
+      expect(history.map((h) => h.toStatus)).toEqual(["AML_CHECKING", "FUNDS_RESERVED"]);
+      expect(mockedQuery).toHaveBeenCalledWith(
+        expect.stringContaining("INSERT INTO transaction_status_history"),
+        expect.any(Array),
+      );
+    });
+
+    it("throws error for invalid detailed status transition without writing history", async () => {
+      await expect(
+        workflowService.transition("tx-001", "INITIATED", "COMPLETED"),
+      ).rejects.toThrow(/Invalid state transition from INITIATED to COMPLETED/i);
+      expect(mockedQuery).not.toHaveBeenCalled();
     });
 
     it("returns explanations for statuses", () => {

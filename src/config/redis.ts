@@ -352,6 +352,11 @@ export function createRedisStore() {
   });
 }
 
+const SESSION_FLUSH_SCAN_COUNT = Math.max(
+  1,
+  parseInt(process.env.REDIS_SESSION_FLUSH_SCAN_COUNT || "500", 10) || 500,
+);
+
 export async function flushUserSessions(userId: string): Promise<void> {
   if (!redisClient.isOpen) return;
 
@@ -371,18 +376,33 @@ export async function flushUserSessions(userId: string): Promise<void> {
       console.warn("Redis: failed to publish WS revocation for user", userId, pubErr);
     }
 
-    // 2. Scan and destroy all express-sessions tied to this user
+    // 3. Scan and destroy all express-sessions tied to this user.
+    //    Each SCAN page costs exactly one MGET round trip plus (at most) one
+    //    pipelined UNLINK, instead of one GET + one DEL per key.
+    const needles = [`"userId":"${userId}"`, `"user_id":"${userId}"`];
     let cursor = "0";
     do {
-      const reply = await redisClient.scan(cursor, { MATCH: "session:*", COUNT: 100 });
+      const reply = await redisClient.scan(cursor, {
+        MATCH: "session:*",
+        COUNT: SESSION_FLUSH_SCAN_COUNT,
+      });
       cursor = String(reply.cursor);
-      
-      for (const key of reply.keys) {
-        const sessionData = await redisClient.get(key);
-        // Fast check: if the stringified session JSON contains the userId
-        if (sessionData && (sessionData.includes(`"userId":"${userId}"`) || sessionData.includes(`"user_id":"${userId}"`))) {
-          await redisClient.del(key);
-        }
+
+      if (reply.keys.length === 0) continue;
+
+      const values = await redisClient.mGet(reply.keys);
+      const matchingKeys = reply.keys.filter((_key, i) => {
+        const sessionData = values[i];
+        return (
+          typeof sessionData === "string" &&
+          needles.some((needle) => sessionData.includes(needle))
+        );
+      });
+
+      if (matchingKeys.length > 0) {
+        const pipeline = redisClient.multi();
+        for (const key of matchingKeys) pipeline.unlink(key);
+        await pipeline.exec();
       }
     } while (cursor !== "0");
   } catch (error) {

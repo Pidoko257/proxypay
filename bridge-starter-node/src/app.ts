@@ -50,6 +50,65 @@ export class ApiError extends Error {
   }
 }
 
+// ── Provider failure taxonomy ───────────────────────────────────────────────
+// Bounded set of provider failure codes used as Prometheus metric labels.
+// Free-form upstream error text MUST NOT be used as a label value — it would
+// explode time-series cardinality. Details go to structured logs instead.
+export enum ProviderErrorCode {
+  TIMEOUT = "TIMEOUT",
+  RATE_LIMITED = "RATE_LIMITED",
+  AUTH_FAILED = "AUTH_FAILED",
+  UPSTREAM_5XX = "UPSTREAM_5XX",
+  UPSTREAM_4XX = "UPSTREAM_4XX",
+  NETWORK_ERROR = "NETWORK_ERROR",
+  INVALID_RESPONSE = "INVALID_RESPONSE",
+  UNKNOWN = "UNKNOWN",
+}
+
+// Maps an arbitrary provider failure to a bounded error code. The original
+// free-form detail is preserved for structured logging by the caller.
+export function classifyProviderError(err: unknown): ProviderErrorCode {
+  if (err && typeof err === "object") {
+    const anyErr = err as { code?: unknown; status?: unknown; statusCode?: unknown; name?: unknown };
+    const status = typeof anyErr.status === "number"
+      ? anyErr.status
+      : typeof anyErr.statusCode === "number"
+        ? anyErr.statusCode
+        : undefined;
+
+    if (status !== undefined) {
+      if (status === 401 || status === 403) return ProviderErrorCode.AUTH_FAILED;
+      if (status === 429) return ProviderErrorCode.RATE_LIMITED;
+      if (status === 408) return ProviderErrorCode.TIMEOUT;
+      if (status >= 500) return ProviderErrorCode.UPSTREAM_5XX;
+      if (status >= 400) return ProviderErrorCode.UPSTREAM_4XX;
+    }
+
+    const code = typeof anyErr.code === "string" ? anyErr.code : undefined;
+    if (code) {
+      switch (code) {
+        case "ETIMEDOUT":
+        case "ESOCKETTIMEDOUT":
+          return ProviderErrorCode.TIMEOUT;
+        case "ECONNRESET":
+        case "ECONNREFUSED":
+        case "ENOTFOUND":
+        case "EAI_AGAIN":
+          return ProviderErrorCode.NETWORK_ERROR;
+        case "ERR_BAD_RESPONSE":
+        case "ERR_BAD_REQUEST":
+          return ProviderErrorCode.INVALID_RESPONSE;
+      }
+    }
+
+    if (anyErr.name === "AbortError" || anyErr.name === "TimeoutError") {
+      return ProviderErrorCode.TIMEOUT;
+    }
+  }
+
+  return ProviderErrorCode.UNKNOWN;
+}
+
 // ── Operational health ──────────────────────────────────────────────────────
 // Public callers only ever see a minimal overall state. Detailed provider /
 // dependency diagnostics are gated behind admin authorization and audited.

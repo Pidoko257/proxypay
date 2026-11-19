@@ -50,6 +50,76 @@ export class ApiError extends Error {
   }
 }
 
+// ── Operational health ──────────────────────────────────────────────────────
+// Public callers only ever see a minimal overall state. Detailed provider /
+// dependency diagnostics are gated behind admin authorization and audited.
+export type HealthState = "ok" | "degraded" | "down";
+
+export interface PublicHealth {
+  status: HealthState;
+}
+
+export interface DependencyHealth {
+  name: string;
+  status: HealthState;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface DetailedHealth extends PublicHealth {
+  uptimeSeconds: number;
+  dependencies: DependencyHealth[];
+}
+
+// Pluggable dependency probe. Defaults to an empty set so the endpoint stays
+// honest (no fabricated topology) until real probes are registered.
+let dependencyProbes: Array<() => Promise<DependencyHealth>> = [];
+
+export function registerDependencyProbe(
+  probe: () => Promise<DependencyHealth>,
+): void {
+  dependencyProbes = [...dependencyProbes, probe];
+}
+
+async function collectDetailedHealth(): Promise<DetailedHealth> {
+  const dependencies = await Promise.all(
+    dependencyProbes.map(async (probe) => {
+      try {
+        return await probe();
+      } catch (err) {
+        return {
+          name: "unknown",
+          status: "down" as HealthState,
+          error: err instanceof Error ? err.message : "probe failed",
+        };
+      }
+    }),
+  );
+
+  const status: HealthState = dependencies.some((d) => d.status === "down")
+    ? "down"
+    : dependencies.some((d) => d.status === "degraded")
+      ? "degraded"
+      : "ok";
+
+  return {
+    status,
+    uptimeSeconds: Math.floor(process.uptime()),
+    dependencies,
+  };
+}
+
+// Admin authorization for detailed diagnostics. Reuses the existing RBAC
+// contract: callers must present an admin role via the authenticated request.
+function requireAdmin(req: Request, _res: Response, next: NextFunction): void {
+  const role = (req as any).user?.role ?? req.headers["x-user-role"];
+  if (role !== "admin") {
+    next(new ApiError(ErrorCode.FORBIDDEN, "Admin authorization required"));
+    return;
+  }
+  next();
+}
+
 const app = express();
 
 // Preserve raw request body buffer for signature verification middleware.
@@ -91,6 +161,40 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.get("/", (_req: Request, res: Response) => {
   res.send("Bridge Starter API running 🚀");
 });
+
+// Public health: minimal overall state only — no topology or failure detail.
+app.get("/health", async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const detailed = await collectDetailedHealth();
+    const body: PublicHealth = { status: detailed.status };
+    res.status(detailed.status === "down" ? 503 : 200).json(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Detailed diagnostics: admin-only, and every access is audit logged.
+app.get(
+  "/health/detailed",
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const detailed = await collectDetailedHealth();
+      logger.info(
+        {
+          audit: "health.detailed.access",
+          actor: (req as any).user?.id ?? req.headers["x-user-id"] ?? "unknown",
+          requestId: req.headers["x-request-id"] ?? undefined,
+          status: detailed.status,
+        },
+        "Detailed health diagnostics accessed",
+      );
+      res.status(detailed.status === "down" ? 503 : 200).json(detailed);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 app.use("/api", webhookRoutes);
 

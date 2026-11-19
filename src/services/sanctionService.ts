@@ -547,6 +547,13 @@ export class SanctionService {
   /**
    * Searches for a name in the sanction list using robust fuzzy matching.
    * Handles typos, name permutations, and partial matches.
+   *
+   * Candidate retrieval happens in PostgreSQL via pg_trgm: the `%` operator
+   * uses the GIN trigram index on lower(name) to fetch only rows that are
+   * trigram-similar to the query (bounded by SANCTION_CANDIDATE_LIMIT), and
+   * the existing Jaro-Winkler / Levenshtein / permutation scoring is applied
+   * to that small candidate set only. The full list is never loaded into the
+   * Node.js heap.
    */
   async searchSanctions(
     name: string,
@@ -556,9 +563,30 @@ export class SanctionService {
       threshold ??
       parseFloat(process.env.SANCTION_SIMILARITY_THRESHOLD || "0.85");
 
-    const query =
-      "SELECT name, country, source, category, external_id FROM sanction_list";
-    const { rows } = await pool.query(query);
+    // Recall-oriented trigram pre-filter. `%` is index-assisted and applies
+    // pg_trgm.similarity_threshold (default 0.3); the explicit similarity()
+    // floor lets operators tighten the pre-filter further if needed.
+    const candidateThreshold = parseFloat(
+      process.env.SANCTION_TRGM_CANDIDATE_THRESHOLD || "0.3",
+    );
+    const candidateLimit = Math.max(
+      1,
+      parseInt(process.env.SANCTION_CANDIDATE_LIMIT || "50", 10) || 50,
+    );
+
+    const query = `
+      SELECT name, country, source, category, external_id
+        FROM sanction_list
+       WHERE lower(name) % lower($1)
+         AND similarity(lower(name), lower($1)) >= $2
+       ORDER BY similarity(lower(name), lower($1)) DESC
+       LIMIT $3
+    `;
+    const { rows } = await pool.query(query, [
+      name,
+      candidateThreshold,
+      candidateLimit,
+    ]);
 
     const matches: {
       entity: SanctionEntity;

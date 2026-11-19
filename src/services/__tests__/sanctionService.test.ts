@@ -66,6 +66,36 @@ describe("SanctionService", () => {
       const matches = await sanctionService.searchSanctions("Santa Claus", 0.85);
       expect(matches.length).toBe(0);
     });
+
+    it("pre-filters candidates in PostgreSQL with pg_trgm instead of a full table scan", async () => {
+      (pool.query as jest.fn).mockResolvedValue({ rows: [] });
+
+      await sanctionService.searchSanctions("Usama bin Laden", 0.85);
+
+      expect(pool.query).toHaveBeenCalledTimes(1);
+      const [sql, params] = (pool.query as jest.fn).mock.calls[0];
+      expect(sql).toMatch(/WHERE\s+lower\(name\)\s+%\s+lower\(\$1\)/);
+      expect(sql).toMatch(/ORDER BY similarity\(lower\(name\), lower\(\$1\)\) DESC/);
+      expect(sql).toMatch(/LIMIT \$3/);
+      expect(params).toEqual(["Usama bin Laden", 0.3, 50]);
+    });
+
+    it("honours candidate threshold and limit overrides", async () => {
+      const prevThreshold = process.env.SANCTION_TRGM_CANDIDATE_THRESHOLD;
+      const prevLimit = process.env.SANCTION_CANDIDATE_LIMIT;
+      process.env.SANCTION_TRGM_CANDIDATE_THRESHOLD = "0.45";
+      process.env.SANCTION_CANDIDATE_LIMIT = "20";
+      try {
+        (pool.query as jest.fn).mockResolvedValue({ rows: [] });
+        await sanctionService.searchSanctions("Jane Smith");
+        expect((pool.query as jest.fn).mock.calls[0][1]).toEqual(["Jane Smith", 0.45, 20]);
+      } finally {
+        if (prevThreshold === undefined) delete process.env.SANCTION_TRGM_CANDIDATE_THRESHOLD;
+        else process.env.SANCTION_TRGM_CANDIDATE_THRESHOLD = prevThreshold;
+        if (prevLimit === undefined) delete process.env.SANCTION_CANDIDATE_LIMIT;
+        else process.env.SANCTION_CANDIDATE_LIMIT = prevLimit;
+      }
+    });
   });
 
   describe("updateSanctionList", () => {

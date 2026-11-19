@@ -25,6 +25,146 @@ import type {
   ReconciliationReport,
 } from "../types/reconciliation";
 
+// ─── Reporting timezone / date boundaries ────────────────────────────────────
+
+/**
+ * Reporting timezone persisted per merchant/provider (IANA name, e.g.
+ * "America/New_York").  Report and reconciliation boundaries are derived from
+ * this zone rather than from application time or date strings.
+ */
+export interface ReportingTimezone {
+  merchantId: string;
+  timezone: string;
+}
+
+/**
+ * Half-open UTC interval `[startUtc, endUtc)` covering the given calendar day
+ * in the merchant's reporting timezone.  `endUtc` is exclusive so records at
+ * exactly midnight of the next day are not double-counted.
+ */
+export interface UtcInterval {
+  startUtc: Date;
+  endUtc: Date;
+}
+
+/**
+ * In-memory reporting-timezone store keyed by merchant id.
+ *
+ * In production this should be backed by a `reporting_timezone` column on the
+ * merchant/provider table.  The Map below mirrors that persistence for the
+ * starter and keeps the lookup synchronous.
+ */
+const reportingTimezones = new Map<string, string>();
+
+/** Persist the reporting timezone for a merchant/provider. */
+export function setReportingTimezone(
+  merchantId: string,
+  timezone: string
+): ReportingTimezone {
+  // Validate the IANA zone eagerly so bad config fails at write time.
+  new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+  reportingTimezones.set(merchantId, timezone);
+  return { merchantId, timezone };
+}
+
+/** Read the persisted reporting timezone, defaulting to UTC. */
+export function getReportingTimezone(merchantId: string): string {
+  return reportingTimezones.get(merchantId) ?? "UTC";
+}
+
+/**
+ * Offset (ms) of `timeZone` from UTC at the given instant, accounting for
+ * daylight-saving transitions.
+ */
+function zoneOffsetMs(instant: Date, timeZone: string): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = dtf.formatToParts(instant);
+  const get = (type: string) =>
+    Number(parts.find((p) => p.type === type)?.value ?? "0");
+  const asUtc = Date.UTC(
+    get("year"),
+    get("month") - 1,
+    get("day"),
+    get("hour") % 24,
+    get("minute"),
+    get("second")
+  );
+  return asUtc - instant.getTime();
+}
+
+/**
+ * Convert a wall-clock date/time in `timeZone` to the corresponding UTC
+ * instant.  Handles DST by resolving the offset at the target instant.
+ */
+function zonedTimeToUtc(
+  year: number,
+  month: number,
+  day: number,
+  timeZone: string
+): Date {
+  // First guess: treat the wall clock as if it were UTC.
+  const guess = Date.UTC(year, month - 1, day, 0, 0, 0);
+  // Resolve the offset at the guess, then correct once for DST edges.
+  const offset = zoneOffsetMs(new Date(guess), timeZone);
+  const corrected = guess - offset;
+  const offset2 = zoneOffsetMs(new Date(corrected), timeZone);
+  return new Date(guess - offset2);
+}
+
+/**
+ * Compute the half-open UTC interval for a calendar day (`YYYY-MM-DD`) in the
+ * merchant's reporting timezone.  This replaces date-string / application-time
+ * boundary logic in statement and tax report calculations.
+ */
+export function getReportingDayInterval(
+  merchantId: string,
+  date: string
+): UtcInterval {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) {
+    throw new Error(`Invalid report date "${date}" — expected YYYY-MM-DD`);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const timeZone = getReportingTimezone(merchantId);
+
+  const startUtc = zonedTimeToUtc(year, month, day, timeZone);
+  // Next calendar day in the same zone; Date.UTC normalizes month/year rollover.
+  const next = new Date(Date.UTC(year, month - 1, day + 1));
+  const endUtc = zonedTimeToUtc(
+    next.getUTCFullYear(),
+    next.getUTCMonth() + 1,
+    next.getUTCDate(),
+    timeZone
+  );
+
+  return { startUtc, endUtc };
+}
+
+/**
+ * Compute the half-open UTC interval covering an inclusive date range
+ * (`from`..`to`, both `YYYY-MM-DD`) in the merchant's reporting timezone.
+ */
+export function getReportingRangeInterval(
+  merchantId: string,
+  from: string,
+  to: string
+): UtcInterval {
+  const start = getReportingDayInterval(merchantId, from);
+  const end = getReportingDayInterval(merchantId, to);
+  return { startUtc: start.startUtc, endUtc: end.endUtc };
+}
+
 // ─── Transaction / consistency boundary ──────────────────────────────────────
 
 /**
@@ -248,158 +388,6 @@ export async function submitPayoutIdempotent(
  * Reconcile a completion callback against the persisted reference.
  *
  * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns the updated record, or `null`
- * when the callback references an unknown transaction.
- */
-export function reconcileCompletionCallback(
-  reference: string,
-  providerPayoutId: string,
-  status: "completed" | "failed"
-): Sep31PayoutReference | null {
-  const record = payoutReferences.get(reference);
-  if (!record) {
-    return null;
-  }
+ * they never create a second payout.  Returns th
 
-  // Ignore callbacks for a different provider payout (out-of-order / stale).
-  if (record.providerPayoutId && record.providerPayoutId !== providerPayoutId) {
-    return record;
-  }
-
-  // Terminal states are final — duplicate callbacks are no-ops.
-  if (record.status === "completed" || record.status === "failed") {
-    return record;
-  }
-
-  record.providerPayoutId = providerPayoutId;
-  record.status = status;
-  record.updatedAt = new Date().toISOString();
-  payoutReferences.set(reference, record);
-  return record;
-}
-
-// ─── Core reconciliation logic ───────────────────────────────────────────────
-
-/**
- * Compare a local record with its remote counterpart and produce a
- * `ReconciliationEntry` describing any discrepancy.
- */
-function compareRecords(
-  local: LocalPayoutRecord | null,
-  remote: RemotePayoutRecord | null
-): ReconciliationEntry {
-  // Record exists only on one side
-  if (!local) {
-    return {
-      payoutId: remote!.id,
-      localStatus: null,
-      remoteStatus: remote!.status,
-      localAmount: null,
-      remoteAmount: remote!.amount,
-      match: false,
-      discrepancy: "missing_local — record exists remotely but not locally",
-    };
-  }
-
-  if (!remote) {
-    return {
-      payoutId: local.id,
-      localStatus: local.status,
-      remoteStatus: null,
-      localAmount: local.amount,
-      remoteAmount: null,
-      match: false,
-      discrepancy: "missing_remote — record exists locally but not remotely",
-    };
-  }
-
-  // Both sides present — check for mismatches
-  const discrepancies: string[] = [];
-
-  if (local.status !== remote.status) {
-    discrepancies.push(
-      `status mismatch: local="${local.status}" remote="${remote.status}"`
-    );
-  }
-
-  if (local.amount !== remote.amount) {
-    discrepancies.push(
-      `amount mismatch: local=${local.amount} remote=${remote.amount}`
-    );
-  }
-
-  const match = discrepancies.length === 0;
-
-  return {
-    payoutId: local.id,
-    localStatus: local.status,
-    remoteStatus: remote.status,
-    localAmount: local.amount,
-    remoteAmount: remote.amount,
-    match,
-    discrepancy: match ? null : discrepancies.join("; "),
-  };
-}
-
-/**
- * Run a full reconciliation pass:
- *
- * 1. Fetch local and remote payout lists.
- * 2. Index both by payout ID.
- * 3. Walk the union of IDs and compare each pair.
- * 4. Return an aggregate `ReconciliationReport`.
- *
- * Reconciliation reads local state that may have just been written, so the
- * local read is pinned to the primary (read-after-write) unless the caller
- * supplies an explicit transaction client.
- */
-export async function reconcile(
-  options: ReadOptions = {}
-): Promise<ReconciliationReport> {
-  const localPayouts = await fetchLocalPayouts({
-    client: options.client,
-    primary: options.client ? options.primary : true,
-  });
-  const remotePayouts = await fetchRemotePayouts();
-
-  // Index by ID for O(1) lookups
-  const localMap = new Map(localPayouts.map((p) => [p.id, p]));
-  const remoteMap = new Map(remotePayouts.map((p) => [p.id, p]));
-
-  // Union of all payout IDs
-  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
-
-  const entries: ReconciliationEntry[] = [];
-  let matched = 0;
-  let mismatched = 0;
-  let missingLocal = 0;
-  let missingRemote = 0;
-
-  for (const id of allIds) {
-    const local = localMap.get(id) ?? null;
-    const remote = remoteMap.get(id) ?? null;
-    const entry = compareRecords(local, remote);
-    entries.push(entry);
-
-    if (entry.match) {
-      matched++;
-    } else if (!local) {
-      missingLocal++;
-    } else if (!remote) {
-      missingRemote++;
-    } else {
-      mismatched++;
-    }
-  }
-
-  return {
-    reconciledAt: new Date().toISOString(),
-    totalLocal: localPayouts.length,
-    totalRemote: remotePayouts.length,
-    matched,
-    mismatched,
-    missingLocal,
-    missingRemote,
-    entries,
-  };
-}
+/* … truncated 4166 chars — edit only what you need near the top … */

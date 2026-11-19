@@ -93,3 +93,42 @@ export interface ReconciliationReport {
   missingRemote: number;
   entries: ReconciliationEntry[];
 }
+
+/**
+ * Reporting timezone configuration for a merchant / provider.
+ *
+ * Report and reconciliation date boundaries are derived from this IANA
+ * timezone (e.g. `America/New_York`) rather than application time, so records
+ * are classified consistently across provider and customer timezones.
+ */
+export interface ReportingTimezoneConfig {
+  /** Merchant / provider identifier the reporting timezone applies to. */
+  merchantId: string;
+  /** IANA timezone name used to compute report date boundaries. */
+  reportingTimezone: string;
+}
+
+/**
+ * A half-open UTC interval `[startUtc, endUtc)` used to bound report and
+ * reconciliation queries. Both endpoints are ISO-8601 UTC timestamps; the
+ * start is inclusive and the end is exclusive.
+ */
+export interface UtcInterval {
+  /** Inclusive ISO-8601 UTC start of the interval. */
+  startUtc: string;
+  /** Exclusive ISO-8601 UTC end of the interval. */
+  endUtc: string;
+}
+
+/**
+ * A reporting period expressed as a local calendar date range plus the
+ * resolved half-open UTC interval used for querying.
+ */
+export interface ReportingPeriod extends UtcInterval {
+  /** IANA timezone the period was resolved in. */
+  reportingTimezone: string;
+  /** Inclusive local calendar date (`YYYY-MM-DD`) of the period start. */
+  startDate: string;
+  /** Exclusive local calendar date (`YYYY-MM-DD`) of the period end. */
+  endDate: string;
+}

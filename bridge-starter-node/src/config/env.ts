@@ -36,6 +36,15 @@ interface I18nConfig {
   alertOnCriticalFallback: boolean;
 }
 
+interface ReportingConfig {
+  /**
+   * IANA timezone used to derive statement/tax report date boundaries when a
+   * merchant/provider does not override it. Report windows are computed in
+   * this zone and converted to half-open UTC intervals.
+   */
+  defaultTimezone: string;
+}
+
 interface Config {
   port: number;
   bridgeApiUrl: string;
@@ -44,6 +53,7 @@ interface Config {
   stellar: StellarConfig;
   soroban: SorobanConfig;
   i18n: I18nConfig;
+  reporting: ReportingConfig;
 }
 
 const STELLAR_NETWORKS: Record<
@@ -147,6 +157,20 @@ function resolveBoolean(name: string, fallback: boolean): boolean {
   return raw.trim().toLowerCase() === "true";
 }
 
+function resolveTimezone(name: string, fallback: string): string {
+  const raw = process.env[name];
+  const candidate = raw === undefined || raw.trim() === "" ? fallback : raw.trim();
+  try {
+    // Throws RangeError for unknown IANA zones, so misconfiguration fails fast.
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate });
+  } catch {
+    throw new Error(
+      `Invalid ${name} "${candidate}". Expected an IANA timezone (e.g. "America/New_York").`
+    );
+  }
+  return candidate;
+}
+
 const stellarNetwork = resolveStellarNetwork();
 const stellarNetworkDefaults = STELLAR_NETWORKS[stellarNetwork];
 
@@ -179,5 +203,8 @@ export const config: Config = {
     fallbackLocale: process.env.I18N_FALLBACK_LOCALE || "en",
     requiredKeys: resolveList("I18N_REQUIRED_KEYS", DEFAULT_REQUIRED_KEYS),
     alertOnCriticalFallback: resolveBoolean("I18N_ALERT_ON_CRITICAL_FALLBACK", true),
+  },
+  reporting: {
+    defaultTimezone: resolveTimezone("REPORTING_DEFAULT_TIMEZONE", "UTC"),
   },
 };

@@ -373,6 +373,7 @@ jobs:
           STELLAR_ISSUER_SECRET: S-DUMMY-SECRET-KEY-FOR-TESTING-PURPOSES-ONLY
           NODE_ENV: development
           JWT_SECRET: ci-jwt-secret-32-chars-long-ok-x
+          DB_ENCRYPTION_HKDF_SALT: ci-hkdf-salt-not-for-production
           SESSION_SECRET: ci-session-secret
           BUILD_HASH: ${{ github.sha }}
 
@@ -390,3 +391,4 @@ jobs:
           STELLAR_ISSUER_SECRET: S-DUMMY-SECRET-KEY-FOR-TESTING-PURPOSES-ONLY
           NODE_ENV: development
           JWT_SECRET: ci-jwt-secret-32-chars-long-ok-x
+          DB_ENCRYPTION_HKDF_SALT: ci-hkdf-salt-not-for-production

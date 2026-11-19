@@ -1,6 +1,6 @@
 import { Pool, PoolClient } from "pg";
 import { pool } from "../config/database";
-import { encrypt, decrypt } from "../utils/encryption";
+import { encrypt, decrypt, deterministicLookupValues } from "../utils/encryption";
 import { flushUserSessions } from "../config/redis";
 import { UserModel } from "../models/users";
 import { isValidMerchantMCC, requireValidMerchantMCC } from "../utils/merchantMcc";
@@ -43,7 +43,9 @@ export interface LoginRequest {
 export async function getUserByPhoneNumber(
   phoneNumber: string,
 ): Promise<User | null> {
-  const encryptedPhone = encrypt(phoneNumber, true);
+  // Match both the current HMAC-derived-IV ciphertext and the legacy
+  // fixed-IV form so users created before the IV change can still log in.
+  const encryptedPhoneCandidates = deterministicLookupValues(phoneNumber);
   const query = `
     SELECT 
       u.id,
@@ -63,10 +65,11 @@ export async function getUserByPhoneNumber(
       r.name as role_name
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
-    WHERE u.phone_number = $1
+    WHERE u.phone_number = ANY($1::text[])
+    LIMIT 1
   `;
 
-  const result = await pool.query(query, [encryptedPhone]);
+  const result = await pool.query(query, [encryptedPhoneCandidates]);
   if (result.rows.length === 0) return null;
   
   const row = result.rows[0];
@@ -374,7 +377,32 @@ export async function deactivateUserAccount(userId: string, dbPool?: Pool) {
 
     // await pool.query(`DELETE FROM user_api_keys WHERE user_id = $1`, [userId]);
 
-    // 5. Archive transaction history (optional: 
+    // 5. Archive transaction history (optional: keep for compliance)
+    // await pool.query(
+    //   `UPDATE user_transactions
+    //    SET user_id = NULL, anonymized = true
+    //    WHERE user_id = $1`,
+    //   [userId],
+    // );
+
+    // 6. Log the deactivation
+    // await pool.query(
+    //   `INSERT INTO audit_log (action, user_id, timestamp)
+    //    VALUES ($1, $2, CURRENT_TIMESTAMP)`,
+    //   ["account_deactivated", userId],
+    // );
+
+    await client.query("COMMIT");
+  } catch (err) {
+    if (client) {
+      await client.query("ROLLBACK");
+    }
+    console.error("deactivateUserAccount error:", err);
+    throw err;
+  } finally {
+    if (client) client.release();
+  }
+}
 
 export async function invalidateUserOnPasswordChange(userId: string): Promise<void> {
   const userModel = new UserModel();

@@ -761,7 +761,9 @@ export class FraudService {
   private blendScores(heuristicScore: number, mlScore?: number): number {
     if (mlScore === undefined) return heuristicScore;
     const threshold = Math.max(this.config.fraudScoreThreshold, 1);
-    return heuristicScore + mlScore * threshold * 0.3;
+    // Fraud scores live on a 0–100 scale; without a ceiling a high heuristic
+    // score plus a confident ML score can exceed 100 and skew risk bands.
+    return Math.min(100, heuristicScore + mlScore * threshold * 0.3);
   }
 
   /**

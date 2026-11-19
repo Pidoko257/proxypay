@@ -118,6 +118,10 @@ export const env = cleanEnv(process.env, {
     default: "development-encryption-key-32-chars-long",
     desc: "Secret key for PII encryption in database (AES-256-GCM global key material)",
   }),
+  DB_ENCRYPTION_HKDF_SALT: str({
+    desc: "Secret salt for the HKDF-extract step that derives AES keys from DB_ENCRYPTION_KEY. Required — there is no fallback. Rotating it changes every derived key, so existing ciphertext must be re-encrypted.",
+    example: "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
+  }),
   PII_MASTER_KEY: str({
     default: "development-pii-master-key-32-chars!",
     desc: "Master key for per-user HKDF key derivation. Must be a high-entropy secret in production. Never log or expose this value.",
@@ -257,6 +261,7 @@ export const {
   STELLAR_HORIZON_URL,
   STELLAR_NETWORK,
   DB_ENCRYPTION_KEY,
+  DB_ENCRYPTION_HKDF_SALT,
   PII_MASTER_KEY,
   PAGERDUTY_INTEGRATION_KEY,
   PAGERDUTY_DEDUP_KEY,

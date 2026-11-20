@@ -46,6 +46,7 @@ import { runNotificationHealthCheckJob } from "./notificationHealthCheckJob";
 import { runComplianceExpiryAlertJob } from "./complianceExpiryAlertJob";
 import { runProviderSessionRefreshJob } from "./providerSessionRefreshJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+import logger from "../utils/logger";
 
 interface JobConfig {
   name: string;
@@ -242,12 +243,13 @@ const JOBS: JobConfig[] = [
 ];
 
 async function runJob(job: JobConfig): Promise<void> {
-  console.log(`[${job.name}] Starting job`);
+  const jobLogger = logger.child({ job: job.name });
+  jobLogger.info({ job: job.name }, `[${job.name}] Starting job`);
   try {
     await job.handler();
-    console.log(`[${job.name}] Completed`);
+    jobLogger.info({ job: job.name }, `[${job.name}] Completed`);
   } catch (err) {
-    console.error(`[${job.name}] Failed:`, err);
+    jobLogger.error({ err, job: job.name }, `[${job.name}] Failed`);
   }
 }
 
@@ -261,19 +263,23 @@ export function startJobs(): void {
 
   for (const job of JOBS) {
     if (!cron.validate(job.schedule)) {
-      console.error(
+      logger.error(
+        { job: job.name, schedule: job.schedule },
         `[scheduler] Invalid cron expression for "${job.name}": ${job.schedule}`,
       );
       continue;
     }
     cron.schedule(job.schedule, () => runJob(job));
-    console.log(`[scheduler] "${job.name}" scheduled - ${job.schedule}`);
+    logger.info(
+      { job: job.name, schedule: job.schedule },
+      `[scheduler] "${job.name}" scheduled - ${job.schedule}`,
+    );
   }
 
   // Start the notification worker which listens for Redis pub/sub events
   // and drives user-facing notifications in real-time. This replaces any
   // DB-polling notification mechanisms.
   startNotificationWorker().catch((err) => {
-    console.warn("Failed to start NotificationWorker:", err);
+    logger.warn({ err }, "Failed to start NotificationWorker");
   });
 }

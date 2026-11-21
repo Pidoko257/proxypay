@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import { logger } from "../utils/logger";
 import {
   cancelTransactionHandler,
   depositHandler,
@@ -73,7 +74,7 @@ transactionRoutes.get(
 
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Failed to generate receipt PDF:", err);
+      logger.error({ err }, "Failed to generate receipt PDF");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to generate receipt PDF",
@@ -121,7 +122,7 @@ transactionRoutes.get(
 
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Failed to generate invoice PDF:", err);
+      logger.error({ err }, "Failed to generate invoice PDF");
       res.status(500).json({ error: "Failed to generate invoice PDF" });
     }
   },
@@ -152,7 +153,7 @@ transactionRoutes.post(
         expiresAt: Math.floor(Date.now() / 1000) + Number(expiresIn),
       });
     } catch (err) {
-      console.error("Failed to create shareable receipt URL:", err);
+      logger.error({ err }, "Failed to create shareable receipt URL");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to create shareable receipt URL",
@@ -188,7 +189,7 @@ transactionRoutes.get(
       );
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Invalid or expired share token:", err);
+      logger.error({ err }, "Invalid or expired share token");
       throw createError(
         ERROR_CODES.TOKEN_EXPIRED,
         "Invalid or expired share token",

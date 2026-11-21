@@ -7,6 +7,7 @@ import { CreateMerchantInput } from "../models/merchant";
 import { authenticateToken } from "../middleware/auth";
 import { checkAccountStatusStrict } from "../middleware/checkAccountStatus";
 import { requireScope, ApiKeyScope } from "../middleware/scopeEnforcement";
+import { createAuthRateLimiter } from "../middleware/authRateLimit";
 
 interface CsvRow {
   name: string;
@@ -26,6 +27,15 @@ interface ValidationError {
   field: string;
   message: string;
 }
+
+// Limits brute-force enumeration of invitation tokens on the public accept endpoint.
+// Invitation tokens are 32 bytes of crypto.randomBytes (see models/merchant.ts).
+const invitationAcceptRateLimiter = createAuthRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  message:
+    "Too many invitation acceptance attempts from this IP, please try again after 15 minutes",
+});
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_REGEX = /^\+?\d{7,15}$/;
@@ -319,7 +329,7 @@ merchantRoutes.get(
   async (req: Request, res: Response) => {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 50;
+      const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 50, 500));
       const status = req.query.status as string | undefined;
       const kycStatus = req.query.kycStatus as string | undefined;
 
@@ -372,6 +382,7 @@ merchantRoutes.get(
 // POST /api/merchants/invite/:token/accept - Accept merchant invitation
 merchantRoutes.post(
   "/invite/:token/accept",
+  invitationAcceptRateLimiter,
   async (req: Request, res: Response) => {
     try {
       const { token } = req.params;
@@ -463,7 +474,7 @@ merchantRoutes.get(
     try {
       const { id } = req.params;
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 50;
+      const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 50, 500));
       const status = req.query.status as string | undefined;
 
       const result = await merchantService.getSubAccounts(id, {

@@ -17,7 +17,7 @@ describe('FraudService', () => {
     amount: 100,
     phoneNumber: '+15551234567',
     timestamp: baseNow,
-    location: { lat: 0, lng: 0 },
+    location: { lat: 40.7128, lng: -74.006 }, // matches base transaction locationMetadata
     status: 'SUCCESS',
     ipAddress: '192.168.1.1',
     userAgent: 'test-agent',
@@ -34,7 +34,7 @@ describe('FraudService', () => {
     amount: '100',
     phoneNumber: '+15551234567',
     createdAt: baseNow,
-    locationMetadata: { status: 'resolved', country: 'US', city: 'New York' },
+    locationMetadata: { status: 'resolved', country: 'US', city: 'New York', lat: 40.7128, lon: -74.006 },
     status: TransactionStatus.Success,
     provider: 'test-provider',
     type: 'deposit',
@@ -144,16 +144,14 @@ describe('FraudService', () => {
     it('should flag geographic anomaly', async () => {
       const userTransactions: Transaction[] = [
         createBaseTransaction({
-          locationMetadata: { status: 'resolved', country: 'US', city: 'New York' },
+          locationMetadata: { status: 'resolved', country: 'US', city: 'New York', lat: 40.7128, lon: -74.006 },
           createdAt: new Date(baseNow.getTime() - 30 * 60 * 1000),
         }),
       ];
       
-      // Use a service with lower distance threshold to trigger the anomaly
-      // The calculateDistance returns 500km as placeholder, so set threshold to 100
+      // New York -> (10, 10) is ~8,800km, well past the default 1000km threshold
       const geoService = new FraudService({ 
         fraudScoreThreshold: 10,
-        maxDistanceKm: 100, 
       });
       jest.spyOn(geoService as any, 'getUserTransactions').mockResolvedValue(userTransactions);
       (geoService as any).userModel = {
@@ -166,6 +164,30 @@ describe('FraudService', () => {
       expect(result.isFraud).toBe(true);
       expect(result.score).toBeGreaterThanOrEqual(20); // geo score
       expect(result.reasons[0]).toContain('Suspicious location change');
+    });
+
+    it('should not flag geographic anomaly for a nearby location', async () => {
+      const userTransactions: Transaction[] = [
+        createBaseTransaction({
+          locationMetadata: { status: 'resolved', country: 'US', city: 'New York', lat: 40.7128, lon: -74.006 },
+          createdAt: new Date(baseNow.getTime() - 30 * 60 * 1000),
+        }),
+      ];
+      const geoService = new FraudService({ fraudScoreThreshold: 10 });
+      jest.spyOn(geoService as any, 'getUserTransactions').mockResolvedValue(userTransactions);
+      (geoService as any).userModel = { findById: jest.fn().mockResolvedValue(null) };
+
+      // Newark, NJ is ~15km from New York
+      const result = await geoService.detectFraud(createBaseFraudInput({ location: { lat: 40.7357, lng: -74.1724 } }));
+
+      expect(result.heuristicsTriggered).not.toContain('geographic_anomaly');
+    });
+
+    it('calculateDistance implements the Haversine formula', () => {
+      const distance = (fraudService as any).calculateDistance(51.5074, -0.1278, 48.8566, 2.3522);
+      expect(distance).toBeGreaterThan(340); // London -> Paris ~343.5km
+      expect(distance).toBeLessThan(347);
+      expect((fraudService as any).calculateDistance(10, 10, 10, 10)).toBe(0);
     });
 
     it('should flag failed attempts pattern', async () => {
@@ -252,12 +274,12 @@ describe('FraudService', () => {
       const userTransactions: Transaction[] = [
         createBaseTransaction({
           id: 'older-far',
-          locationMetadata: { status: 'resolved', country: 'US', city: 'Los Angeles' },
+          locationMetadata: { status: 'resolved', country: 'US', city: 'Los Angeles', lat: 34.0522, lon: -118.2437 },
           createdAt: new Date(baseNow.getTime() - 50 * 60 * 1000),
         }),
         createBaseTransaction({
           id: 'recent-near',
-          locationMetadata: { status: 'resolved', country: 'US', city: 'New York' },
+          locationMetadata: { status: 'resolved', country: 'GH', city: 'Gulf of Guinea', lat: 0, lon: 0 },
           createdAt: new Date(baseNow.getTime() - 5 * 60 * 1000),
         }),
       ];
@@ -307,10 +329,9 @@ describe('FraudService', () => {
         createBaseTransaction({ id: 'txn-4', amount: '10', createdAt: new Date(baseNow.getTime() - 25 * 60 * 1000) }),
       ];
       
-      // Use a service with lower distance threshold to trigger geographic anomaly
+      // New York -> (12, 12) is far beyond the default 1000km threshold
       const multiService = new FraudService({ 
         fraudScoreThreshold: 20,
-        maxDistanceKm: 100,
       });
       jest.spyOn(multiService as any, 'getUserTransactions').mockResolvedValue(userTransactions);
       (multiService as any).userModel = {

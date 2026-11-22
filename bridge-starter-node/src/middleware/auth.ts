@@ -11,6 +11,7 @@ export enum AuthErrorCode {
   MISSING_SIGNATURE = "MISSING_SIGNATURE",
   INVALID_SIGNATURE = "INVALID_SIGNATURE",
   SERVER_MISCONFIGURED = "SERVER_MISCONFIGURED",
+  FORBIDDEN = "FORBIDDEN",
 }
 
 /**
@@ -97,6 +98,39 @@ export const verifyWebhookSignature = (
     new AuthError(AuthErrorCode.INVALID_SIGNATURE, 401, "Invalid signature"),
   );
 };
+
+/**
+ * Role-based access control middleware.
+ *
+ * Grants access only when the authenticated principal carries one of the
+ * allowed roles. The principal is resolved from `req.user` (populated by an
+ * upstream authentication middleware) or, as a fallback, from the
+ * `x-bridge-role` header for service-to-service calls.
+ *
+ * Denied requests are rejected with a typed 403 so the shared error
+ * middleware can map the response consistently.
+ */
+export const requireRole = (...allowedRoles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const anyReq = req as any;
+    const role: string | undefined =
+      anyReq.user?.role ||
+      (req.headers["x-bridge-role"] as string | undefined);
+
+    if (!role || !allowedRoles.includes(role)) {
+      return next(
+        new AuthError(AuthErrorCode.FORBIDDEN, 403, "Insufficient permissions"),
+      );
+    }
+
+    return next();
+  };
+};
+
+/**
+ * Convenience guard for admin-only routes (e.g. detailed health diagnostics).
+ */
+export const requireAdmin = requireRole("admin");
 
 /**
  * SEP-10 challenge validation and replay protection.

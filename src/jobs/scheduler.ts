@@ -46,12 +46,13 @@ import { runNotificationHealthCheckJob } from "./notificationHealthCheckJob";
 import { runComplianceExpiryAlertJob } from "./complianceExpiryAlertJob";
 import { runProviderSessionRefreshJob } from "./providerSessionRefreshJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
-import {
-  JobConfig,
-  handleWorkerStartFailure,
-  runJob,
-  setJobFailureAlerting,
-} from "./jobRunner";
+import logger from "../utils/logger";
+
+interface JobConfig {
+  name: string;
+  schedule: string;
+  handler: () => Promise<void>;
+}
 
 const JOBS: JobConfig[] = [
   {
@@ -249,6 +250,17 @@ const JOBS: JobConfig[] = [
   },
 ];
 
+async function runJob(job: JobConfig): Promise<void> {
+  const jobLogger = logger.child({ job: job.name });
+  jobLogger.info({ job: job.name }, `[${job.name}] Starting job`);
+  try {
+    await job.handler();
+    jobLogger.info({ job: job.name }, `[${job.name}] Completed`);
+  } catch (err) {
+    jobLogger.error({ err, job: job.name }, `[${job.name}] Failed`);
+  }
+}
+
 export function startJobs(): void {
   // Initialize PagerDuty integration for monitoring
   const pagerDutyService = createPagerDutyService();
@@ -260,19 +272,23 @@ export function startJobs(): void {
 
   for (const job of JOBS) {
     if (!cron.validate(job.schedule)) {
-      console.error(
+      logger.error(
+        { job: job.name, schedule: job.schedule },
         `[scheduler] Invalid cron expression for "${job.name}": ${job.schedule}`,
       );
       continue;
     }
     cron.schedule(job.schedule, () => runJob(job));
-    console.log(`[scheduler] "${job.name}" scheduled - ${job.schedule}`);
+    logger.info(
+      { job: job.name, schedule: job.schedule },
+      `[scheduler] "${job.name}" scheduled - ${job.schedule}`,
+    );
   }
 
   // Start the notification worker which listens for Redis pub/sub events
   // and drives user-facing notifications in real-time. This replaces any
   // DB-polling notification mechanisms.
-  startNotificationWorker().catch((err) =>
-    handleWorkerStartFailure("NotificationWorker", err),
-  );
+  startNotificationWorker().catch((err) => {
+    logger.warn({ err }, "Failed to start NotificationWorker");
+  });
 }

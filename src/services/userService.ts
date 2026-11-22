@@ -1,9 +1,10 @@
 import { Pool, PoolClient } from "pg";
 import { pool } from "../config/database";
-import { encrypt, decrypt } from "../utils/encryption";
+import { encrypt, decrypt, deterministicLookupValues } from "../utils/encryption";
 import { flushUserSessions } from "../config/redis";
 import { UserModel } from "../models/users";
 import { isValidMerchantMCC, requireValidMerchantMCC } from "../utils/merchantMcc";
+import logger from "../utils/logger";
 
 export interface User {
   id: string;
@@ -43,7 +44,9 @@ export interface LoginRequest {
 export async function getUserByPhoneNumber(
   phoneNumber: string,
 ): Promise<User | null> {
-  const encryptedPhone = encrypt(phoneNumber, true);
+  // Match both the current HMAC-derived-IV ciphertext and the legacy
+  // fixed-IV form so users created before the IV change can still log in.
+  const encryptedPhoneCandidates = deterministicLookupValues(phoneNumber);
   const query = `
     SELECT 
       u.id,
@@ -63,10 +66,11 @@ export async function getUserByPhoneNumber(
       r.name as role_name
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
-    WHERE u.phone_number = $1
+    WHERE u.phone_number = ANY($1::text[])
+    LIMIT 1
   `;
 
-  const result = await pool.query(query, [encryptedPhone]);
+  const result = await pool.query(query, [encryptedPhoneCandidates]);
   if (result.rows.length === 0) return null;
   
   const row = result.rows[0];
@@ -104,7 +108,6 @@ export async function getUserById(userId: string): Promise<User | null> {
   `;
 
   const result = await pool.query(query, [userId]);
-  console.log({ result });
   if (result.rows.length === 0) return null;
 
   const row = result.rows[0];
@@ -319,7 +322,7 @@ export async function updateUserById(
       email: decrypt(row.email),
     };
   } catch (err) {
-    console.error("updateUser", err);
+    logger.error({ err, userId }, "updateUser error");
     throw err;
   }
 }
@@ -361,20 +364,85 @@ export async function deactivateUserAccount(userId: string, dbPool?: Pool) {
       ["Deactivated", "User", userId],
     );
 
-    // 3. Anonymize related data (preserve foreign keys)
-    // await pool.query(
-    //   `UPDATE user_profiles
-    //    SET bio = NULL, avatar_url = NULL, preferences = '{}'
-    //    WHERE user_id = $1`,
-    //   [userId],
-    // );
+    await client.query("COMMIT");
+  } catch (err) {
+    if (client) {
+      await client.query("ROLLBACK");
+    }
+    logger.error({ err, userId }, "deactivateUserAccount error");
+    throw err;
+  } finally {
+    if (client) client.release();
+  }
+}
 
-    // 4. Delete sensitive data that shouldn't exist
-    // await pool.query(`DELETE FROM user_sessions WHERE user_id = $1`, [userId]);
+/**
+ * Authenticate user (simplified for demo)
+ * In a real app, you would verify phone number via OTP, password, etc.
+ */
+export async function authenticateUser(
+  phoneNumber: string,
+): Promise<User | null> {
+  const user = await getUserByPhoneNumber(phoneNumber);
 
-    // await pool.query(`DELETE FROM user_api_keys WHERE user_id = $1`, [userId]);
+  if (!user) {
+    // Auto-create user for demo (in production, require proper registration)
+    try {
+      return await createUser({ phone_number: phoneNumber });
+    } catch (error) {
+      logger.error({ err: error }, "Failed to create user");
+      return null;
+    }
+  }
 
-    // 5. Archive transaction history (optional: 
+  return user;
+}
+
+/**
+ * Get all users with their roles (admin function)
+ */
+export async function getAllUsers(): Promise<User[]> {
+  const query = `
+    SELECT 
+      u.id,
+      u.phone_number,
+      u.kyc_level,
+      u.role_id,
+      u.two_factor_secret,
+      u.two_factor_enabled,
+      u.two_factor_verified,
+      u.backup_codes,
+      u.created_at,
+      u.updated_at,
+      r.name as role_name
+    FROM users u
+    LEFT JOIN roles r ON u.role_id = r.id
+    ORDER BY u.created_at DESC
+  `;
+
+  const result = await pool.query(query);
+  return result.rows.map((row) => ({
+    ...row,
+    phone_number: decrypt(row.phone_number) as string,
+    two_factor_secret: decrypt(row.two_factor_secret),
+  }));
+}
+
+/**
+ * Get user permissions
+ */
+export async function getUserPermissions(userId: string): Promise<string[]> {
+  const query = `
+    SELECT p.name as permission_name
+    FROM permissions p
+    JOIN role_permissions rp ON p.id = rp.permission_id
+    JOIN users u ON u.role_id = rp.role_id
+    WHERE u.id = $1
+  `;
+
+  const result = await pool.query(query, [userId]);
+  return result.rows.map((row) => row.permission_name);
+}
 
 export async function invalidateUserOnPasswordChange(userId: string): Promise<void> {
   const userModel = new UserModel();
@@ -391,7 +459,7 @@ export async function invalidateUserOnPasswordChange(userId: string): Promise<vo
   try {
     await pool.query(`UPDATE refresh_token_families SET is_revoked = true WHERE user_id = $1`, [userId]);
   } catch (error) {
-    console.error("Failed to revoke refresh tokens:", error);
+    logger.error({ err: error, userId }, "Failed to revoke refresh tokens");
   }
 
   // 3. Flush Redis express-sessions and flag active stateless JWTs

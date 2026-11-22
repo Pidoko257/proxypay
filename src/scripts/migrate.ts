@@ -26,7 +26,7 @@ import { Pool } from "pg";
 import dotenv from "dotenv";
 import { MigrationRunner } from "../migrations/runner";
 import { analyzeMigrationsDir, formatImpactReport } from "../migrations/impact";
-import { formatValidationResult } from "../migrations/validation";
+import { formatValidationResult, verifyRollbackSafety } from "../migrations/validation";
 
 dotenv.config();
 
@@ -45,6 +45,9 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
 });
+
+const migrationsDir = path.resolve(__dirname, "..", "..", "migrations");
+const runner = new MigrationRunner({ pool, migrationsDir });
 
 const MIGRATION_LOCK_KEYS = [0x50585059, 0x4d494752];
 
@@ -72,19 +75,6 @@ async function withMigrationLock<T>(operation: () => Promise<T>): Promise<T> {
       lockClient.release(releaseError);
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Migrations table bootstrap
-// ---------------------------------------------------------------------------
-
-async function ensureMigrationsTable(): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version     VARCHAR(255) PRIMARY KEY,
-      applied_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,30 +118,11 @@ async function getAppliedVersionsForPreflight(): Promise<Set<string>> {
     "SELECT to_regclass('schema_migrations') IS NOT NULL AS table_exists",
   );
   if (!result.rows[0]?.table_exists) return new Set();
-  return getAppliedVersions();
-}
-
-// ---------------------------------------------------------------------------
-// Pre-flight checks
-// ---------------------------------------------------------------------------
-
-/**
- * Verifies rollback safety before any pending migration is applied: every
- * pending migration must have a matching `.down.sql` file. Failing fast here
- * (before touching the database) keeps schema changes reversible.
- */
-function verifyRollbackSafety(pending: MigrationFile[]): void {
-  const missingRollback = pending.filter((m) => !m.downPath);
-  if (missingRollback.length > 0) {
-    const names = missingRollback.map((m) => m.name).join(", ");
-    throw new Error(
-      `Invalid migration name: "${name ?? ""}". Use lowercase letters, digits and underscores, e.g. "add_user_avatar".`,
-    );
-  }
+  return runner.getAppliedVersions();
 }
 
 async function migratePreflight(): Promise<void> {
-  const all = discoverMigrations();
+  const all = runner.discover();
   const applied = await getAppliedVersionsForPreflight();
   const appliedCanonical = new Set(applied);
 
@@ -170,32 +141,12 @@ async function migratePreflight(): Promise<void> {
   );
 }
 
-async function migrateUp(options: { dryRun?: boolean } = {}): Promise<void> {
-  await migratePreflight();
-  await ensureMigrationsTable();
-
-  const all = discoverMigrations();
-  await normalizeLegacyAppliedVersions(all);
-  const applied = await getAppliedVersions();
-  const pending = all.filter((m) => !applied.has(m.version));
-
-  if (pending.length === 0) {
-    console.log("No pending migrations.");
-    return;
-  }
-
-  verifyRollbackSafety(pending);
-
-  for (const migration of pending) {
-    const sql = fs.readFileSync(migration.upPath, "utf-8");
-    console.log(
-      `${options.dryRun ? "[dry-run] " : ""}Applying migration ${migration.version}: ${migration.name}`,
+async function createMigration(name: string | undefined): Promise<void> {
+  if (!name || !/^[a-z0-9_]+$/.test(name)) {
+    throw new Error(
+      `Invalid migration name: "${name ?? ""}". Use lowercase letters, digits and underscores, e.g. "add_user_avatar".`,
     );
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(sql);
+  }
 
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const version = `${stamp}_${name}`;
@@ -237,17 +188,26 @@ const createName = process.argv[3];
         await withMigrationLock(migratePreflight);
         break;
       case "up":
-        await withMigrationLock(() => migrateUp({ dryRun }));
+        await withMigrationLock(() => runner.up({ dryRun }));
         break;
       case "down":
-        await withMigrationLock(migrateDown);
+        await withMigrationLock(() => runner.down());
         break;
       case "status":
-        await withMigrationLock(migrateStatus);
+        await withMigrationLock(printStatus);
+        break;
+      case "validate":
+        await printValidate();
+        break;
+      case "analyze":
+        await printAnalyze(jsonOutput);
+        break;
+      case "create":
+        await createMigration(createName);
         break;
       default:
         console.error(
-          `Unknown command: ${command ?? "(none)"}.\nUsage: migrate <preflight|up|down|status>`,
+          `Unknown command: ${command ?? "(none)"}.\nUsage: migrate <preflight|up|down|status|validate|analyze|create>`,
         );
         process.exitCode = 1;
     }

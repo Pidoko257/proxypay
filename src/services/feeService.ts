@@ -1,5 +1,6 @@
 import { pool } from "../config/database";
 import { layeredCache } from "./layeredCache";
+import Decimal from "decimal.js";
 
 export interface FeeConfiguration {
   id: string;
@@ -44,18 +45,27 @@ const CACHE_TTL = 3600; // 1 hour
 export class FeeService {
   /**
    * Calculate fee using active configuration
+   * ISSUE 4 FIX: Use Decimal for precise financial calculations instead of parseFloat
    */
   async calculateFee(amount: number): Promise<FeeResult> {
     const config = await this.getActiveConfiguration();
     
-    let fee = amount * (config.feePercentage / 100);
+    // Convert to Decimal for precision
+    const amountDec = new Decimal(amount);
+    const percentDec = new Decimal(config.feePercentage).dividedBy(100);
     
-    if (fee < config.feeMinimum) fee = config.feeMinimum;
-    if (fee > config.feeMaximum) fee = config.feeMaximum;
+    let fee = amountDec.times(percentDec);
+    
+    if (fee.lessThan(config.feeMinimum)) fee = new Decimal(config.feeMinimum);
+    if (fee.greaterThan(config.feeMaximum)) fee = new Decimal(config.feeMaximum);
+
+    // Round to 2 decimal places (cents)
+    fee = fee.toDecimalPlaces(2);
+    const total = amountDec.plus(fee).toDecimalPlaces(2);
 
     return {
-      fee: parseFloat(fee.toFixed(2)),
-      total: parseFloat((amount + fee).toFixed(2)),
+      fee: fee.toNumber(),
+      total: total.toNumber(),
       configUsed: config.name,
     };
   }

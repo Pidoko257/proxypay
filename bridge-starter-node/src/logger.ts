@@ -57,6 +57,106 @@ function buildTransport(): TransportSingleOptions | undefined {
 
 const transport = buildTransport();
 
+/**
+ * Field names whose values must never reach a log sink or error monitor.
+ * Matching is case-insensitive and applies at any nesting depth.
+ */
+const SENSITIVE_KEYS = new Set([
+  "authorization",
+  "apikey",
+  "api_key",
+  "secret",
+  "password",
+  "passwd",
+  "token",
+  "accesstoken",
+  "access_token",
+  "refreshtoken",
+  "refresh_token",
+  "cardnumber",
+  "card_number",
+  "cvv",
+  "cvc",
+  "pan",
+  "expiry",
+  "exp_month",
+  "exp_year",
+  "iban",
+  "accountnumber",
+  "account_number",
+  "phone",
+  "phone_number",
+  "phonenumber",
+  "msisdn",
+  "ssn",
+  "national_id",
+  "nationalid",
+  "passport",
+  "passport_number",
+  "passportnumber",
+  "id_number",
+  "idnumber",
+  "document_number",
+  "documentnumber",
+  "date_of_birth",
+  "dob",
+]);
+
+const REDACTED = "[REDACTED]";
+const MAX_DEPTH = 8;
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEYS.has(key.toLowerCase());
+}
+
+/**
+ * Scrub query strings embedded in URLs so credentials, tokens, and PII
+ * carried as query parameters are not exported to logs or Sentry.
+ */
+function scrubQueryString(value: string): string {
+  const qIndex = value.indexOf("?");
+  if (qIndex === -1) return value;
+
+  const base = value.slice(0, qIndex);
+  const query = value.slice(qIndex + 1);
+  const scrubbed = query
+    .split("&")
+    .map((pair) => {
+      const eq = pair.indexOf("=");
+      if (eq === -1) return pair;
+      const key = pair.slice(0, eq);
+      return isSensitiveKey(decodeURIComponent(key))
+        ? `${key}=${REDACTED}`
+        : pair;
+    })
+    .join("&");
+
+  return `${base}?${scrubbed}`;
+}
+
+/**
+ * Recursively sanitize an arbitrary value, redacting sensitive keys and
+ * scrubbing query strings. Handles nested objects, arrays, and provider
+ * error bodies (which are often plain strings or nested JSON).
+ */
+export function sanitize(value: unknown, depth = 0): unknown {
+  if (depth > MAX_DEPTH) return REDACTED;
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === "string") return scrubQueryString(value);
+  if (typeof value !== "object") return value;
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitize(item, depth + 1));
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = isSensitiveKey(key) ? REDACTED : sanitize(val, depth + 1);
+  }
+  return out;
+}
+
 const logger: Logger = pino(
   {
     level: LOG_LEVEL,
@@ -95,7 +195,17 @@ const logger: Logger = pino(
         "token",
         "*.token",
       ],
-      censor: "[REDACTED]",
+      censor: REDACTED,
+    },
+
+    // Centralized sanitization applied to every log object before export.
+    // Catches nested fields, query strings, and provider error bodies that
+    // the static redact paths above cannot express.
+    hooks: {
+      logMethod(args, method) {
+        const sanitized = args.map((arg) => sanitize(arg));
+        return method.apply(this, sanitized as Parameters<typeof method>);
+      },
     },
   },
   transport ? pino.transport(transport) : undefined,
@@ -113,4 +223,90 @@ export default logger;
  */
 export function childLogger(bindings: Record<string, unknown>): Logger {
   return logger.child(bindings);
+}
+
+/**
+ * Bounded error-code taxonomy for provider failures.
+ *
+ * Prometheus labels must stay low-cardinality, so provider failures are
+ * mapped to this small fixed set of codes instead of free-form error
+ * reasons. Free-form details belong in structured logs (see
+ * `logProviderFailure`), never in metric labels.
+ */
+export const PROVIDER_ERROR_CODES = [
+  "timeout",
+  "connection",
+  "rate_limited",
+  "auth",
+  "bad_request",
+  "server_error",
+  "invalid_response",
+  "unknown",
+] as const;
+
+export type ProviderErrorCode = (typeof PROVIDER_ERROR_CODES)[number];
+
+/**
+ * Map an arbitrary provider failure to a bounded error code.
+ *
+ * Accepts an Error, a string reason, or an HTTP status code and returns one
+ * of the fixed `PROVIDER_ERROR_CODES`. Anything unrecognised collapses to
+ * "unknown" so the label set can never grow unbounded.
+ */
+export function toProviderErrorCode(
+  failure: unknown,
+  status?: number,
+): ProviderErrorCode {
+  if (typeof status === "number") {
+    if (status === 401 || status === 403) return "auth";
+    if (status === 408 || status === 504) return "timeout";
+    if (status === 429) return "rate_limited";
+    if (status >= 400 && status < 500) return "bad_request";
+    if (status >= 500) return "server_error";
+  }
+
+  const raw =
+    failure instanceof Error
+      ? `${failure.name} ${failure.message}`
+      : typeof failure === "string"
+        ? failure
+        : "";
+  const text = raw.toLowerCase();
+
+  if (!text) return "unknown";
+  if (/timeout|timed out|etimedout|deadline/.test(text)) return "timeout";
+  if (/econnrefused|econnreset|enotfound|eai_again|socket|network|connection/.test(text))
+    return "connection";
+  if (/rate.?limit|too many requests|429/.test(text)) return "rate_limited";
+  if (/unauthor|forbidden|invalid.?api.?key|401|403/.test(text)) return "auth";
+  if (/invalid.?response|parse|malformed|unexpected.?payload/.test(text))
+    return "invalid_response";
+  if (/bad.?request|validation|400/.test(text)) return "bad_request";
+  if (/server.?error|internal|5\d\d/.test(text)) return "server_error";
+
+  return "unknown";
+}
+
+/**
+ * Log a provider failure with its bounded error code plus the free-form
+ * details. The bounded code is safe to use as a Prometheus label; the
+ * free-form `reason`/`error` fields stay in structured logs only.
+ */
+export function logProviderFailure(
+  provider: string,
+  failure: unknown,
+  status?: number,
+): ProviderErrorCode {
+  const code = toProviderErrorCode(failure, status);
+  logger.error(
+    {
+      provider,
+      errorCode: code,
+      status,
+      reason: failure instanceof Error ? failure.message : failure,
+      err: failure instanceof Error ? failure : undefined,
+    },
+    "Provider failure",
+  );
+  return code;
 }

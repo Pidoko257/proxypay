@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, jest } from "@jest/globals";
 import { UserModel } from "../../src/models/users";
 import { queryRead, queryWrite } from "../../src/config/database";
-import { encryptField, decryptField } from "../../src/utils/encryption";
+import { encryptField, decryptFieldOrNull } from "../../src/utils/encryption";
 
 // Mock the database client layers
 jest.mock("../../src/config/database", () => ({
@@ -18,7 +18,7 @@ jest.mock("../../src/utils/encryption", () => {
   return {
     ...actual,
     encryptField: jest.fn(actual.encryptField),
-    decryptField: jest.fn(actual.decryptField),
+    decryptFieldOrNull: jest.fn(actual.decryptFieldOrNull),
   };
 });
 
@@ -68,15 +68,15 @@ describe("UserModel - Mocked Unit Tests", () => {
         [mockUserId]
       );
 
-      expect(decryptField).toHaveBeenCalledTimes(5);
+      expect(decryptFieldOrNull).toHaveBeenCalledTimes(5);
       expect(result).toBeDefined();
-      expect(result!.firstName).toBe("v1:encrypted-firstname"); // Mocked decryptField falls back to returning input since key v1 is not loaded in this test
+      expect(result!.firstName).toBe("v1:encrypted-firstname"); // Not a real encrypted payload (no v1 key loaded, not iv:tag:ct hex), so it passes through unchanged
     });
 
     it("should decrypt sensitive fields for the user themselves", async () => {
       const result = await userModel.findById(mockUserId, { id: mockUserId, role: "user" });
 
-      expect(decryptField).toHaveBeenCalledTimes(5);
+      expect(decryptFieldOrNull).toHaveBeenCalledTimes(5);
       expect(result).toBeDefined();
       expect(result!.firstName).toBe("v1:encrypted-firstname");
     });
@@ -84,7 +84,7 @@ describe("UserModel - Mocked Unit Tests", () => {
     it("should NOT decrypt sensitive fields and return raw strings for unauthorized users", async () => {
       const result = await userModel.findById(mockUserId, { id: "unauthorized-user-id", role: "user" });
 
-      expect(decryptField).not.toHaveBeenCalled();
+      expect(decryptFieldOrNull).not.toHaveBeenCalled();
       expect(result).toBeDefined();
       expect(result!.firstName).toBe("v1:encrypted-firstname"); // Stays as raw string from DB
       expect(result!.displayName).toBe("Coffee Shop");
@@ -93,7 +93,7 @@ describe("UserModel - Mocked Unit Tests", () => {
     it("should NOT decrypt sensitive fields when requester is undefined", async () => {
       const result = await userModel.findById(mockUserId);
 
-      expect(decryptField).not.toHaveBeenCalled();
+      expect(decryptFieldOrNull).not.toHaveBeenCalled();
       expect(result).toBeDefined();
       expect(result!.firstName).toBe("v1:encrypted-firstname");
     });

@@ -4,9 +4,24 @@ import { config } from "../config/env";
 import logger from "../logger";
 
 /**
+ * Computes the HMAC-SHA256 hex digest of a raw request body using the
+ * configured webhook secret. Exposed so callback integrations and tests can
+ * sign fixtures with the exact same algorithm the middleware verifies.
+ */
+export const computeWebhookSignature = (
+  rawBody: string | Buffer,
+  secret: string = config.webhookSecret,
+): string =>
+  crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+
+/**
  * Verifies the HMAC-SHA256 signature on incoming webhook requests.
  * Rejects requests whose x-bridge-signature header does not match the
  * expected digest of the raw request body.
+ *
+ * The signature is computed over the exact raw body bytes (captured by the
+ * raw-body parser) rather than a re-serialized object, so any change to the
+ * raw payload — including key ordering or whitespace — invalidates it.
  *
  * Logs a structured warning on every rejected request so security teams
  * can monitor for signature mismatches without parsing free-text messages.
@@ -27,10 +42,13 @@ export const verifyWebhookSignature = (
     return;
   }
 
-  const expected = crypto
-    .createHmac("sha256", config.webhookSecret)
-    .update(JSON.stringify(req.body))
-    .digest("hex");
+  // Prefer the exact raw body when available; fall back to the parsed body
+  // for callers that have not wired up the raw-body parser.
+  const rawBody: string | Buffer =
+    (req as Request & { rawBody?: Buffer }).rawBody ??
+    JSON.stringify(req.body);
+
+  const expected = computeWebhookSignature(rawBody);
 
   // Use a timing-safe comparison to prevent timing-oracle attacks.
   const sigBuffer = Buffer.from(signature);

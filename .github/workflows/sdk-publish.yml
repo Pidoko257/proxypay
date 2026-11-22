@@ -26,10 +26,10 @@ on:
 # Prevent concurrent publish runs for the same ref (e.g. rapid re-publishes).
 concurrency:
   group: sdk-publish-${{ github.ref }}
-  cancel-in-progress: false   # never cancel an in-flight publish
+  cancel-in-progress: false # never cancel an in-flight publish
 
 permissions:
-  contents: read   # checkout only; no write access needed
+  contents: read # checkout only; no write access needed
 
 jobs:
   # ── 1. Resolve the release version ─────────────────────────────────────────
@@ -52,7 +52,7 @@ jobs:
   publish-kotlin-sdk:
     runs-on: ubuntu-latest
     needs: resolve-version
-    environment: sdk-publish   # optional: gate behind a manual approval environment
+    environment: sdk-publish # optional: gate behind a manual approval environment
 
     steps:
       - name: Checkout repository
@@ -91,10 +91,11 @@ jobs:
           # other CI workflows. The server only needs this env var to start;
           # no real Stellar transactions are submitted during spec generation.
           STELLAR_ISSUER_SECRET: S-DUMMY-SECRET-KEY-FOR-TESTING-PURPOSES-ONLY
+          DB_ENCRYPTION_HKDF_SALT: ci-hkdf-salt-not-for-production
 
       - name: Wait for API to be ready
         run: npx wait-on http://127.0.0.1:3000/health --timeout 30000
-        continue-on-error: true   # spec generation falls back to cached spec if server fails
+        continue-on-error: true # spec generation falls back to cached spec if server fails
 
       - name: Generate Kotlin SDK from OpenAPI spec
         run: |
@@ -205,6 +206,7 @@ jobs:
           # other CI workflows. The server only needs this env var to start;
           # no real Stellar transactions are submitted during spec generation.
           STELLAR_ISSUER_SECRET: S-DUMMY-SECRET-KEY-FOR-TESTING-PURPOSES-ONLY
+          DB_ENCRYPTION_HKDF_SALT: ci-hkdf-salt-not-for-production
 
       - name: Wait for API to be ready
         run: npx wait-on http://127.0.0.1:3000/health --timeout 30000

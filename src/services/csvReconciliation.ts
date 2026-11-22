@@ -1,7 +1,11 @@
 import { Readable } from "stream";
 import csvParser from "csv-parser";
-import { queryRead } from "../config/database";
+import { z } from "zod";
+import { queryRead, queryWrite } from "../config/database";
 import { DiscrepancyType } from "../models/reconciliation";
+
+// CSV row size limit: 50,000 rows to prevent memory exhaustion
+const MAX_CSV_ROWS = 50000;
 
 export interface ProviderCSVRow {
   reference_number?: string;
@@ -13,6 +17,23 @@ export interface ProviderCSVRow {
   provider?: string;
   [key: string]: string | undefined;
 }
+
+/**
+ * Zod schema for CSV header validation
+ * Ensures the CSV contains the required columns
+ */
+export const CSVHeaderSchema = z.object({
+  reference_number: z.string().optional(),
+  reference_id: z.string().optional(),
+  provider_reference: z.string().optional(),
+  amount: z.string(),
+  status: z.string(),
+  phone_number: z.string(),
+  provider: z.string(),
+}).strict().refine(
+  (obj) => obj.reference_number || obj.reference_id || obj.provider_reference,
+  { message: "At least one reference field (reference_number, reference_id, or provider_reference) is required" }
+);
 
 export interface ReconciliationMatch {
   reference_number: string;
@@ -60,15 +81,58 @@ export interface ReconciliationResult {
 
 /**
  * Parse CSV buffer into array of objects
+ * Validates header row against expected schema and enforces row count limit
+ * @throws Error if headers are invalid or row count exceeds limit
  */
 export async function parseCSV(buffer: Buffer): Promise<ProviderCSVRow[]> {
   return new Promise((resolve, reject) => {
     const results: ProviderCSVRow[] = [];
     const stream = Readable.from(buffer);
+    let headerValidated = false;
 
     stream
       .pipe(csvParser())
       .on("data", (data: ProviderCSVRow) => {
+        // Validate header row on first data event
+        if (!headerValidated) {
+          try {
+            // Get the actual keys from the first row to validate schema
+            const keys = Object.keys(data);
+            const headerObj: any = {};
+            for (const key of keys) {
+              headerObj[key] = typeof data[key];
+            }
+            
+            // Validate that required fields exist in the CSV
+            const requiredFields = ["amount", "status", "phone_number", "provider"];
+            const referenceFields = ["reference_number", "reference_id", "provider_reference"];
+            const hasReferenceField = referenceFields.some(f => keys.includes(f));
+            
+            for (const field of requiredFields) {
+              if (!keys.includes(field)) {
+                throw new Error(`Missing required CSV column: ${field}`);
+              }
+            }
+            
+            if (!hasReferenceField) {
+              throw new Error("CSV must contain at least one reference field: reference_number, reference_id, or provider_reference");
+            }
+            
+            headerValidated = true;
+          } catch (error) {
+            stream.destroy();
+            reject(error);
+            return;
+          }
+        }
+
+        // Enforce row count limit
+        if (results.length >= MAX_CSV_ROWS) {
+          stream.destroy();
+          reject(new Error(`CSV file exceeds maximum allowed rows (${MAX_CSV_ROWS})`));
+          return;
+        }
+
         // Trim all string values
         const trimmedData: ProviderCSVRow = {};
         for (const [key, value] of Object.entries(data)) {

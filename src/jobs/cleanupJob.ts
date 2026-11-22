@@ -29,7 +29,8 @@ export async function runCleanupJob(): Promise<void> {
   const result = await pool.query(
     `DELETE FROM transactions
      WHERE status IN ('completed', 'failed', 'cancelled')
-       AND created_at < NOW() - INTERVAL '${retentionDays} days'`,
+       AND created_at < NOW() - ($1 * INTERVAL '1 day')`,
+    [retentionDays],
   );
   const deletedCount = result?.rowCount ?? 0;
 
@@ -49,10 +50,10 @@ export async function runCleanupJob(): Promise<void> {
       `DELETE FROM idempotency_keys
        WHERE ctid IN (
          SELECT ctid FROM idempotency_keys
-         WHERE expires_at <= NOW() - INTERVAL '${IDEMPOTENCY_RETENTION_HOURS} hours'
-         LIMIT $1
+         WHERE expires_at <= NOW() - ($1 * INTERVAL '1 hour')
+         LIMIT $2
        )`,
-      [IDEMPOTENCY_BATCH_SIZE],
+      [IDEMPOTENCY_RETENTION_HOURS, IDEMPOTENCY_BATCH_SIZE],
     );
 
     const batchDeleted = batchResult?.rowCount ?? 0;

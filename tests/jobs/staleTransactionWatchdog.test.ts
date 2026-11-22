@@ -156,7 +156,8 @@ describe("runStaleTransactionWatchdog", () => {
     await runStaleTransactionWatchdog(makeService({}));
 
     expect(mockPoolQuery).toHaveBeenCalledWith(
-      expect.stringContaining("24 hours"),
+      expect.stringContaining("INTERVAL '1 hour'"),
+      [24],
     );
   });
 
@@ -166,7 +167,8 @@ describe("runStaleTransactionWatchdog", () => {
     await runStaleTransactionWatchdog(makeService({}));
 
     expect(mockPoolQuery).toHaveBeenCalledWith(
-      expect.stringContaining("12 hours"),
+      expect.stringContaining("INTERVAL '1 hour'"),
+      [12],
     );
   });
 });

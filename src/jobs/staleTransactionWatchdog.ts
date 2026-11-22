@@ -137,8 +137,9 @@ export async function runStaleTransactionWatchdog(
     `SELECT id, reference_number, provider, created_at
      FROM transactions
      WHERE status = 'pending'
-       AND created_at < NOW() - INTERVAL '${staleHours} hours'
+       AND created_at < NOW() - ($1 * INTERVAL '1 hour')
      ORDER BY created_at ASC`,
+    [staleHours],
   );
 
   if (result.rows.length === 0) {

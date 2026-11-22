@@ -2,24 +2,24 @@
  * Transparent PII Encryption Middleware
  *
  * Wraps raw SQL results and write payloads so that the fields
- *   name | address | id_number
+ *   name | address | id_number | email | phone_number
  * are automatically encrypted before INSERT/UPDATE and decrypted after SELECT.
  *
  * Usage:
  *   // Write
- *   const row = encryptPiiFields({ name: "Alice", address: "123 Main St", id_number: "A1234" });
- *   await pool.query("INSERT INTO kyc_applicants (...) VALUES ($1,$2,$3)", [row.name, row.address, row.id_number]);
+ *   const row = encryptPiiFields({ name: "Alice", address: "123 Main St", id_number: "A1234", email: "alice@example.com", phone_number: "+237671234567" });
+ *   await pool.query("INSERT INTO merchants (...) VALUES ($1,$2,$3,$4,$5)", [row.name, row.address, row.id_number, row.email, row.phone_number]);
  *
  *   // Read
- *   const result = await pool.query("SELECT * FROM kyc_applicants WHERE id = $1", [id]);
- *   const applicant = decryptPiiFields(result.rows[0]);
- *   // applicant.name, .address, .id_number are now plaintext
+ *   const result = await pool.query("SELECT * FROM merchants WHERE id = $1", [id]);
+ *   const merchant = decryptPiiFields(result.rows[0]);
+ *   // merchant.name, .address, .id_number, .email, .phone_number are now plaintext
  */
 
 import { encryptField, decryptField, encryptFieldForUser, decryptFieldForUser } from "../utils/encryption";
 
 /** Fields that carry PII and must be encrypted at rest */
-export const PII_FIELDS = ["name", "address", "id_number"] as const;
+export const PII_FIELDS = ["name", "address", "id_number", "email", "phone_number"] as const;
 export type PiiField = (typeof PII_FIELDS)[number];
 
 export type WithPii<T> = T & Partial<Record<PiiField, string | null>>;

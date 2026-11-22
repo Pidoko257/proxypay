@@ -15,7 +15,8 @@ export async function runStatusCheckJob(): Promise<void> {
     `SELECT id, reference_number, created_at
      FROM transactions
      WHERE status = 'pending'
-       AND created_at < NOW() - INTERVAL '${thresholdMinutes} minutes'`,
+       AND created_at < NOW() - ($1 * INTERVAL '1 minute')`,
+    [thresholdMinutes],
   );
 
   if (result.rows.length === 0) {

@@ -22,20 +22,28 @@ interface SorobanConfig {
   retryMaxDelayMs: number;
 }
 
-type QueueAdmissionBehavior = "reject" | "defer";
-
-interface QueuePolicy {
-  concurrency: number;
-  capacity: number;
-  providerRatePerSecond: number;
-  providerRateBurst: number;
-  admission: QueueAdmissionBehavior;
+interface SchedulerConfig {
+  /** Unique identity for this replica, used as the lock owner. */
+  replicaId: string;
+  /** How long a job lease is held before it must be renewed. */
+  leaseTtlMs: number;
+  /** How often the lease holder renews its lease. */
+  leaseRenewIntervalMs: number;
+  /** Redis URL used for distributed job locks. Empty disables distributed locking. */
+  redisUrl: string;
+  /** Key prefix for scheduler lock keys. */
+  lockKeyPrefix: string;
 }
 
-interface QueueConfig {
-  payment: QueuePolicy;
-  reconciliation: QueuePolicy;
-  notification: QueuePolicy;
+interface MonitoringConfig {
+  /** Sentry DSN. Empty disables Sentry export. */
+  sentryDsn: string;
+  /** Environment tag attached to exported events. */
+  environment: string;
+  /** Fraction of transactions sampled for tracing (0-1). */
+  tracesSampleRate: number;
+  /** When true, request/response bodies are scrubbed before logging. */
+  scrubRequestData: boolean;
 }
 
 interface Config {
@@ -45,7 +53,8 @@ interface Config {
   webhookSecret: string;
   stellar: StellarConfig;
   soroban: SorobanConfig;
-  queues: QueueConfig;
+  scheduler: SchedulerConfig;
+  monitoring: MonitoringConfig;
 }
 
 const STELLAR_NETWORKS: Record<
@@ -66,7 +75,18 @@ const STELLAR_NETWORKS: Record<
   },
 };
 
-const isProduction = process.env.NODE_ENV === "production";
+const DEFAULT_REQUIRED_LOCALES = ["en"];
+
+const DEFAULT_REQUIRED_KEYS = [
+  "payment.status.pending",
+  "payment.status.completed",
+  "payment.status.failed",
+  "payment.error.insufficient_funds",
+  "payment.error.invalid_destination",
+  "compliance.kyc.required",
+  "compliance.aml.flagged",
+  "compliance.disclaimer",
+];
 
 function resolveStellarNetwork(): StellarConfig["network"] {
   const raw = (process.env.STELLAR_NETWORK || "testnet").toLowerCase();
@@ -118,132 +138,60 @@ function resolvePositiveInt(name: string, fallback: number): number {
   return value;
 }
 
-function resolveIntInRange(
-  name: string,
-  fallback: number,
-  min: number,
-  max: number
-): number {
-  const value = resolvePositiveInt(name, fallback);
-  if (value < min || value > max) {
-    throw new Error(
-      `Invalid ${name} "${value}". Expected an integer between ${min} and ${max}.`
-    );
-  }
-  return value;
-}
-
-function resolveAdmissionBehavior(
-  name: string,
-  fallback: QueueAdmissionBehavior
-): QueueAdmissionBehavior {
-  const raw = (process.env[name] || "").trim().toLowerCase();
-  if (raw === "") {
+function resolveSampleRate(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") {
     return fallback;
   }
-  if (raw === "reject" || raw === "defer") {
-    return raw;
-  }
-  throw new Error(
-    `Invalid ${name} "${raw}". Expected one of: reject, defer.`
-  );
-}
-
-function resolveQueuePolicy(
-  prefix: string,
-  defaults: QueuePolicy
-): QueuePolicy {
-  const concurrency = resolveIntInRange(
-    `${prefix}_CONCURRENCY`,
-    defaults.concurrency,
-    1,
-    1_000
-  );
-  const capacity = resolveIntInRange(
-    `${prefix}_CAPACITY`,
-    defaults.capacity,
-    1,
-    1_000_000
-  );
-  const providerRatePerSecond = resolveIntInRange(
-    `${prefix}_PROVIDER_RATE_PER_SECOND`,
-    defaults.providerRatePerSecond,
-    1,
-    100_000
-  );
-  const providerRateBurst = resolveIntInRange(
-    `${prefix}_PROVIDER_RATE_BURST`,
-    defaults.providerRateBurst,
-    1,
-    100_000
-  );
-  if (providerRateBurst < providerRatePerSecond) {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
     throw new Error(
-      `Invalid ${prefix}_PROVIDER_RATE_BURST "${providerRateBurst}". Must be >= ${prefix}_PROVIDER_RATE_PER_SECOND (${providerRatePerSecond}).`
+      `Invalid ${name} "${raw}". Expected a number between 0 and 1.`
     );
-  }
-  if (concurrency > capacity) {
-    throw new Error(
-      `Invalid ${prefix}_CONCURRENCY "${concurrency}". Must be <= ${prefix}_CAPACITY (${capacity}).`
-    );
-  }
-  return {
-    concurrency,
-    capacity,
-    providerRatePerSecond,
-    providerRateBurst,
-    admission: resolveAdmissionBehavior(
-      `${prefix}_ADMISSION`,
-      defaults.admission
-    ),
-  };
-}
-
-function resolvePort(): number {
-  return resolveIntInRange("PORT", 3000, 1, 65_535);
-}
-
-function resolveSorobanConfig(): SorobanConfig {
-  const maxRetries = resolveIntInRange("SOROBAN_MAX_RETRIES", 3, 0, 100);
-  const retryBaseDelayMs = resolveIntInRange(
-    "SOROBAN_RETRY_BASE_DELAY_MS",
-    500,
-    1,
-    600_000
-  );
-  const retryMaxDelayMs = resolveIntInRange(
-    "SOROBAN_RETRY_MAX_DELAY_MS",
-    8_000,
-    1,
-    600_000
-  );
-  if (retryMaxDelayMs < retryBaseDelayMs) {
-    throw new Error(
-      `Invalid SOROBAN_RETRY_MAX_DELAY_MS "${retryMaxDelayMs}". Must be >= SOROBAN_RETRY_BASE_DELAY_MS (${retryBaseDelayMs}).`
-    );
-  }
-  return {
-    rpcUrl: process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
-    contractId: process.env.SOROBAN_CONTRACT_ID || "",
-    maxFeeStroops: resolveIntInRange("SOROBAN_MAX_FEE_STROOPS", 1_000_000, 1, 1_000_000_000),
-    maxInstructions: resolveIntInRange("SOROBAN_MAX_INSTRUCTIONS", 100_000_000, 1, 1_000_000_000),
-    maxCpuInsns: resolveIntInRange("SOROBAN_MAX_CPU_INSNS", 100_000_000, 1, 1_000_000_000),
-    maxMemoryBytes: resolveIntInRange("SOROBAN_MAX_MEMORY_BYTES", 41_943_040, 1, 1_073_741_824),
-    maxRetries,
-    retryBaseDelayMs,
-    retryMaxDelayMs,
-  };
-}
-
-function resolveRequiredInProduction(name: string, value: string): string {
-  if (isProduction && !value.trim()) {
-    throw new Error(`${name} is required in production.`);
   }
   return value;
+}
+
+function resolveBoolean(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  throw new Error(
+    `Invalid ${name} "${raw}". Expected a boolean (true/false).`
+  );
+}
+
+function resolveReplicaId(): string {
+  const raw = (process.env.SCHEDULER_REPLICA_ID || "").trim();
+  if (raw) {
+    return raw;
+  }
+  return `${process.env.HOSTNAME || "replica"}-${process.pid}`;
 }
 
 const stellarNetwork = resolveStellarNetwork();
 const stellarNetworkDefaults = STELLAR_NETWORKS[stellarNetwork];
+
+const schedulerLeaseTtlMs = resolvePositiveInt("SCHEDULER_LEASE_TTL_MS", 30_000);
+const schedulerLeaseRenewIntervalMs = resolvePositiveInt(
+  "SCHEDULER_LEASE_RENEW_INTERVAL_MS",
+  Math.max(1, Math.floor(schedulerLeaseTtlMs / 3))
+);
+
+if (schedulerLeaseRenewIntervalMs >= schedulerLeaseTtlMs) {
+  throw new Error(
+    `Invalid SCHEDULER_LEASE_RENEW_INTERVAL_MS "${schedulerLeaseRenewIntervalMs}". ` +
+      `Must be less than SCHEDULER_LEASE_TTL_MS "${schedulerLeaseTtlMs}".`
+  );
+}
 
 export const config: Config = {
   port: resolvePort(),
@@ -290,5 +238,18 @@ export const config: Config = {
       providerRateBurst: 100,
       admission: "defer",
     }),
+  },
+  scheduler: {
+    replicaId: resolveReplicaId(),
+    leaseTtlMs: schedulerLeaseTtlMs,
+    leaseRenewIntervalMs: schedulerLeaseRenewIntervalMs,
+    redisUrl: process.env.SCHEDULER_REDIS_URL || process.env.REDIS_URL || "",
+    lockKeyPrefix: process.env.SCHEDULER_LOCK_KEY_PREFIX || "scheduler:lock:",
+  },
+  monitoring: {
+    sentryDsn: process.env.SENTRY_DSN || "",
+    environment: process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV || "development",
+    tracesSampleRate: resolveSampleRate("SENTRY_TRACES_SAMPLE_RATE", 0),
+    scrubRequestData: resolveBoolean("MONITORING_SCRUB_REQUEST_DATA", true),
   },
 };

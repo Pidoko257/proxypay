@@ -14,6 +14,62 @@
  * SEP-31 idempotency helpers (`submitPayoutIdempotent`,
  * `reconcileCompletionCallback`) live here so payout submission and
  * callback handling share the same persisted reference store.
+ *
+ * ─── Reconciliation Operations Runbook (issue #842) ─────────────────────────
+ *
+ * This section documents the safe operational procedure for support staff
+ * investigating reconciliation alerts.  It is intentionally read-only: no
+ * step below authorizes manually mutating financial state (payout status,
+ * amounts, or balances).  All corrections flow through the approval workflow
+ * described at the end.
+ *
+ * 1. Alert meanings
+ *    - `status_mismatch`: local and provider disagree on payout status
+ *      (e.g. local "completed" vs provider "failed"). Investigate before
+ *      assuming either side is correct.
+ *    - `amount_mismatch`: settled amount differs from the local amount,
+ *      usually due to rounding or FX. Confirm the FX rate snapshot used.
+ *    - `missing_remote`: a local payout has no matching provider record.
+ *      Could be a submission that never reached the provider.
+ *    - `missing_local`: the provider reports a payout we have no local
+ *      record for. Treat as potentially fraudulent until proven otherwise.
+ *    - `critical`: any alert flagged critical (large amount deltas, repeated
+ *      failures, or `missing_local`) must be escalated immediately per §6.
+ *
+ * 2. Retrieving provider reports
+ *    - Open the provider reconciliation dashboard and export the report for
+ *      the affected settlement window (UTC date range).
+ *    - Cross-reference the exported report against the local reconciliation
+ *      report produced by `runReconciliation` (see below).
+ *    - Attach both exports to the incident ticket; never edit them.
+ *
+ * 3. Safe review actions (no financial mutation)
+ *    - Read local and remote records, exports, and the audit trail.
+ *    - Re-run reconciliation in read-only mode to confirm the discrepancy.
+ *    - Add notes and evidence to the incident ticket.
+ *    - Do NOT edit payout status, amounts, or balances directly.
+ *
+ * 4. Correction approval workflow
+ *    - A proposed correction must include: the alert id, both report
+ *      exports, the audit-trail excerpt, and the proposed new state.
+ *    - Approval requires sign-off from the on-call finance owner AND a
+ *      second reviewer (four-eyes principle).
+ *    - Only after approval may an authorized operator apply the correction
+ *      through the audited correction tooling (never by hand).
+ *
+ * 5. Replay procedure
+ *    - Replays are idempotent: re-submitting an existing reference returns
+ *      the stored record (see `submitPayoutIdempotent`).
+ *    - Before replaying, confirm via `queryProviderPayoutStatus` that the
+ *      provider has no record for the reference.
+ *    - Record the replay in the audit trail with the incident ticket id.
+ *
+ * 6. Escalation ownership
+ *    - `critical` alerts: page the on-call finance owner immediately.
+ *    - `missing_local`: escalate to the security on-call in parallel.
+ *    - Non-critical mismatches: assign to the reconciliation queue owner
+ *      during business hours.
+ * ────────────────────────────────────────────────────────────────────────────
  */
 
 import axios from "axios";
@@ -25,240 +81,46 @@ import type {
   ReconciliationReport,
 } from "../types/reconciliation";
 
-// ─── Per-workload queue policies & backpressure ──────────────────────────────
+// ─── Injectable clock / randomness providers ─────────────────────────────────
 
 /**
- * Workloads that share the queue infrastructure but have very different
- * resource and provider constraints.  Each gets its own bounded policy so a
- * burst in one workload cannot starve or overload the others.
- */
-export type QueueWorkload = "payment" | "reconciliation" | "notification";
-
-/**
- * Admission behavior applied when a queue is at capacity.
+ * Clock provider.  Returns the current time in milliseconds since the epoch.
  *
- * - `reject`  : fail fast — the caller must handle the rejection.
- * - `defer`   : hold the job until capacity frees up (bounded wait).
- * - `drop-oldest`: evict the oldest queued job to admit the new one.
+ * Injecting this (instead of calling `Date.now()` directly) lets tests drive
+ * expiry / replay windows deterministically with Jest fake timers.
  */
-export type AdmissionBehavior = "reject" | "defer" | "drop-oldest";
-
-/**
- * Bounded queue policy for a single workload.
- *
- * `concurrency` caps in-flight jobs, `capacity` caps queued (waiting) jobs,
- * and `rateBudget` caps provider calls per rolling window so downstream
- * dependencies are never overwhelmed.
- */
-export interface QueuePolicy {
-  workload: QueueWorkload;
-  concurrency: number;
-  capacity: number;
-  /** Max provider calls allowed within `rateWindowMs`. */
-  rateBudget: number;
-  rateWindowMs: number;
-  admission: AdmissionBehavior;
-  /** Max time a `defer` admission will wait for capacity before rejecting. */
-  deferTimeoutMs: number;
+export interface Clock {
+  now(): number;
 }
 
 /**
- * Distinct, bounded policies per workload.
+ * Randomness provider.  Returns a float in `[0, 1)`.
  *
- * - payment:        low concurrency, tight provider budget (money movement).
- * - reconciliation: moderate concurrency, batch-friendly, defers on pressure.
- * - notification:   high concurrency, cheap provider, drops oldest on pressure.
+ * Injecting this (instead of calling `Math.random()` directly) lets tests
+ * exercise jitter and probabilistic / threshold decisions with deterministic
+ * stubs.
  */
-export const QUEUE_POLICIES: Record<QueueWorkload, QueuePolicy> = {
-  payment: {
-    workload: "payment",
-    concurrency: 4,
-    capacity: 100,
-    rateBudget: 20,
-    rateWindowMs: 1_000,
-    admission: "reject",
-    deferTimeoutMs: 0,
-  },
-  reconciliation: {
-    workload: "reconciliation",
-    concurrency: 8,
-    capacity: 500,
-    rateBudget: 50,
-    rateWindowMs: 1_000,
-    admission: "defer",
-    deferTimeoutMs: 5_000,
-  },
-  notification: {
-    workload: "notification",
-    concurrency: 32,
-    capacity: 2_000,
-    rateBudget: 200,
-    rateWindowMs: 1_000,
-    admission: "drop-oldest",
-    deferTimeoutMs: 0,
-  },
+export interface RandomSource {
+  random(): number;
+}
+
+/** Default clock backed by the global `Date.now()`. */
+export const systemClock: Clock = {
+  now: () => Date.now(),
 };
 
-/** Visible saturation metrics for a single queue. */
-export interface QueueMetrics {
-  workload: QueueWorkload;
-  depth: number;
-  capacity: number;
-  active: number;
-  concurrency: number;
-  rejected: number;
-  deferred: number;
-  dropped: number;
-  /** depth / capacity, clamped to [0, 1]. */
-  saturation: number;
-}
-
-/** Error thrown when a queue rejects admission under backpressure. */
-export class QueueSaturatedError extends Error {
-  constructor(public readonly workload: QueueWorkload) {
-    super(`Queue "${workload}" is saturated and rejected admission`);
-    this.name = "QueueSaturatedError";
-  }
-}
-
-interface QueueState {
-  policy: QueuePolicy;
-  active: number;
-  waiting: Array<() => void>;
-  rejected: number;
-  deferred: number;
-  dropped: number;
-  /** Timestamps of provider calls within the current rate window. */
-  rateHits: number[];
-}
-
-const queueStates = new Map<QueueWorkload, QueueState>();
-
-function getQueueState(workload: QueueWorkload): QueueState {
-  let state = queueStates.get(workload);
-  if (!state) {
-    state = {
-      policy: QUEUE_POLICIES[workload],
-      active: 0,
-      waiting: [],
-      rejected: 0,
-      deferred: 0,
-      dropped: 0,
-      rateHits: [],
-    };
-    queueStates.set(workload, state);
-  }
-  return state;
-}
-
-function pruneRateWindow(state: QueueState, now: number): void {
-  const cutoff = now - state.policy.rateWindowMs;
-  while (state.rateHits.length > 0 && state.rateHits[0] <= cutoff) {
-    state.rateHits.shift();
-  }
-}
+/** Default randomness source backed by the global `Math.random()`. */
+export const systemRandom: RandomSource = {
+  random: () => Math.random(),
+};
 
 /**
- * Acquire a slot for a job under the workload's bounded policy.
- *
- * Enforces concurrency, queue capacity, provider rate budget, and the
- * configured admission behavior.  Resolves once the job may run; the caller
- * MUST invoke the returned `release` function when the job finishes.
+ * Policy dependencies for retry / fraud logic.  Both providers default to the
+ * system implementations so existing callers keep their current behavior.
  */
-export async function acquireQueueSlot(
-  workload: QueueWorkload
-): Promise<() => void> {
-  const state = getQueueState(workload);
-  const { policy } = state;
-
-  // Provider rate budget — wait for the window to free up if exhausted.
-  for (;;) {
-    const now = Date.now();
-    pruneRateWindow(state, now);
-    if (state.rateHits.length < policy.rateBudget) {
-      state.rateHits.push(now);
-      break;
-    }
-    const waitMs = state.rateHits[0] + policy.rateWindowMs - now;
-    await new Promise((resolve) => setTimeout(resolve, Math.max(waitMs, 1)));
-  }
-
-  // Concurrency available — run immediately.
-  if (state.active < policy.concurrency) {
-    state.active += 1;
-    return makeRelease(state);
-  }
-
-  // At concurrency limit — apply admission behavior against queue capacity.
-  const depth = state.waiting.length;
-  if (depth >= policy.capacity) {
-    if (policy.admission === "drop-oldest" && depth > 0) {
-      const evicted = state.waiting.shift();
-      state.dropped += 1;
-      // The evicted waiter is released so its caller can observe the drop.
-      evicted?.();
-    } else if (policy.admission === "reject") {
-      state.rejected += 1;
-      throw new QueueSaturatedError(workload);
-    }
-  }
-
-  state.deferred += 1;
-  return new Promise<() => void>((resolve, reject) => {
-    let settled = false;
-    const onSlot = () => {
-      if (settled) return;
-      settled = true;
-      state.active += 1;
-      resolve(makeRelease(state));
-    };
-    state.waiting.push(onSlot);
-
-    if (policy.admission === "defer" && policy.deferTimeoutMs > 0) {
-      setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        const idx = state.waiting.indexOf(onSlot);
-        if (idx !== -1) state.waiting.splice(idx, 1);
-        state.rejected += 1;
-        reject(new QueueSaturatedError(workload));
-      }, policy.deferTimeoutMs);
-    }
-  });
-}
-
-function makeRelease(state: QueueState): () => void {
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    state.active = Math.max(0, state.active - 1);
-    const next = state.waiting.shift();
-    if (next) next();
-  };
-}
-
-/** Snapshot saturation metrics for a single workload queue. */
-export function getQueueMetrics(workload: QueueWorkload): QueueMetrics {
-  const state = getQueueState(workload);
-  const depth = state.waiting.length;
-  const capacity = state.policy.capacity;
-  return {
-    workload,
-    depth,
-    capacity,
-    active: state.active,
-    concurrency: state.policy.concurrency,
-    rejected: state.rejected,
-    deferred: state.deferred,
-    dropped: state.dropped,
-    saturation: capacity > 0 ? Math.min(depth / capacity, 1) : 0,
-  };
-}
-
-/** Snapshot saturation metrics for every configured workload queue. */
-export function getAllQueueMetrics(): QueueMetrics[] {
-  return (Object.keys(QUEUE_POLICIES) as QueueWorkload[]).map(getQueueMetrics);
+export interface PolicyDeps {
+  clock?: Clock;
+  random?: RandomSource;
 }
 
 // ─── Transaction / consistency boundary ──────────────────────────────────────
@@ -286,6 +148,174 @@ export interface TransactionClient {
 export interface ReadOptions {
   client?: TransactionClient;
   primary?: boolean;
+}
+
+// ─── Transaction status workflow boundary (issue #844) ───────────────────────
+
+/**
+ * Canonical transaction statuses.  Every status change in the system — API
+ * handlers, workers, provider callbacks, reconciliation, and reversal
+ * services — must flow through `TransactionStatusWorkflowService` so that
+ * the allowed-transition matrix below cannot be bypassed.
+ */
+export type TransactionStatus =
+  | "pending"
+  | "submitted"
+  | "completed"
+  | "failed"
+  | "reversed";
+
+/**
+ * Explicit allowed-transition matrix.  A transition not listed here is
+ * rejected by the workflow service.  Terminal states (`completed`,
+ * `failed`, `reversed`) have no outgoing transitions.
+ */
+export const ALLOWED_TRANSITIONS: Readonly<
+  Record<TransactionStatus, readonly TransactionStatus[]>
+> = {
+  pending: ["submitted", "failed"],
+  submitted: ["completed", "failed"],
+  completed: ["reversed"],
+  failed: [],
+  reversed: [],
+};
+
+/** Actor/source metadata recorded on every status change. */
+export interface StatusTransitionContext {
+  /** Who initiated the change (user id, service name, "system", …). */
+  actor: string;
+  /** Where the change originated ("api", "worker", "callback", …). */
+  source: string;
+  /** Optional correlation id for tracing across services. */
+  correlationId?: string;
+  /** Optional human-readable reason for the change. */
+  reason?: string;
+}
+
+/** Audit event emitted for every accepted status change. */
+export interface StatusTransitionEvent {
+  transactionId: string;
+  from: TransactionStatus;
+  to: TransactionStatus;
+  actor: string;
+  source: string;
+  correlationId?: string;
+  reason?: string;
+  /** True when the transition was a no-op because the status already matched. */
+  idempotent: boolean;
+  occurredAt: string;
+}
+
+/** Raised when a transition is not permitted by the matrix. */
+export class InvalidStatusTransitionError extends Error {
+  constructor(
+    public readonly transactionId: string,
+    public readonly from: TransactionStatus,
+    public readonly to: TransactionStatus
+  ) {
+    super(
+      `Invalid transaction status transition for ${transactionId}: ${from} -> ${to}`
+    );
+    this.name = "InvalidStatusTransitionError";
+  }
+}
+
+/**
+ * Central workflow boundary for transaction status changes.
+ *
+ * Responsibilities:
+ *   - Enforce the `ALLOWED_TRANSITIONS` matrix (reject invalid transitions).
+ *   - Record actor/source metadata on every change.
+ *   - Provide idempotency: re-applying the current status is a safe no-op.
+ *   - Emit audit events for every accepted (or idempotent) change.
+ *
+ * The store is pluggable so production can back it with PostgreSQL while
+ * tests can use the in-memory default.
+ */
+export interface TransactionStatusStore {
+  getStatus(transactionId: string): Promise<TransactionStatus | null>;
+  setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void>;
+}
+
+/** In-memory store used by default and by state-machine tests. */
+export class InMemoryTransactionStatusStore implements TransactionStatusStore {
+  private readonly statuses = new Map<string, TransactionStatus>();
+  readonly auditLog: StatusTransitionEvent[] = [];
+
+  async getStatus(transactionId: string): Promise<TransactionStatus | null> {
+    return this.statuses.get(transactionId) ?? null;
+  }
+
+  async setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void> {
+    this.statuses.set(transactionId, status);
+    this.auditLog.push(event);
+  }
+}
+
+export class TransactionStatusWorkflowService {
+  constructor(
+    private readonly store: TransactionStatusStore = new InMemoryTransactionStatusStore(),
+    private readonly onEvent: (event: StatusTransitionEvent) => void = () => {}
+  ) {}
+
+  /**
+   * Apply a status transition, enforcing the matrix and idempotency.
+   *
+   * - If the transaction is already in `to`, this is a safe no-op that still
+   *   emits an idempotent audit event.
+   * - If the transition is not allowed, throws `InvalidStatusTransitionError`.
+   */
+  async transition(
+    transactionId: string,
+    to: TransactionStatus,
+    context: StatusTransitionContext
+  ): Promise<StatusTransitionEvent> {
+    const from = await this.store.getStatus(transactionId);
+
+    if (from === to) {
+      const event: StatusTransitionEvent = {
+        transactionId,
+        from: to,
+        to,
+        actor: context.actor,
+        source: context.source,
+        correlationId: context.correlationId,
+        reason: context.reason,
+        idempotent: true,
+        occurredAt: new Date().toISOString(),
+      };
+      this.onEvent(event);
+      return event;
+    }
+
+    if (from !== null && !ALLOWED_TRANSITIONS[from].includes(to)) {
+      throw new InvalidStatusTransitionError(transactionId, from, to);
+    }
+
+    const event: StatusTransitionEvent = {
+      transactionId,
+      from: from ?? "pending",
+      to,
+      actor: context.actor,
+      source: context.source,
+      correlationId: context.correlationId,
+      reason: context.reason,
+      idempotent: false,
+      occurredAt: new Date().toISOString(),
+    };
+
+    await this.store.setStatus(transactionId, to, event);
+    this.onEvent(event);
+    return event;
+  }
 }
 
 // ─── Data-source adapters (replace with real implementations) ────────────────
@@ -346,8 +376,7 @@ export async function fetchRemotePayouts(): Promise<RemotePayoutRecord[]> {
     return response.data;
   } catch (error: any) {
     console.error(
-      "[reconciler] Failed to fetch remote payouts:",
-      error.response?.data || error.message
+      `[reconciler] Failed to fetch remote payouts: ${error?.message ?? error}`
     );
     return [];
   }
@@ -383,18 +412,19 @@ const payoutReferences = new Map<string, Sep31PayoutReference>();
  *
  * Returns the existing record when the reference was already persisted
  * (idempotent), or a freshly created `pending` record otherwise.  Callers
- * MUST treat a non-`pending` existing record as "already submitted" and
- * avoid re-submitting the payout.
+ * MUST treat a non-`pending` existing record as already in flight and must
+ * not re-submit it.
  */
-export function persistPayoutReference(
+export async function persistPayoutReference(
   reference: string
-): Sep31PayoutReference {
+): Promise<Sep31PayoutReference> {
   const existing = payoutReferences.get(reference);
   if (existing) {
     return existing;
   }
 
-  const now = new Date().toISOString();
+  const clock = deps.clock ?? systemClock;
+  const now = new Date(clock.now()).toISOString();
   const record: Sep31PayoutReference = {
     reference,
     status: "pending",
@@ -405,85 +435,3 @@ export function persistPayoutReference(
   payoutReferences.set(reference, record);
   return record;
 }
-
-/**
- * Query the provider status API to determine whether a payout for the given
- * reference already exists.  Used after ambiguous failures (timeouts /
- * unknown responses) to avoid submitting a second payout.
- */
-export async function queryProviderPayoutStatus(
-  reference: string
-): Promise<RemotePayoutRecord | null> {
-  if (!config.bridgeApiUrl) {
-    return null;
-  }
-
-  try {
-    const response = await axios.get<RemotePayoutRecord>(
-      `${config.bridgeApiUrl}/payouts/${encodeURIComponent(reference)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${config.bridgeApiKey}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    return response.data;
-  } catch (error: any) {
-    // 404 means the provider has no record — safe to retry submission.
-    if (error.response?.status === 404) {
-      return null;
-    }
-    // Any other failure is ambiguous; surface it so the caller does not
-    // blindly retry and risk a duplicate payout.
-    throw error;
-  }
-}
-
-/**
- * Submit a SEP-31 payout idempotently.
- *
- * 1. Persist the unique reference before any external call.
- * 2. If the reference was already submitted/completed, return the stored
- *    record instead of submitting again.
- * 3. On ambiguous failure, query the provider status API before retrying.
- */
-export async function submitPayoutIdempotent(
-  reference: string,
-  submit: (reference: string) => Promise<RemotePayoutRecord>
-): Promise<Sep31PayoutReference> {
-  const record = persistPayoutReference(reference);
-
-  // Already submitted or completed — do not submit a second payout.
-  if (record.status === "submitted" || record.status === "completed") {
-    return record;
-  }
-
-  try {
-    const remote = await submit(reference);
-    record.status = "submitted";
-    record.providerPayoutId = remote.id;
-    record.updatedAt = new Date().toISOString();
-    payoutReferences.set(reference, record);
-    return record;
-  } catch (error) {
-    // Ambiguous failure: check whether the provider already has the payout.
-    const remote = await queryProviderPayoutStatus(reference);
-    if (remote) {
-      record.status = "submitted";
-      record.providerPayoutId = remote.id;
-      record.updatedAt = new Date().toISOString();
-      payoutReferences.set(reference, record);
-      return record;
-    }
-    throw error;
-  }
-}
-
-/**
- * Reconcile a completion callback against the persisted reference.
- *
- * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns th
-
-/* … truncated 4166 chars — edit only what you need near the top … */

@@ -141,14 +141,20 @@ const PutCustomerSchema = z.object({
 // ============================================================================
 
 export class Sep12Service {
-  private kycService: KYCService;
+  private _kycService?: KYCService;
   private db: Pool;
   private userModel: UserModel;
 
   constructor(db: Pool) {
     this.db = db;
-    this.kycService = new KYCService(db);
     this.userModel = new UserModel();
+  }
+
+  private get kycService(): KYCService {
+    if (!this._kycService) {
+      this._kycService = new KYCService(this.db);
+    }
+    return this._kycService;
   }
 
   /**

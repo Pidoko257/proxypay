@@ -57,6 +57,106 @@ function buildTransport(): TransportSingleOptions | undefined {
 
 const transport = buildTransport();
 
+/**
+ * Field names whose values must never reach a log sink or error monitor.
+ * Matching is case-insensitive and applies at any nesting depth.
+ */
+const SENSITIVE_KEYS = new Set([
+  "authorization",
+  "apikey",
+  "api_key",
+  "secret",
+  "password",
+  "passwd",
+  "token",
+  "accesstoken",
+  "access_token",
+  "refreshtoken",
+  "refresh_token",
+  "cardnumber",
+  "card_number",
+  "cvv",
+  "cvc",
+  "pan",
+  "expiry",
+  "exp_month",
+  "exp_year",
+  "iban",
+  "accountnumber",
+  "account_number",
+  "phone",
+  "phone_number",
+  "phonenumber",
+  "msisdn",
+  "ssn",
+  "national_id",
+  "nationalid",
+  "passport",
+  "passport_number",
+  "passportnumber",
+  "id_number",
+  "idnumber",
+  "document_number",
+  "documentnumber",
+  "date_of_birth",
+  "dob",
+]);
+
+const REDACTED = "[REDACTED]";
+const MAX_DEPTH = 8;
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEYS.has(key.toLowerCase());
+}
+
+/**
+ * Scrub query strings embedded in URLs so credentials, tokens, and PII
+ * carried as query parameters are not exported to logs or Sentry.
+ */
+function scrubQueryString(value: string): string {
+  const qIndex = value.indexOf("?");
+  if (qIndex === -1) return value;
+
+  const base = value.slice(0, qIndex);
+  const query = value.slice(qIndex + 1);
+  const scrubbed = query
+    .split("&")
+    .map((pair) => {
+      const eq = pair.indexOf("=");
+      if (eq === -1) return pair;
+      const key = pair.slice(0, eq);
+      return isSensitiveKey(decodeURIComponent(key))
+        ? `${key}=${REDACTED}`
+        : pair;
+    })
+    .join("&");
+
+  return `${base}?${scrubbed}`;
+}
+
+/**
+ * Recursively sanitize an arbitrary value, redacting sensitive keys and
+ * scrubbing query strings. Handles nested objects, arrays, and provider
+ * error bodies (which are often plain strings or nested JSON).
+ */
+export function sanitize(value: unknown, depth = 0): unknown {
+  if (depth > MAX_DEPTH) return REDACTED;
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === "string") return scrubQueryString(value);
+  if (typeof value !== "object") return value;
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitize(item, depth + 1));
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = isSensitiveKey(key) ? REDACTED : sanitize(val, depth + 1);
+  }
+  return out;
+}
+
 const logger: Logger = pino(
   {
     level: LOG_LEVEL,
@@ -95,7 +195,17 @@ const logger: Logger = pino(
         "token",
         "*.token",
       ],
-      censor: "[REDACTED]",
+      censor: REDACTED,
+    },
+
+    // Centralized sanitization applied to every log object before export.
+    // Catches nested fields, query strings, and provider error bodies that
+    // the static redact paths above cannot express.
+    hooks: {
+      logMethod(args, method) {
+        const sanitized = args.map((arg) => sanitize(arg));
+        return method.apply(this, sanitized as Parameters<typeof method>);
+      },
     },
   },
   transport ? pino.transport(transport) : undefined,

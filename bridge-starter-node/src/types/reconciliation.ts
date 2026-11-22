@@ -1,95 +1,312 @@
 /**
- * Types for the provider reconciliation system.
- */
-
-/** Status of a single payout as tracked locally. */
-export type PayoutStatus =
-  | "pending"
-  | "completed"
-  | "failed"
-  | "mismatched"
-  | "missing_local"
-  | "missing_remote";
-
-/**
- * Consistency boundary for a read.
+ * Reconciliation domain types.
  *
- * - `primary`: force the read onto the primary so it observes preceding writes
- *   in the same workflow (read-after-write).
- * - `replica`: allow the read to be served by a read replica.
+ * Includes scheduler coordination types used to prevent duplicate scheduled
+ * jobs across application replicas (distributed lease + fencing).
  */
-export type ReadConsistency = "primary" | "replica";
+
+export type ReconciliationJobStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped';
+
+export interface ReconciliationJob {
+  id: string;
+  name: string;
+  status: ReconciliationJobStatus;
+  startedAt?: Date;
+  completedAt?: Date;
+  error?: string;
+}
 
 /**
- * Opaque transaction client handle. Query helpers accept this so reads stay
- * inside the caller's transaction boundary instead of opening a new
- * connection (which could be routed to a replica).
+ * Outcome of attempting to acquire a distributed lease for a scheduled job.
+ * `skipped` means another replica currently holds a valid lease.
  */
-export interface TransactionClient {
-  /** Marker used to distinguish a transaction client from a pool client. */  readonly __transactionClient: true;
+export type SchedulerLeaseOutcome = 'acquired' | 'skipped';
+
+/**
+ * A distributed lease held by a single replica for a given scheduled job.
+ *
+ * `fencingToken` is monotonically increasing per job and must be presented
+ * on every renewal/release so a stale holder cannot act after its lease has
+ * expired and been re-acquired by another replica.
+ */
+export interface SchedulerLease {
+  jobName: string;
+  ownerId: string;
+  fencingToken: number;
+  acquiredAt: Date;
+  expiresAt: Date;
 }
 
-/** Options accepted by read helpers to control routing and transaction scope. */
-export interface ReadOptions {
-  /**
-   * Explicit transaction client. When provided, the read runs inside the
-   * caller's transaction and is never routed to a replica.
-   */
-  client?: TransactionClient;
-  /**
-   * Consistency boundary for the read. Defaults to `replica` when no
-   * transaction client is supplied. Read-after-write operations must set
-   * this to `primary`.
-   */
-  consistency?: ReadConsistency;
+export interface SchedulerLeaseAcquisition {
+  outcome: SchedulerLeaseOutcome;
+  lease?: SchedulerLease;
+  /** Present when `outcome` is `skipped`; identifies the current holder. */
+  heldBy?: string;
 }
 
-/** A payout record as stored in the local ledger. */
-export interface LocalPayoutRecord {
-  /** Unique payout / transaction ID. */
-  id: string;
-  /** Amount in the smallest currency unit (e.g. cents). */
+/**
+ * Recorded scheduler execution event for observability. Both `started` and
+ * `skipped` executions are recorded so operators can see contention across
+ * replicas.
+ */
+export type SchedulerExecutionEventType = 'started' | 'skipped';
+
+export interface SchedulerExecutionRecord {
+  jobName: string;
+  event: SchedulerExecutionEventType;
+  ownerId: string;
+  fencingToken?: number;
+  /** Present when `event` is `skipped`; identifies the lease holder. */
+  heldBy?: string;
+  recordedAt: Date;
+}
+
+/**
+ * Shared provider adapter contract.
+ *
+ * Every supported provider implementation (and its mock / recorded sanitized
+ * fixtures) must satisfy this interface so the same contract test suite can
+ * run against all of them. It covers authentication, collection, payout,
+ * status lookup, callback handling, and batch partial-failure behavior.
+ */
+export interface ProviderAdapter {
+  /** Stable provider identifier (e.g. "mtn", "airtel"). */
+  readonly provider: string;
+
+  /** Authenticate against the provider and return a usable session token. */
+  authenticate(credentials: ProviderCredentials): Promise<AuthSession>;
+
+  /** Collect (pull) funds from a customer into the provider account. */
+  collect(request: CollectionRequest): Promise<CollectionResult>;
+
+  /** Send a payout to a recipient. */
+  payout(request: PayoutRequest): Promise<PayoutResult>;
+
+  /** Look up the current status of a previously initiated operation. */
+  getStatus(reference: string): Promise<StatusResult>;
+
+  /** Parse and validate an inbound provider callback / webhook payload. */
+  handleCallback(payload: unknown): Promise<CallbackResult>;
+
+  /**
+   * Execute a batch of payouts. Must not throw on individual failures;
+   * instead it returns per-item results so partial failures are observable.
+   */
+  payoutBatch(requests: PayoutRequest[]): Promise<BatchResult<PayoutResult>>;
+}
+
+/** Credentials used to authenticate with a provider. */
+export interface ProviderCredentials {
+  apiKey: string;
+  apiSecret: string;
+  /** Optional base URL override (used by mocks / fixtures). */
+  baseUrl?: string;
+}
+
+/** Result of a successful authentication. */
+export interface AuthSession {
+  token: string;
+  /** ISO-8601 expiry timestamp. */
+  expiresAt: string;
+}
+
+/** A request to collect funds from a customer. */
+export interface CollectionRequest {
+  /** Client-generated idempotency reference. */
+  reference: string;
   amount: number;
-  /** ISO 4217 currency code. */
   currency: string;
-  /** Recipient identifier (phone number, wallet address, etc.). */
   recipient: string;
-  /** Current status known locally. */
+}
+
+/** Result of a collection request. */
+export interface CollectionResult {
+  reference: string;
   status: PayoutStatus;
-  /** ISO-8601 timestamp of when the payout was initiated. */
-  createdAt: string;
+  providerReference: string;
 }
 
-/** A payout record as returned by the provider / remote API. */
-export interface RemotePayoutRecord {
-  id: string;
+/** A request to send a payout. */
+export interface PayoutRequest {
+  /** Client-generated idempotency reference. */
+  reference: string;
   amount: number;
   currency: string;
   recipient: string;
-  status: string;
-  createdAt: string;
 }
 
-/** The result of reconciling a single payout. */
-export interface ReconciliationEntry {
-  payoutId: string;
-  localStatus: string | null;
-  remoteStatus: string | null;
-  localAmount: number | null;
-  remoteAmount: number | null;
-  match: boolean;
-  discrepancy: string | null;
+/** Result of a payout request. */
+export interface PayoutResult {
+  reference: string;
+  status: PayoutStatus;
+  providerReference: string;
 }
 
-/** Aggregated result of a full reconciliation run. */
-export interface ReconciliationReport {
-  /** ISO-8601 timestamp of when the reconciliation started. */
-  reconciledAt: string;
-  totalLocal: number;
-  totalRemote: number;
-  matched: number;
-  mismatched: number;
-  missingLocal: number;
-  missingRemote: number;
-  entries: ReconciliationEntry[];
+/** Result of a status lookup. */
+export interface StatusResult {
+  reference: string;
+  status: PayoutStatus;
+  providerReference: string;
+}
+
+/** Result of parsing an inbound callback. */
+export interface CallbackResult {
+  reference: string;
+  status: PayoutStatus;
+  /** Whether the callback signature / payload was valid. */
+  valid: boolean;
+}
+
+/** Per-item outcome within a batch operation. */
+export interface BatchItemResult<T> {
+  reference: string;
+  ok: boolean;
+  result: T | null;
+  error: string | null;
+}
+
+/** Aggregated result of a batch operation, preserving partial failures. */
+export interface BatchResult<T> {
+  items: BatchItemResult<T>[];
+  succeeded: number;
+  failed: number;
+}
+
+/**
+ * Reconciliation operations runbook.
+ *
+ * Support staff use this reference to interpret reconciliation alerts and to
+ * investigate discrepancies safely. It is intentionally data-only: it never
+ * mutates financial state. Corrections and replays always go through the
+ * approval workflow described below.
+ */
+export interface ReconciliationRunbook {
+  /** Human-readable title of the runbook. */
+  title: string;
+  /** Meaning of each reconciliation alert type. */
+  alerts: ReconciliationAlertDoc[];
+  /** How to retrieve provider reconciliation reports. */
+  reportRetrieval: ReportRetrievalDoc;
+  /** Safe, read-only review actions support staff may take. */
+  reviewActions: ReviewActionDoc[];
+  /** Correction approval workflow. */
+  correctionApproval: CorrectionApprovalDoc;
+  /** Replay procedure for re-running reconciliation. */
+  replayProcedure: ReplayProcedureDoc;
+  /** Escalation ownership. */
+  escalation: EscalationDoc;
+}
+
+/** Documentation for a single reconciliation alert type. */
+export interface ReconciliationAlertDoc {
+  /** Alert identifier as emitted by the reconciliation job. */
+  alertType: string;
+  /** What the alert means in plain language. */
+  meaning: string;
+  /** Typical causes support staff should consider. */
+  likelyCauses: string[];
+  /** Safe first steps to investigate. */
+  firstSteps: string[];
+}
+
+/** How to retrieve provider reconciliation reports. */
+export interface ReportRetrievalDoc {
+  /** Where the provider reconciliation dashboard lives. */
+  dashboard: string;
+  /** Steps to export / download the provider report. */
+  steps: string[];
+  /** Notes on matching report periods to local reconciliation runs. */
+  notes: string[];
+}
+
+/** A safe, read-only review action. */
+export interface ReviewActionDoc {
+  /** Short name of the action. */
+  action: string;
+  /** What the action does and why it is safe. */
+  description: string;
+  /** Explicitly forbidden manual changes during investigation. */
+  forbidden: string[];
+}
+
+/** Correction approval workflow. */
+export interface CorrectionApprovalDoc {
+  /** Who must approve a correction. */
+  approvers: string[];
+  /** Evidence required before a correction is approved. */
+  requiredEvidence: string[];
+  /** Ordered steps of the approval workflow. */
+  steps: string[];
+}
+
+/** Replay procedure for re-running reconciliation. */
+export interface ReplayProcedureDoc {
+  /** Preconditions that must hold before replaying. */
+  preconditions: string[];
+  /** Ordered replay steps. */
+  steps: string[];
+  /** How to verify the replay succeeded. */
+  verification: string[];
+}
+
+/** Escalation ownership. */
+export interface EscalationDoc {
+  /** Owner responsible for each escalation tier. */
+  owners: EscalationOwner[];
+  /** When to escalate. */
+  triggers: string[];
+}
+
+/** A single escalation tier and its owner. */
+export interface EscalationOwner {
+  /** Tier name (e.g. "L1 support", "payments on-call"). */
+  tier: string;
+  /** Team or role that owns the tier. */
+  owner: string;
+  /** Response expectation for the tier. */
+  responsibility: string;
+}
+
+/**
+ * Reporting timezone configuration for a merchant / provider.
+ *
+ * Report and reconciliation date boundaries are derived from this IANA
+ * timezone (e.g. `America/New_York`) rather than application time, so records
+ * are classified consistently across provider and customer timezones.
+ */
+export interface ReportingTimezoneConfig {
+  /** Merchant / provider identifier the reporting timezone applies to. */
+  merchantId: string;
+  /** IANA timezone name used to compute report date boundaries. */
+  reportingTimezone: string;
+}
+
+/**
+ * A half-open UTC interval `[startUtc, endUtc)` used to bound report and
+ * reconciliation queries. Both endpoints are ISO-8601 UTC timestamps; the
+ * start is inclusive and the end is exclusive.
+ */
+export interface UtcInterval {
+  /** Inclusive ISO-8601 UTC start of the interval. */
+  startUtc: string;
+  /** Exclusive ISO-8601 UTC end of the interval. */
+  endUtc: string;
+}
+
+/**
+ * A reporting period expressed as a local calendar date range plus the
+ * resolved half-open UTC interval used for querying.
+ */
+export interface ReportingPeriod extends UtcInterval {
+  /** IANA timezone the period was resolved in. */
+  reportingTimezone: string;
+  /** Inclusive local calendar date (`YYYY-MM-DD`) of the period start. */
+  startDate: string;
+  /** Exclusive local calendar date (`YYYY-MM-DD`) of the period end. */
+  endDate: string;
 }

@@ -68,133 +68,128 @@ export class ApiError extends Error {
   }
 }
 
-// ── Provider failure taxonomy ───────────────────────────────────────────────
-// Bounded set of provider failure codes used as Prometheus metric labels.
-// Free-form upstream error text MUST NOT be used as a label value — it would
-// explode time-series cardinality. Details go to structured logs instead.
-export enum ProviderErrorCode {
-  TIMEOUT = "TIMEOUT",
-  RATE_LIMITED = "RATE_LIMITED",
-  AUTH_FAILED = "AUTH_FAILED",
-  UPSTREAM_5XX = "UPSTREAM_5XX",
-  UPSTREAM_4XX = "UPSTREAM_4XX",
-  NETWORK_ERROR = "NETWORK_ERROR",
-  INVALID_RESPONSE = "INVALID_RESPONSE",
-  UNKNOWN = "UNKNOWN",
+// ── Sensitive data sanitization ─────────────────────────────────────────────
+// Centralized scrub rules applied before any event/request data leaves the
+// process (Sentry export, request logging, error logging). Covers payment
+// payloads, credentials, phone numbers, and identity documents, including
+// nested objects, query strings, and provider error bodies.
+const REDACTED = "[REDACTED]";
+
+// Field names (case-insensitive, matched as substrings) whose values must be
+// scrubbed wherever they appear in a payload.
+const SENSITIVE_KEY_PATTERNS: RegExp[] = [
+  /password/i,
+  /passwd/i,
+  /secret/i,
+  /token/i,
+  /api[-_]?key/i,
+  /authorization/i,
+  /credential/i,
+  /cookie/i,
+  /session/i,
+  /card[-_]?number/i,
+  /cardnumber/i,
+  /cvv/i,
+  /cvc/i,
+  /pan/i,
+  /iban/i,
+  /account[-_]?number/i,
+  /routing[-_]?number/i,
+  /phone/i,
+  /msisdn/i,
+  /ssn/i,
+  /social[-_]?security/i,
+  /passport/i,
+  /driver[-_]?licen[cs]e/i,
+  /national[-_]?id/i,
+  /identity[-_]?document/i,
+  /id[-_]?document/i,
+  /document[-_]?number/i,
+  /date[-_]?of[-_]?birth/i,
+  /dob/i,
+];
+
+// Query-string parameter names that must be scrubbed.
+const SENSITIVE_QUERY_PATTERNS: RegExp[] = SENSITIVE_KEY_PATTERNS;
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_PATTERNS.some((re) => re.test(key));
 }
 
-// Maps an arbitrary provider failure to a bounded error code. The original
-// free-form detail is preserved for structured logging by the caller.
-export function classifyProviderError(err: unknown): ProviderErrorCode {
-  if (err && typeof err === "object") {
-    const anyErr = err as { code?: unknown; status?: unknown; statusCode?: unknown; name?: unknown };
-    const status = typeof anyErr.status === "number"
-      ? anyErr.status
-      : typeof anyErr.statusCode === "number"
-        ? anyErr.statusCode
-        : undefined;
-
-    if (status !== undefined) {
-      if (status === 401 || status === 403) return ProviderErrorCode.AUTH_FAILED;
-      if (status === 429) return ProviderErrorCode.RATE_LIMITED;
-      if (status === 408) return ProviderErrorCode.TIMEOUT;
-      if (status >= 500) return ProviderErrorCode.UPSTREAM_5XX;
-      if (status >= 400) return ProviderErrorCode.UPSTREAM_4XX;
-    }
-
-    const code = typeof anyErr.code === "string" ? anyErr.code : undefined;
-    if (code) {
-      switch (code) {
-        case "ETIMEDOUT":
-        case "ESOCKETTIMEDOUT":
-          return ProviderErrorCode.TIMEOUT;
-        case "ECONNRESET":
-        case "ECONNREFUSED":
-        case "ENOTFOUND":
-        case "EAI_AGAIN":
-          return ProviderErrorCode.NETWORK_ERROR;
-        case "ERR_BAD_RESPONSE":
-        case "ERR_BAD_REQUEST":
-          return ProviderErrorCode.INVALID_RESPONSE;
-      }
-    }
-
-    if (anyErr.name === "AbortError" || anyErr.name === "TimeoutError") {
-      return ProviderErrorCode.TIMEOUT;
+function scrubQueryString(qs: string): string {
+  if (!qs) return qs;
+  const params = new URLSearchParams(qs);
+  let changed = false;
+  for (const key of Array.from(params.keys())) {
+    if (SENSITIVE_QUERY_PATTERNS.some((re) => re.test(key))) {
+      params.set(key, REDACTED);
+      changed = true;
     }
   }
-
-  return ProviderErrorCode.UNKNOWN;
+  return changed ? params.toString() : qs;
 }
 
-// ── Operational health ──────────────────────────────────────────────────────
-// Public callers only ever see a minimal overall state. Detailed provider /
-// dependency diagnostics are gated behind admin authorization and audited.
-export type HealthState = "ok" | "degraded" | "down";
-
-export interface PublicHealth {
-  status: HealthState;
+function scrubUrl(url: string): string {
+  const qIndex = url.indexOf("?");
+  if (qIndex === -1) return url;
+  const base = url.slice(0, qIndex);
+  const qs = url.slice(qIndex + 1);
+  return `${base}?${scrubQueryString(qs)}`;
 }
 
-export interface DependencyHealth {
-  name: string;
-  status: HealthState;
-  latencyMs?: number;
-  error?: string;
-}
+// Recursively scrub an arbitrary value. Handles nested objects/arrays, query
+// strings embedded in URLs, and provider error bodies (which are often nested
+// objects or JSON strings).
+export function sanitize(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (value === null || value === undefined) return value;
 
-export interface DetailedHealth extends PublicHealth {
-  uptimeSeconds: number;
-  dependencies: DependencyHealth[];
-}
-
-// Pluggable dependency probe. Defaults to an empty set so the endpoint stays
-// honest (no fabricated topology) until real probes are registered.
-let dependencyProbes: Array<() => Promise<DependencyHealth>> = [];
-
-export function registerDependencyProbe(
-  probe: () => Promise<DependencyHealth>,
-): void {
-  dependencyProbes = [...dependencyProbes, probe];
-}
-
-async function collectDetailedHealth(): Promise<DetailedHealth> {
-  const dependencies = await Promise.all(
-    dependencyProbes.map(async (probe) => {
-      try {
-        return await probe();
-      } catch (err) {
-        return {
-          name: "unknown",
-          status: "down" as HealthState,
-          error: err instanceof Error ? err.message : "probe failed",
-        };
-      }
-    }),
-  );
-
-  const status: HealthState = dependencies.some((d) => d.status === "down")
-    ? "down"
-    : dependencies.some((d) => d.status === "degraded")
-      ? "degraded"
-      : "ok";
-
-  return {
-    status,
-    uptimeSeconds: Math.floor(process.uptime()),
-    dependencies,
-  };
-}
-
-// Admin authorization for detailed diagnostics. Reuses the existing RBAC
-// contract: callers must present an admin role via the authenticated request.
-function requireAdmin(req: Request, _res: Response, next: NextFunction): void {
-  const role = (req as any).user?.role ?? req.headers["x-user-role"];
-  if (role !== "admin") {
-    next(new ApiError(ErrorCode.FORBIDDEN, "Admin authorization required"));
-    return;
+  if (typeof value === "string") {
+    // Scrub query strings embedded in URLs.
+    if (value.includes("?")) return scrubUrl(value);
+    return value;
   }
-  next();
+
+  if (typeof value !== "object") return value;
+
+  if (seen.has(value as object)) return "[Circular]";
+  seen.add(value as object);
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitize(item, seen));
+  }
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: sanitize(value.message, seen),
+      stack: value.stack,
+    };
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (isSensitiveKey(key)) {
+      out[key] = REDACTED;
+    } else {
+      out[key] = sanitize(val, seen);
+    }
+  }
+  return out;
+}
+
+// Sanitize a Sentry event before export.
+export function sanitizeSentryEvent<T extends Record<string, any>>(event: T): T {
+  const scrubbed = sanitize(event) as T;
+  if (scrubbed && typeof scrubbed === "object") {
+    const req = (scrubbed as any).request;
+    if (req && typeof req === "object") {
+      if (typeof req.url === "string") req.url = scrubUrl(req.url);
+      if (typeof req.query_string === "string") {
+        req.query_string = scrubQueryString(req.query_string);
+      }
+    }
+  }
+  return scrubbed;
 }
 
 const app = express();
@@ -210,7 +205,8 @@ app.use(
 
 // ── HTTP request / response logging ─────────────────────────────────────────
 // Logs every inbound request and its outcome as a structured JSON line.
-// Sensitive headers (Authorization, etc.) are redacted by the pino logger.
+// Sensitive headers (Authorization, etc.) are redacted by the pino logger, and
+// query strings are scrubbed via the centralized sanitizer.
 app.use((req: Request, res: Response, next: NextFunction) => {
   const startMs = Date.now();
 
@@ -224,6 +220,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       {
         method: req.method,
         path: req.path,
+        query: scrubQueryString(req.originalUrl.split("?")[1] ?? ""),
         statusCode: res.statusCode,
         durationMs,
         requestId: req.headers["x-request-id"] ?? undefined,
@@ -276,8 +273,9 @@ app.get(
 app.use("/api", webhookRoutes);
 
 // ── Shared error middleware ─────────────────────────────────────────────────
-// Maps ApiError to its stable status/code and everything else to a generic
-// 500 so internal details never leak to clients.
+// Maps expected domain errors (ApiError) to their stable status + code, and
+// falls back to a generic INTERNAL_ERROR for anything unexpected. Error data
+// is sanitized before logging so provider error bodies never leak secrets.
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ApiError) {
     const body: ErrorResponse = {
@@ -287,7 +285,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     return;
   }
 
-  logger.error({ err }, "Unhandled error");
+  logger.error({ err: sanitize(err) }, "Unhandled error");
   const body: ErrorResponse = {
     error: { code: ErrorCode.INTERNAL_ERROR, message: "Internal server error" },
   };

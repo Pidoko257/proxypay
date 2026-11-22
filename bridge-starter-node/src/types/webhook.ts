@@ -47,68 +47,84 @@ export interface StellarPayoutValidationResult {
 }
 
 /**
- * Bounded taxonomy for provider failures used as a Prometheus label.
- * Keep this set small and fixed so metric label cardinality stays bounded;
- * free-form error details belong in structured logs, not metric labels.
+ * Shared provider adapter contract.
+ *
+ * Every supported provider implementation must satisfy this interface so the
+ * reusable contract test suite can run identical assertions against each
+ * provider mock and recorded sanitized API fixture.
  */
-export type ProviderErrorCode =
-  | 'TIMEOUT'
-  | 'RATE_LIMITED'
-  | 'UNAUTHORIZED'
-  | 'NOT_FOUND'
-  | 'BAD_REQUEST'
-  | 'UPSTREAM_ERROR'
-  | 'NETWORK_ERROR'
-  | 'UNKNOWN';
+export interface ProviderAuthResult {
+  authenticated: boolean;
+  token?: string;
+  error?: string;
+}
 
-export const PROVIDER_ERROR_CODES: readonly ProviderErrorCode[] = [
-  'TIMEOUT',
-  'RATE_LIMITED',
-  'UNAUTHORIZED',
-  'NOT_FOUND',
-  'BAD_REQUEST',
-  'UPSTREAM_ERROR',
-  'NETWORK_ERROR',
-  'UNKNOWN',
-];
+export interface ProviderCollectionRequest {
+  amount: number;
+  currency: string;
+  reference: string;
+  customerId: string;
+}
 
-/**
- * Map an arbitrary provider failure to a bounded error code.
- * The original error is preserved for structured logging by callers.
- */
-export function toProviderErrorCode(error: unknown): ProviderErrorCode {
-  if (error == null) {
-    return 'UNKNOWN';
-  }
+export interface ProviderCollectionResult {
+  id: string;
+  status: 'pending' | 'succeeded' | 'failed';
+  amount: number;
+  currency: string;
+  error?: string;
+}
 
-  const err = error as { code?: unknown; status?: unknown; statusCode?: unknown; name?: unknown; message?: unknown };
+export interface ProviderPayoutRequest {
+  amount: number;
+  currency: string;
+  reference: string;
+  destination: string;
+}
 
-  const rawCode = typeof err.code === 'string' ? err.code.toUpperCase() : undefined;
-  if (rawCode && (PROVIDER_ERROR_CODES as readonly string[]).includes(rawCode)) {
-    return rawCode as ProviderErrorCode;
-  }
+export interface ProviderPayoutResult {
+  id: string;
+  status: 'pending' | 'succeeded' | 'failed';
+  amount: number;
+  currency: string;
+  error?: string;
+}
 
-  const status = typeof err.status === 'number' ? err.status : typeof err.statusCode === 'number' ? err.statusCode : undefined;
-  if (status !== undefined) {
-    if (status === 401 || status === 403) return 'UNAUTHORIZED';
-    if (status === 404) return 'NOT_FOUND';
-    if (status === 408 || status === 504) return 'TIMEOUT';
-    if (status === 429) return 'RATE_LIMITED';
-    if (status >= 400 && status < 500) return 'BAD_REQUEST';
-    if (status >= 500) return 'UPSTREAM_ERROR';
-  }
+export interface ProviderStatusResult {
+  id: string;
+  status: 'pending' | 'succeeded' | 'failed';
+  updatedAt: string;
+}
 
-  const name = typeof err.name === 'string' ? err.name.toUpperCase() : undefined;
-  if (name === 'ABORTERROR' || name === 'TIMEOUTERROR') return 'TIMEOUT';
+export interface ProviderCallbackResult {
+  handled: boolean;
+  eventType: string;
+  reference?: string;
+}
 
-  const message = typeof err.message === 'string' ? err.message.toLowerCase() : '';
-  if (message.includes('timeout') || message.includes('timed out')) return 'TIMEOUT';
-  if (message.includes('rate limit') || message.includes('too many requests')) return 'RATE_LIMITED';
-  if (message.includes('unauthorized') || message.includes('forbidden')) return 'UNAUTHORIZED';
-  if (message.includes('not found')) return 'NOT_FOUND';
-  if (message.includes('econnrefused') || message.includes('enotfound') || message.includes('network')) {
-    return 'NETWORK_ERROR';
-  }
+export interface ProviderBatchItemResult<T> {
+  reference: string;
+  success: boolean;
+  result?: T;
+  error?: string;
+}
 
-  return 'UNKNOWN';
+export interface ProviderBatchResult<T> {
+  items: ProviderBatchItemResult<T>[];
+  succeeded: number;
+  failed: number;
+}
+
+export interface ProviderAdapter {
+  readonly name: string;
+  authenticate(credentials: Record<string, string>): Promise<ProviderAuthResult>;
+  collect(request: ProviderCollectionRequest): Promise<ProviderCollectionResult>;
+  payout(request: ProviderPayoutRequest): Promise<ProviderPayoutResult>;
+  getStatus(id: string): Promise<ProviderStatusResult>;
+  handleCallback(payload: unknown): Promise<ProviderCallbackResult>;
+  collectBatch(
+    requests: ProviderCollectionRequest[],
+  ): Promise<ProviderBatchResult<ProviderCollectionResult>>;
+  payoutBatch(
+    requests: ProviderPayoutRequest[],
+  ): Promise<ProviderBatchResult<ProviderPayoutResult>>;
 }

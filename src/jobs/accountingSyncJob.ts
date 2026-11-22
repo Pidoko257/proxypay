@@ -1,7 +1,6 @@
 import cron from "node-cron";
 import { AccountingService } from "../services/accounting";
-
-const logger = console;
+import logger from "../utils/logger";
 
 export class AccountingSyncJob {
   private accountingService: AccountingService;
@@ -59,13 +58,13 @@ export class AccountingSyncJob {
             logger.error(`P&L sync failed for connection ${connection.id}: ${syncLog.errorMessage}`);
           }
         } catch (error) {
-          logger.error(`Error syncing P&L for connection ${connection.id}:`, error);
+          logger.error({ err: error, connectionId: connection.id }, `Error syncing P&L for connection ${connection.id}`);
         }
       }
 
       logger.info(`Daily accounting sync completed for ${dateStr}`);
     } catch (error) {
-      logger.error(`Error in daily accounting sync:`, error);
+      logger.error({ err: error }, `Error in daily accounting sync`);
     } finally {
       this.isRunning = false;
     }
@@ -93,13 +92,13 @@ export class AccountingSyncJob {
             logger.error(`Fee revenue sync failed for connection ${connection.id}: ${syncLog.errorMessage}`);
           }
         } catch (error) {
-          logger.error(`Error syncing fee revenue for connection ${connection.id}:`, error);
+          logger.error({ err: error, connectionId: connection.id }, `Error syncing fee revenue for connection ${connection.id}`);
         }
       }
 
       logger.info(`Fee revenue sync completed for ${today}`);
     } catch (error) {
-      logger.error(`Error in fee revenue sync:`, error);
+      logger.error({ err: error }, `Error in fee revenue sync`);
     } finally {
       this.isRunning = false;
     }

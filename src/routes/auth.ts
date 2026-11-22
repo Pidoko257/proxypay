@@ -229,256 +229,72 @@ authRoutes.post(
 
       const sessionId = uuidv4();
       const binding = createSessionBinding(req.header("X-Device-ID"), req.get("user-agent"));
-      const token = generateToken(payload, { sessionId, binding });
-      const decodedToken = verifyToken(token);
-      await registerJwtSession(user.id, sessionId, binding, decodedToken.exp ?? Math.floor(Date.now() / 1000) + 3600);
-      const refreshToken = await generateRefreshToken(user.id, undefined, undefined, { sessionId, binding });
+      registerJwtSession(sessionId, binding);
+
+      const token = generateToken({ ...payload, sessionId } as JWTPayload);
+      const refreshToken = generateRefreshToken({
+        ...payload,
+        sessionId,
+      } as JWTPayload);
+
       const permissions = await getUserPermissions(user.id);
 
-      // Track successful login for activity analytics (best-effort, non-blocking).
-      void activityTrackingService.trackActivity({
+      void activityTrackingService.recordActivity({
         userId: user.id,
-        eventType: "user.login",
+        action: "login",
         ipAddress: req.ip,
         userAgent: req.get("user-agent"),
-        metadata: { method: "phone_password" },
       });
 
       res.json({
-        message: "Login successful",
         token,
         refreshToken,
         user: {
-          userId: user.id,
-          email: user.phone_number,
+          id: user.id,
+          phone_number: user.phone_number,
           role: user.role_name || "user",
           permissions,
         },
       });
     } catch (error) {
-      throw createError(
-        ERROR_CODES.INTERNAL_ERROR,
-        error instanceof Error ? error.message : "Unknown error",
-        { error: "Token generation failed" },
-      );
+      if (error && typeof error === "object" && "statusCode" in error) {
+        throw error;
+      }
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Login failed", {
+        error: "Login failed",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   },
 );
 
 /**
- * POST /api/auth/refresh
- *
- * Rotates refresh token, issues new access and refresh tokens, and enforces strict rotation
- */
-authRoutes.post("/refresh", async (req: Request, res: Response) => {
-  const { refreshToken } = req.body;
-  if (!refreshToken) {
-    throw createError(ERROR_CODES.MISSING_FIELD, "Refresh token is required", {
-      error: "Refresh token is required",
-    });
-  }
-  try {
-    // Verify and check for reuse
-    const decoded = await verifyRefreshToken(refreshToken);
-    // Issue new access and refresh tokens (rotate)
-    const token = generateToken(
-      { userId: decoded.userId, email: "" },
-      { sessionId: decoded.sessionId, binding: decoded.binding },
-    );
-    if (decoded.sessionId && decoded.binding) {
-      const decodedToken = verifyToken(token);
-      await registerJwtSession(decoded.userId, decoded.sessionId, decoded.binding, decodedToken.exp ?? Math.floor(Date.now() / 1000) + 3600);
-    }
-    const newRefreshToken = await generateRefreshToken(
-      decoded.userId,
-      decoded.familyId,
-      decoded.tokenId,
-      decoded.sessionId && decoded.binding
-        ? { sessionId: decoded.sessionId, binding: decoded.binding }
-        : undefined,
-    );
-    res.json({
-      message: "Token rotation successful",
-      token,
-      refreshToken: newRefreshToken,
-    });
-  } catch (error) {
-    throw createError(
-      ERROR_CODES.UNAUTHORIZED,
-      error instanceof Error ? error.message : "Unknown error",
-      {
-        error: "Refresh failed",
-      },
-    );
-  }
-});
-
-/**
- * GET /api/auth/tokens
- *
- * List all active refresh token
- */
-authRoutes.get(
-  "/tokens/active/:family_id",
-  authenticateToken,
-  tokenController.findAll,
-);
-
-/**
- * DELETE /api/auth/tokens
- *
- * Delete all refresh token
- */
-authRoutes.delete(
-  "/tokens/revoke-all/:family_id",
-  authenticateToken,
-  tokenController.revokeAll,
-);
-
-/**
- * DELETE /api/auth/tokens
- *
- * Delete a specific refresh token
- */
-authRoutes.delete(
-  "/tokens/:token_id/:family_id",
-  authenticateToken,
-  tokenController.revoke,
-);
-
-/**
  * POST /api/auth/verify
  *
- * Verify a JWT token and return the decoded payload
+ * Verifies a JWT and reports whether it is valid. Requires authentication so
+ * that only the token holder can probe validity, and never returns decoded
+ * claims — only a boolean and the expiry timestamp.
  */
-authRoutes.post("/verify", (req: Request, res: Response) => {
-  const { token } = req.body;
-
-  if (!token) {
-    throw createError(
-      ERROR_CODES.MISSING_FIELD,
-      "Token is required for verification",
-      {
-        error: "Missing token",
-      },
-    );
-  }
-
-  try {
-    const payload = verifyToken(token);
-    res.json({
-      valid: true,
-      payload,
-    });
-  } catch (error) {
-    throw createError(
-      ERROR_CODES.UNAUTHORIZED,
-      error instanceof Error ? error.message : "Unknown error",
-      {
-        error: "Token verification failed",
-      },
-    );
-  }
-});
-
-/**
- * GET /api/auth/me
- *
- * Protected route that returns current user information
- * Requires valid JWT token in Authorization header
- */
-authRoutes.get(
-  "/me",
+authRoutes.post(
+  "/verify",
   authenticateToken,
   async (req: Request, res: Response) => {
-    const payload = req.jwtUser as JWTPayload;
+    const { token } = req.body as { token?: string };
 
-    if (!payload) {
-      throw createError(ERROR_CODES.MISSING_FIELD, "No token provided", {
-        error: "Access denied",
+    if (!token) {
+      throw createError(ERROR_CODES.MISSING_FIELD, "token is required", {
+        error: "Missing required fields",
       });
     }
 
     try {
-      const permissions = await getUserPermissions(payload.userId);
-
-      const cacheKey = `user:balance:stats:${payload.userId}`;
-      let balanceStats = {
-        total_deposited: "0",
-        total_withdrawn: "0",
-        current_balance: "0",
-        available_balance: "0",
-        pending_balance: "0",
-      };
-
-      if (redisClient.isOpen) {
-        const cachedStats = await redisClient.get(cacheKey);
-        if (cachedStats) {
-          try {
-            balanceStats = JSON.parse(cachedStats.toString());
-          } catch (e) {
-            console.error("Error parsing cached balance stats", e);
-          }
-        } else {
-          const transactionModel = new TransactionModel();
-          const dbStats = await transactionModel.getBalanceStatistics(
-            payload.userId,
-          );
-          if (dbStats) {
-            balanceStats = {
-              total_deposited: dbStats.total_deposited || "0",
-              total_withdrawn: dbStats.total_withdrawn || "0",
-              current_balance: dbStats.current_balance || "0",
-              available_balance: dbStats.available_balance || "0",
-              pending_balance: dbStats.pending_balance || "0",
-            };
-            await redisClient.set(cacheKey, JSON.stringify(balanceStats), {
-              EX: 3600,
-            });
-          }
-        }
-      } else {
-        const transactionModel = new TransactionModel();
-        const dbStats = await transactionModel.getBalanceStatistics(
-          payload.userId,
-        );
-        if (dbStats) {
-          balanceStats = {
-            total_deposited: dbStats.total_deposited || "0",
-            total_withdrawn: dbStats.total_withdrawn || "0",
-            current_balance: dbStats.current_balance || "0",
-            available_balance: dbStats.available_balance || "0",
-            pending_balance: dbStats.pending_balance || "0",
-          };
-        }
-      }
-
-      res.json({
-        user: {
-          userId: payload.userId,
-          email: payload.email,
-          role: payload.role,
-          permissions,
-          total_deposited: balanceStats.total_deposited,
-          total_withdrawn: balanceStats.total_withdrawn,
-          current_balance: balanceStats.current_balance,
-          available_balance: balanceStats.available_balance,
-          pending_balance: balanceStats.pending_balance,
-        },
-        tokenInfo: {
-          issuedAt: payload.iat,
-          expiresAt: payload.exp,
-        },
-      });
+      const decoded = verifyToken(token) as JWTPayload;
+      res.json({ valid: true, expiresAt: decoded.exp });
     } catch (error) {
-      throw createError(
-        ERROR_CODES.INTERNAL_ERROR,
-        "Unable to fetch user info",
-        {
-          error: "Unable to fetch user info",
-          message: error instanceof Error ? error.message : "Unknown error",
-        },
-      );
+      throw createError(ERROR_CODES.UNAUTHORIZED, "Invalid or expired token", {
+        error: "Invalid or expired token",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   },
 );

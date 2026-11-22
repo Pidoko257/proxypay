@@ -1,14 +1,17 @@
 import { Router, Request, Response, NextFunction } from "express";
 import multer from "multer";
 import { accountingReconciliationController } from "../controllers/accountingReconciliationController";
-// import { requireAuth } from "../middleware/auth"; // Assuming there's auth middleware
+import { requireAuth, requireAdmin } from "../middleware/auth";
 // import { validateRequest } from "../middleware/validation"; // Assuming there's validation middleware
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Middleware to ensure user is authenticated
-// router.use(requireAuth);
+router.use(requireAuth);
+
+// Restrict reconciliation operations to authorized staff
+router.use(requireAdmin);
 
 // Run daily chart of accounts reconciliation
 router.post(

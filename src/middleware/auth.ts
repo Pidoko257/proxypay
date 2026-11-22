@@ -172,6 +172,79 @@ export const requireAuth = async (
 };
 
 /**
+ * Middleware to require an administrative role.
+ * Must run after `requireAuth` (or `authenticateToken`) has populated `req.user`.
+ * Allows users whose role is `admin` or `superadmin`.
+ */
+export const requireAdmin = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  const role = (req as AuthRequest).user?.role ?? req.userRole;
+
+  if (!role) {
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Authentication required",
+    });
+  }
+
+  if (role !== "admin" && role !== "superadmin") {
+    return res.status(403).json({
+      error: "Forbidden",
+      message: "Administrative privileges required",
+    });
+  }
+
+  return next();
+};
+
+/**
+ * Middleware to require a specific permission.
+ * Must run after `requireAuth` (or `authenticateToken`) has populated `req.user`.
+ *
+ * Resolution order:
+ *  1. Explicit `req.userPermissions` (set by upstream middleware).
+ *  2. API key permission bitmask (`req.apiKeyPermissions`) — FULL_ACCESS bypasses.
+ *  3. Role-based fallback: `admin`/`superadmin` are granted all permissions.
+ */
+export const requirePermission = (permission: string) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const role = (req as AuthRequest).user?.role ?? req.userRole;
+
+    if (!role) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Authentication required",
+      });
+    }
+
+    if (role === "admin" || role === "superadmin") {
+      return next();
+    }
+
+    const explicit = req.userPermissions;
+    if (Array.isArray(explicit) && explicit.includes(permission)) {
+      return next();
+    }
+
+    const apiKeyPermissions = (req as any).apiKeyPermissions;
+    if (
+      typeof apiKeyPermissions === "number" &&
+      (apiKeyPermissions & ScopeGroup.FULL_ACCESS) === ScopeGroup.FULL_ACCESS
+    ) {
+      return next();
+    }
+
+    return res.status(403).json({
+      error: "Forbidden",
+      message: `Missing required permission: ${permission}`,
+    });
+  };
+};
+
+/**
  * JWT Authentication middleware that verifies JWT tokens
  * and attaches user information to the request object
  * Includes IP geofencing validation for operational regions
@@ -250,10 +323,7 @@ export async function authenticateToken(
 export function optionalAuthentication(
   req: Request,
   res: Response,
-  next: NextFunction,
-): void {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
+  next
 
   if (!token) {
     next();

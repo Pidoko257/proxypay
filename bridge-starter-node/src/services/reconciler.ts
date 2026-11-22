@@ -14,6 +14,62 @@
  * SEP-31 idempotency helpers (`submitPayoutIdempotent`,
  * `reconcileCompletionCallback`) live here so payout submission and
  * callback handling share the same persisted reference store.
+ *
+ * ─── Reconciliation Operations Runbook (issue #842) ─────────────────────────
+ *
+ * This section documents the safe operational procedure for support staff
+ * investigating reconciliation alerts.  It is intentionally read-only: no
+ * step below authorizes manually mutating financial state (payout status,
+ * amounts, or balances).  All corrections flow through the approval workflow
+ * described at the end.
+ *
+ * 1. Alert meanings
+ *    - `status_mismatch`: local and provider disagree on payout status
+ *      (e.g. local "completed" vs provider "failed"). Investigate before
+ *      assuming either side is correct.
+ *    - `amount_mismatch`: settled amount differs from the local amount,
+ *      usually due to rounding or FX. Confirm the FX rate snapshot used.
+ *    - `missing_remote`: a local payout has no matching provider record.
+ *      Could be a submission that never reached the provider.
+ *    - `missing_local`: the provider reports a payout we have no local
+ *      record for. Treat as potentially fraudulent until proven otherwise.
+ *    - `critical`: any alert flagged critical (large amount deltas, repeated
+ *      failures, or `missing_local`) must be escalated immediately per §6.
+ *
+ * 2. Retrieving provider reports
+ *    - Open the provider reconciliation dashboard and export the report for
+ *      the affected settlement window (UTC date range).
+ *    - Cross-reference the exported report against the local reconciliation
+ *      report produced by `runReconciliation` (see below).
+ *    - Attach both exports to the incident ticket; never edit them.
+ *
+ * 3. Safe review actions (no financial mutation)
+ *    - Read local and remote records, exports, and the audit trail.
+ *    - Re-run reconciliation in read-only mode to confirm the discrepancy.
+ *    - Add notes and evidence to the incident ticket.
+ *    - Do NOT edit payout status, amounts, or balances directly.
+ *
+ * 4. Correction approval workflow
+ *    - A proposed correction must include: the alert id, both report
+ *      exports, the audit-trail excerpt, and the proposed new state.
+ *    - Approval requires sign-off from the on-call finance owner AND a
+ *      second reviewer (four-eyes principle).
+ *    - Only after approval may an authorized operator apply the correction
+ *      through the audited correction tooling (never by hand).
+ *
+ * 5. Replay procedure
+ *    - Replays are idempotent: re-submitting an existing reference returns
+ *      the stored record (see `submitPayoutIdempotent`).
+ *    - Before replaying, confirm via `queryProviderPayoutStatus` that the
+ *      provider has no record for the reference.
+ *    - Record the replay in the audit trail with the incident ticket id.
+ *
+ * 6. Escalation ownership
+ *    - `critical` alerts: page the on-call finance owner immediately.
+ *    - `missing_local`: escalate to the security on-call in parallel.
+ *    - Non-critical mismatches: assign to the reconciliation queue owner
+ *      during business hours.
+ * ────────────────────────────────────────────────────────────────────────────
  */
 
 import axios from "axios";
@@ -92,6 +148,174 @@ export interface TransactionClient {
 export interface ReadOptions {
   client?: TransactionClient;
   primary?: boolean;
+}
+
+// ─── Transaction status workflow boundary (issue #844) ───────────────────────
+
+/**
+ * Canonical transaction statuses.  Every status change in the system — API
+ * handlers, workers, provider callbacks, reconciliation, and reversal
+ * services — must flow through `TransactionStatusWorkflowService` so that
+ * the allowed-transition matrix below cannot be bypassed.
+ */
+export type TransactionStatus =
+  | "pending"
+  | "submitted"
+  | "completed"
+  | "failed"
+  | "reversed";
+
+/**
+ * Explicit allowed-transition matrix.  A transition not listed here is
+ * rejected by the workflow service.  Terminal states (`completed`,
+ * `failed`, `reversed`) have no outgoing transitions.
+ */
+export const ALLOWED_TRANSITIONS: Readonly<
+  Record<TransactionStatus, readonly TransactionStatus[]>
+> = {
+  pending: ["submitted", "failed"],
+  submitted: ["completed", "failed"],
+  completed: ["reversed"],
+  failed: [],
+  reversed: [],
+};
+
+/** Actor/source metadata recorded on every status change. */
+export interface StatusTransitionContext {
+  /** Who initiated the change (user id, service name, "system", …). */
+  actor: string;
+  /** Where the change originated ("api", "worker", "callback", …). */
+  source: string;
+  /** Optional correlation id for tracing across services. */
+  correlationId?: string;
+  /** Optional human-readable reason for the change. */
+  reason?: string;
+}
+
+/** Audit event emitted for every accepted status change. */
+export interface StatusTransitionEvent {
+  transactionId: string;
+  from: TransactionStatus;
+  to: TransactionStatus;
+  actor: string;
+  source: string;
+  correlationId?: string;
+  reason?: string;
+  /** True when the transition was a no-op because the status already matched. */
+  idempotent: boolean;
+  occurredAt: string;
+}
+
+/** Raised when a transition is not permitted by the matrix. */
+export class InvalidStatusTransitionError extends Error {
+  constructor(
+    public readonly transactionId: string,
+    public readonly from: TransactionStatus,
+    public readonly to: TransactionStatus
+  ) {
+    super(
+      `Invalid transaction status transition for ${transactionId}: ${from} -> ${to}`
+    );
+    this.name = "InvalidStatusTransitionError";
+  }
+}
+
+/**
+ * Central workflow boundary for transaction status changes.
+ *
+ * Responsibilities:
+ *   - Enforce the `ALLOWED_TRANSITIONS` matrix (reject invalid transitions).
+ *   - Record actor/source metadata on every change.
+ *   - Provide idempotency: re-applying the current status is a safe no-op.
+ *   - Emit audit events for every accepted (or idempotent) change.
+ *
+ * The store is pluggable so production can back it with PostgreSQL while
+ * tests can use the in-memory default.
+ */
+export interface TransactionStatusStore {
+  getStatus(transactionId: string): Promise<TransactionStatus | null>;
+  setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void>;
+}
+
+/** In-memory store used by default and by state-machine tests. */
+export class InMemoryTransactionStatusStore implements TransactionStatusStore {
+  private readonly statuses = new Map<string, TransactionStatus>();
+  readonly auditLog: StatusTransitionEvent[] = [];
+
+  async getStatus(transactionId: string): Promise<TransactionStatus | null> {
+    return this.statuses.get(transactionId) ?? null;
+  }
+
+  async setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void> {
+    this.statuses.set(transactionId, status);
+    this.auditLog.push(event);
+  }
+}
+
+export class TransactionStatusWorkflowService {
+  constructor(
+    private readonly store: TransactionStatusStore = new InMemoryTransactionStatusStore(),
+    private readonly onEvent: (event: StatusTransitionEvent) => void = () => {}
+  ) {}
+
+  /**
+   * Apply a status transition, enforcing the matrix and idempotency.
+   *
+   * - If the transaction is already in `to`, this is a safe no-op that still
+   *   emits an idempotent audit event.
+   * - If the transition is not allowed, throws `InvalidStatusTransitionError`.
+   */
+  async transition(
+    transactionId: string,
+    to: TransactionStatus,
+    context: StatusTransitionContext
+  ): Promise<StatusTransitionEvent> {
+    const from = await this.store.getStatus(transactionId);
+
+    if (from === to) {
+      const event: StatusTransitionEvent = {
+        transactionId,
+        from: to,
+        to,
+        actor: context.actor,
+        source: context.source,
+        correlationId: context.correlationId,
+        reason: context.reason,
+        idempotent: true,
+        occurredAt: new Date().toISOString(),
+      };
+      this.onEvent(event);
+      return event;
+    }
+
+    if (from !== null && !ALLOWED_TRANSITIONS[from].includes(to)) {
+      throw new InvalidStatusTransitionError(transactionId, from, to);
+    }
+
+    const event: StatusTransitionEvent = {
+      transactionId,
+      from: from ?? "pending",
+      to,
+      actor: context.actor,
+      source: context.source,
+      correlationId: context.correlationId,
+      reason: context.reason,
+      idempotent: false,
+      occurredAt: new Date().toISOString(),
+    };
+
+    await this.store.setStatus(transactionId, to, event);
+    this.onEvent(event);
+    return event;
+  }
 }
 
 // ─── Data-source adapters (replace with real implementations) ────────────────
@@ -189,13 +413,12 @@ const payoutReferences = new Map<string, Sep31PayoutReference>();
  *
  * Returns the existing record when the reference was already persisted
  * (idempotent), or a freshly created `pending` record otherwise.  Callers
- * MUST treat a non-`pending` existing record as "already submitted" and
- * avoid re-submitting the payout.
+ * MUST treat a non-`pending` existing record as already in flight and must
+ * not re-submit it.
  */
-export function persistPayoutReference(
-  reference: string,
-  deps: PolicyDeps = {}
-): Sep31PayoutReference {
+export async function persistPayoutReference(
+  reference: string
+): Promise<Sep31PayoutReference> {
   const existing = payoutReferences.get(reference);
   if (existing) {
     return existing;
@@ -213,87 +436,3 @@ export function persistPayoutReference(
   payoutReferences.set(reference, record);
   return record;
 }
-
-/**
- * Query the provider status API to determine whether a payout for the given
- * reference already exists.  Used after ambiguous failures (timeouts /
- * unknown responses) to avoid submitting a second payout.
- */
-export async function queryProviderPayoutStatus(
-  reference: string
-): Promise<RemotePayoutRecord | null> {
-  if (!config.bridgeApiUrl) {
-    return null;
-  }
-
-  try {
-    const response = await axios.get<RemotePayoutRecord>(
-      `${config.bridgeApiUrl}/payouts/${encodeURIComponent(reference)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${config.bridgeApiKey}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    return response.data;
-  } catch (error: any) {
-    // 404 means the provider has no record — safe to retry submission.
-    if (error.response?.status === 404) {
-      return null;
-    }
-    // Any other failure is ambiguous; surface it so the caller does not
-    // blindly retry and risk a duplicate payout.
-    throw error;
-  }
-}
-
-/**
- * Submit a SEP-31 payout idempotently.
- *
- * 1. Persist the unique reference before any external call.
- * 2. If the reference was already submitted/completed, return the stored
- *    record instead of submitting again.
- * 3. On ambiguous failure, query the provider status API before retrying.
- */
-export async function submitPayoutIdempotent(
-  reference: string,
-  submit: (reference: string) => Promise<RemotePayoutRecord>,
-  deps: PolicyDeps = {}
-): Promise<Sep31PayoutReference> {
-  const clock = deps.clock ?? systemClock;
-  const record = persistPayoutReference(reference, deps);
-
-  // Already submitted or completed — do not submit a second payout.
-  if (record.status === "submitted" || record.status === "completed") {
-    return record;
-  }
-
-  try {
-    const remote = await submit(reference);
-    record.status = "submitted";
-    record.providerPayoutId = remote.id;
-    record.updatedAt = new Date(clock.now()).toISOString();
-    payoutReferences.set(reference, record);
-    return record;
-  } catch (error) {
-    // Ambiguous failure: check whether the provider already has the payout.
-    const remote = await queryProviderPayoutStatus(reference);
-    if (remote) {
-      record.status = "submitted";
-      record.providerPayoutId = remote.id;
-      record.updatedAt = new Date(clock.now()).toISOString();
-      payoutReferences.set(reference, record);
-      return record;
-    }
-    throw error;
-  }
-}
-
-/**
- * Reconcile a completion callback against the persisted reference.
- *
- * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns th
-
-/* … truncated 4166 chars — edit only what you need near the top … */

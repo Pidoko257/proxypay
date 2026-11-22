@@ -65,5 +65,10 @@ USER nodejs
 
 EXPOSE 3000
 
+# Liveness probe: process-only health, independent of PostgreSQL, Redis,
+# Horizon, and providers. A failing dependency must NOT restart the container.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD node -e "require('http').get('http://127.0.0.1:3000/health/live',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+
 # Direct node execution (no npm start wrapper)
 CMD ["node", "dist/index.js"]

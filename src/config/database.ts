@@ -15,6 +15,7 @@ import {
   dbDrMode,
 } from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
+import { markReplicaHealthy, markReplicaUnhealthy } from "../middleware/readReplicaRouting";
 
 const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
 const isDRMode = (): boolean => !!DR_DATABASE_URL;
@@ -224,9 +225,10 @@ function readPoolNumber(raw: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const DEFAULT_POOL_MAX = 1000;
+const DEFAULT_POOL_MAX = 20;
 const DEFAULT_POOL_IDLE_TIMEOUT_MS = 30000;
 const DEFAULT_POOL_CONNECTION_TIMEOUT_MS = 500;
+const DEFAULT_WRITE_POOL_MAX = 10;
 
 const DB_POOL_MAX = readPoolNumber(process.env.DB_POOL_MAX, DEFAULT_POOL_MAX);
 const DB_POOL_MIN = readPoolNumber(process.env.DB_POOL_MIN, 0);
@@ -241,7 +243,7 @@ const DB_POOL_CONNECTION_TIMEOUT_MS = readPoolNumber(
 
 const DB_WRITE_POOL_MAX = readPoolNumber(
   process.env.DB_WRITE_POOL_MAX,
-  DEFAULT_POOL_MAX,
+  DEFAULT_WRITE_POOL_MAX,
 );
 const DB_WRITE_POOL_MIN = readPoolNumber(process.env.DB_WRITE_POOL_MIN, 0);
 const DB_WRITE_POOL_IDLE_TIMEOUT_MS = readPoolNumber(
@@ -275,9 +277,9 @@ const DB_POOL_MONITOR_INTERVAL_MS = readPoolNumber(
  */
 export const pool = new Pool({
   connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
-  max: 1000,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 500,
+  max: DB_POOL_MAX,
+  idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: DB_POOL_CONNECTION_TIMEOUT_MS,
   statement_timeout: statementTimeoutMs,
   ssl: productionSsl,
 });
@@ -355,6 +357,20 @@ const originalPoolQuery = pool.query.bind(pool);
 };
 
 /**
+ * Dedicated write connection pool – handles INSERT / UPDATE / DELETE queries.
+ * This separate pool allows independent tuning of write-heavy workloads and
+ * prevents read operations from exhausting write connections.
+ */
+export const writePool = new Pool({
+  connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
+  max: DB_WRITE_POOL_MAX,
+  idleTimeoutMillis: DB_WRITE_POOL_IDLE_TIMEOUT_MS,
+  connectionTimeoutMillis: DB_WRITE_POOL_CONNECTION_TIMEOUT_MS,
+  statement_timeout: statementTimeoutMs,
+  ssl: productionSsl,
+});
+
+/**
  * Read replica connection pool – handles SELECT queries to take load off the
  * primary. If READ_REPLICA_URL is not configured, falls back to the primary.
  *
@@ -393,9 +409,9 @@ const replicaPools: Pool[] = replicaUrls.map(
   (url) =>
     new Pool({
       connectionString: url,
-      max: 50,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 500,
+      max: DB_REPLICA_POOL_MAX,
+      idleTimeoutMillis: DB_REPLICA_POOL_IDLE_TIMEOUT_MS,
+      connectionTimeoutMillis: DB_REPLICA_POOL_CONNECTION_TIMEOUT_MS,
       statement_timeout: statementTimeoutMs,
       ssl: productionSsl,
     }),

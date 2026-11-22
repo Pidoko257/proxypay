@@ -562,47 +562,266 @@ export class GDPRService {
     let usersPurged = 0;
     let transactionsAnonymized = 0;
 
-    // 1. Identify and purge deactivated users older than retention period
+    const BATCH_SIZE = 10;
+
+    // 1. Identify deactivated users older than retention period
     const deactivatedUsers = await pool.query(
-      `SELECT id, phone_number FROM users WHERE is_active = false AND deactivated_at < $1`,
+      `SELECT id, phone_number FROM users WHERE is_active = false AND deactivated_at < $1 ORDER BY id`,
       [cutoffDate],
     );
 
-    for (const row of deactivatedUsers.rows) {
-      const phone = row.phone_number ? String(row.phone_number) : "";
-      if (phone.length === 16 && !phone.includes("+")) continue; // Already anonymized
+    // Process users in batches using bulk DELETE operations
+    for (let i = 0; i < deactivatedUsers.rows.length; i += BATCH_SIZE) {
+      const batch = deactivatedUsers.rows.slice(i, i + BATCH_SIZE);
+      const userIds = batch.map((row) => row.id);
 
+      const client = await pool.connect();
       try {
-        await this.purgeUserData(row.id);
-        usersPurged++;
+        await client.query("BEGIN");
+
+        // Bulk delete disputes and dispute evidence for all users in batch
+        await this.safeDelete(
+          client,
+          `DELETE FROM dispute_evidence WHERE dispute_id IN (
+             SELECT id FROM disputes WHERE transaction_id IN (
+               SELECT id FROM transactions WHERE user_id = ANY($1::uuid[])
+             )
+           )`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM dispute_timeline WHERE dispute_id IN (
+             SELECT id FROM disputes WHERE transaction_id IN (
+               SELECT id FROM transactions WHERE user_id = ANY($1::uuid[])
+             )
+           )`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM dispute_notes WHERE dispute_id IN (
+             SELECT id FROM disputes WHERE transaction_id IN (
+               SELECT id FROM transactions WHERE user_id = ANY($1::uuid[])
+             )
+           )`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM disputes WHERE transaction_id IN (
+             SELECT id FROM transactions WHERE user_id = ANY($1::uuid[])
+           )`,
+          [userIds],
+        );
+
+        // Clean up disputes where user is reported_by
+        await this.safeDelete(
+          client,
+          `DELETE FROM disputes WHERE reported_by IN (
+             SELECT email FROM users WHERE id = ANY($1::uuid[])
+           )`,
+          [userIds],
+        );
+
+        // Bulk delete transaction metadata
+        await this.safeDelete(
+          client,
+          `UPDATE batch_items SET transaction_id = NULL 
+           WHERE transaction_id IN (
+             SELECT id FROM transactions WHERE user_id = ANY($1::uuid[])
+           )`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM accounting_sync_errors 
+           WHERE transaction_id IN (
+             SELECT id FROM transactions WHERE user_id = ANY($1::uuid[])
+           )`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM accounting_sync_queue 
+           WHERE transaction_id IN (
+             SELECT id FROM transactions WHERE user_id = ANY($1::uuid[])
+           )`,
+          [userIds],
+        );
+
+        // Delete transactions
+        await this.safeDelete(
+          client,
+          `DELETE FROM vault_transactions WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM transactions WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Delete KYC records
+        await this.safeDelete(
+          client,
+          `DELETE FROM kyc_tier_upgrade_requests WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM kyc_audit_log WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM upload_security_records WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Delete audit logs
+        await this.safeDelete(
+          client,
+          `DELETE FROM audit_logs WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM pii_access_audit_logs WHERE target_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM preference_change_log WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Delete user sessions and authentication records
+        await this.safeDelete(
+          client,
+          `DELETE FROM user_sessions WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM user_device_trust WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM mfa_methods WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Delete vault and payment method records
+        await this.safeDelete(
+          client,
+          `DELETE FROM vault WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM payment_methods WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Delete API keys
+        await this.safeDelete(
+          client,
+          `DELETE FROM api_keys WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Delete user preferences and notifications
+        await this.safeDelete(
+          client,
+          `DELETE FROM user_preferences WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        await this.safeDelete(
+          client,
+          `DELETE FROM notification_preferences WHERE user_id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Finally, delete the users themselves
+        const result = await this.safeDelete(
+          client,
+          `DELETE FROM users WHERE id = ANY($1::uuid[])`,
+          [userIds],
+        );
+
+        // Delete S3 objects for each user in batch
+        for (const userId of userIds) {
+          try {
+            await this.deleteUserS3Objects(userId);
+          } catch (err) {
+            console.error(`[GDPR] Failed to delete S3 objects for ${userId}:`, err);
+          }
+        }
+
+        await client.query("COMMIT");
+        usersPurged += result;
       } catch (err) {
-        console.error(`[GDPR] Failed to purge expired user ${row.id}:`, err);
+        await client.query("ROLLBACK");
+        console.error(
+          `[GDPR] Failed to purge batch of users starting at index ${i}:`,
+          err,
+        );
+      } finally {
+        client.release();
       }
     }
 
-    // 2. Identify and anonymize old standalone transactions
+    // 2. Identify and anonymize old standalone transactions in bulk
     const oldTransactions = await pool.query(
-      `SELECT id, phone_number FROM transactions WHERE created_at < $1`,
+      `SELECT id, phone_number FROM transactions WHERE created_at < $1 ORDER BY id`,
       [cutoffDate],
     );
 
-    for (const row of oldTransactions.rows) {
-      const phone = row.phone_number ? String(row.phone_number) : "";
-      if (phone.length === 16 && !phone.includes("+")) continue; // Already anonymized
+    for (let i = 0; i < oldTransactions.rows.length; i += BATCH_SIZE) {
+      const batch = oldTransactions.rows.slice(i, i + BATCH_SIZE);
 
       try {
-        const hashedPhone = phone ? this.anonymizePhoneNumber(phone) : null;
-        const hashedIdempotency = this.hashString(row.id);
-        const hashedStellar = this.hashString("purged_stellar_address");
+        // Filter out already-anonymized transactions and prepare batch for update
+        const toUpdate = batch.filter((row) => {
+          const phone = row.phone_number ? String(row.phone_number) : "";
+          return !(phone.length === 16 && !phone.includes("+"));
+        });
 
-        await pool.query(
-          `UPDATE transactions SET phone_number = $1, stellar_address = $2, idempotency_key = $3 WHERE id = $4`,
-          [hashedPhone, hashedStellar, hashedIdempotency, row.id],
-        );
-        transactionsAnonymized++;
+        if (toUpdate.length > 0) {
+          const ids = toUpdate.map((row) => row.id);
+          const hashedStellar = this.hashString("purged_stellar_address");
+
+          // Bulk anonymize all transactions in batch with same hashed values
+          await pool.query(
+            `UPDATE transactions 
+             SET phone_number = $1,
+                 stellar_address = $2,
+                 idempotency_key = $3
+             WHERE id = ANY($4::uuid[])`,
+            ["", hashedStellar, "", ids],
+          );
+
+          transactionsAnonymized += toUpdate.length;
+        }
       } catch (err) {
         console.error(
-          `[GDPR] Failed to anonymize expired transaction ${row.id}:`,
+          `[GDPR] Failed to anonymize batch of transactions starting at index ${i}:`,
           err,
         );
       }

@@ -325,4 +325,28 @@ export function optionalAuthentication(
   res: Response,
   next
 
-/* … truncated 754 chars — edit only what you need near the top … */
+  if (!token) {
+    next();
+    return;
+  }
+
+  try {
+    const decoded = verifyToken(token);
+    if (rejectMutationDuringImpersonation(req, res, decoded)) {
+      return;
+    }
+    req.jwtUser = decoded;
+  } catch {
+    // Silently ignore token errors for optional authentication
+    // The request can proceed without user information
+  }
+
+  next();
+}
+
+export async function verifyTokenStateful(token: string, binding?: string): Promise<JWTPayload> {
+  // Run standard cryptographic verification
+  const decoded = verifyToken(token);
+ 
+
+/* … truncated 943 chars — edit only what you need near the top … */

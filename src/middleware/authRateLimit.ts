@@ -1,48 +1,61 @@
 import rateLimit from "express-rate-limit";
+import type { Request } from "express";
+import { accountIdentifier, isAccountLocked } from "../auth/lockout";
 
-const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
-const ONE_HOUR_MS = 60 * 60 * 1000;
+/**
+ * Combines the client IP with the submitted phone number so that:
+ *  - users behind a shared NAT IP do not share a single bucket, and
+ *  - an attacker credential-stuffing from many IPs still hits a per-account
+ *    limit (the phone number is part of the key).
+ */
+function accountKeyGenerator(req: Request): string {
+  const phone = accountIdentifier(req.body?.phone_number) ?? "";
+  return `${req.ip}:${phone}`;
+}
 
-export const AUTH_RATE_LIMITS = {
-  login: {
-    windowMs: FIFTEEN_MINUTES_MS,
-    limit: 5,
-    message:
-      "Too many login attempts from this IP, please try again after 15 minutes",
+/**
+ * Rejects requests targeting an account that is currently locked out by
+ * `src/auth/lockout.ts`, regardless of the source IP.
+ */
+async function rejectLockedAccount(
+  req: Request,
+  res: { status: (code: number) => { json: (body: unknown) => void } },
+  next: () => void,
+): Promise<void> {
+  try {
+    if (await isAccountLocked(req.body?.phone_number)) {
+      res.status(429).json({
+        error:
+          "Your account has been temporarily locked due to too many failed login attempts. Please try again later.",
+      });
+      return;
+    }
+  } catch {
+    // Fail open on lockout lookup errors — the rate limiter still applies.
+  }
+  next();
+}
+
+export const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: accountKeyGenerator,
+  message: {
+    error: "Too many login attempts. Please try again later.",
   },
-  register: {
-    windowMs: ONE_HOUR_MS,
-    limit: 3,
-    message:
-      "Too many registration attempts from this IP, please try again after 1 hour",
+});
+
+export const registerRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: accountKeyGenerator,
+  message: {
+    error: "Too many registration attempts. Please try again later.",
   },
-};
+});
 
-type AuthRateLimiterConfig = {
-  windowMs: number;
-  limit: number;
-  message: string;
-};
-
-const skipRateLimitInTests = () =>
-  process.env.NODE_ENV === "test" &&
-  process.env.ENABLE_AUTH_RATE_LIMIT_TESTS !== "true";
-
-export const createAuthRateLimiter = (config: AuthRateLimiterConfig) =>
-  rateLimit({
-    windowMs: config.windowMs,
-    limit: config.limit,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: skipRateLimitInTests,
-    message: {
-      error: "Too Many Requests",
-      message: config.message,
-    },
-  });
-
-export const loginRateLimiter = createAuthRateLimiter(AUTH_RATE_LIMITS.login);
-export const registerRateLimiter = createAuthRateLimiter(
-  AUTH_RATE_LIMITS.register,
-);
-export const authRateLimiter = loginRateLimiter;
+export const loginLockoutGuard = rejectLockedAccount;

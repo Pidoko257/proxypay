@@ -202,20 +202,245 @@ async function encryptTransactionNotes(): Promise<MigrationStats> {
 }
 
 /**
+ * Encrypt unencrypted user phone numbers
+ */
+async function encryptUserPhoneNumbers(): Promise<MigrationStats> {
+  const stats: MigrationStats = {
+    tableName: 'users',
+    columnName: 'phone_number',
+    totalRows: 0,
+    encryptedRows: 0,
+    unencryptedRows: 0,
+    errors: 0,
+  };
+
+  try {
+    const result = await queryRead(`
+      SELECT id, phone_number FROM users 
+      WHERE phone_number IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 10000
+    `);
+
+    stats.totalRows = result.rows.length;
+    logger.info(`Found ${stats.totalRows} users with phone numbers`);
+
+    for (const row of result.rows) {
+      try {
+        if (isAlreadyEncrypted(row.phone_number)) {
+          stats.encryptedRows++;
+          continue;
+        }
+
+        const encrypted = encrypt(row.phone_number);
+        await queryWrite(
+          'UPDATE users SET phone_number = $1, updated_at = NOW() WHERE id = $2',
+          [encrypted, row.id]
+        );
+
+        stats.unencryptedRows++;
+        logger.debug(`Encrypted phone number for user ${row.id}`);
+      } catch (error) {
+        stats.errors++;
+        logger.error(error, `Failed to encrypt phone number for user ${row.id}`);
+      }
+    }
+
+    logger.info(`User phone number migration complete: ${stats.unencryptedRows} encrypted, ${stats.encryptedRows} already encrypted, ${stats.errors} errors`);
+  } catch (error) {
+    logger.error(error, 'Failed to migrate user phone numbers');
+    throw error;
+  }
+
+  return stats;
+}
+
+/**
+ * Encrypt unencrypted user emails
+ */
+async function encryptUserEmails(): Promise<MigrationStats> {
+  const stats: MigrationStats = {
+    tableName: 'users',
+    columnName: 'email',
+    totalRows: 0,
+    encryptedRows: 0,
+    unencryptedRows: 0,
+    errors: 0,
+  };
+
+  try {
+    const result = await queryRead(`
+      SELECT id, email FROM users 
+      WHERE email IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 10000
+    `);
+
+    stats.totalRows = result.rows.length;
+    logger.info(`Found ${stats.totalRows} users with emails`);
+
+    for (const row of result.rows) {
+      try {
+        if (isAlreadyEncrypted(row.email)) {
+          stats.encryptedRows++;
+          continue;
+        }
+
+        const encrypted = encrypt(row.email);
+        await queryWrite(
+          'UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2',
+          [encrypted, row.id]
+        );
+
+        stats.unencryptedRows++;
+        logger.debug(`Encrypted email for user ${row.id}`);
+      } catch (error) {
+        stats.errors++;
+        logger.error(error, `Failed to encrypt email for user ${row.id}`);
+      }
+    }
+
+    logger.info(`User email migration complete: ${stats.unencryptedRows} encrypted, ${stats.encryptedRows} already encrypted, ${stats.errors} errors`);
+  } catch (error) {
+    logger.error(error, 'Failed to migrate user emails');
+    throw error;
+  }
+
+  return stats;
+}
+
+/**
+ * Encrypt unencrypted merchant phone numbers
+ */
+async function encryptMerchantPhoneNumbers(): Promise<MigrationStats> {
+  const stats: MigrationStats = {
+    tableName: 'merchants',
+    columnName: 'phone_number',
+    totalRows: 0,
+    encryptedRows: 0,
+    unencryptedRows: 0,
+    errors: 0,
+  };
+
+  try {
+    const result = await queryRead(`
+      SELECT id, phone_number FROM merchants 
+      WHERE phone_number IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 10000
+    `);
+
+    stats.totalRows = result.rows.length;
+    logger.info(`Found ${stats.totalRows} merchants with phone numbers`);
+
+    for (const row of result.rows) {
+      try {
+        if (isAlreadyEncrypted(row.phone_number)) {
+          stats.encryptedRows++;
+          continue;
+        }
+
+        const encrypted = encrypt(row.phone_number);
+        await queryWrite(
+          'UPDATE merchants SET phone_number = $1, updated_at = NOW() WHERE id = $2',
+          [encrypted, row.id]
+        );
+
+        stats.unencryptedRows++;
+        logger.debug(`Encrypted phone number for merchant ${row.id}`);
+      } catch (error) {
+        stats.errors++;
+        logger.error(error, `Failed to encrypt phone number for merchant ${row.id}`);
+      }
+    }
+
+    logger.info(`Merchant phone number migration complete: ${stats.unencryptedRows} encrypted, ${stats.encryptedRows} already encrypted, ${stats.errors} errors`);
+  } catch (error) {
+    logger.error(error, 'Failed to migrate merchant phone numbers');
+    throw error;
+  }
+
+  return stats;
+}
+
+/**
+ * Encrypt unencrypted merchant emails
+ */
+async function encryptMerchantEmails(): Promise<MigrationStats> {
+  const stats: MigrationStats = {
+    tableName: 'merchants',
+    columnName: 'email',
+    totalRows: 0,
+    encryptedRows: 0,
+    unencryptedRows: 0,
+    errors: 0,
+  };
+
+  try {
+    const result = await queryRead(`
+      SELECT id, email FROM merchants 
+      WHERE email IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 10000
+    `);
+
+    stats.totalRows = result.rows.length;
+    logger.info(`Found ${stats.totalRows} merchants with emails`);
+
+    for (const row of result.rows) {
+      try {
+        if (isAlreadyEncrypted(row.email)) {
+          stats.encryptedRows++;
+          continue;
+        }
+
+        const encrypted = encrypt(row.email);
+        await queryWrite(
+          'UPDATE merchants SET email = $1, updated_at = NOW() WHERE id = $2',
+          [encrypted, row.id]
+        );
+
+        stats.unencryptedRows++;
+        logger.debug(`Encrypted email for merchant ${row.id}`);
+      } catch (error) {
+        stats.errors++;
+        logger.error(error, `Failed to encrypt email for merchant ${row.id}`);
+      }
+    }
+
+    logger.info(`Merchant email migration complete: ${stats.unencryptedRows} encrypted, ${stats.encryptedRows} already encrypted, ${stats.errors} errors`);
+  } catch (error) {
+    logger.error(error, 'Failed to migrate merchant emails');
+    throw error;
+  }
+
+  return stats;
+}
+
+/**
  * Main migration function
  */
 async function main(): Promise<void> {
   logger.info('Starting encryption migration for existing data...');
-  logger.info('This migration will encrypt any plaintext data in sensitive transaction fields.');
+  logger.info('This migration will encrypt any plaintext data in sensitive fields.');
 
   const startTime = Date.now();
   const allStats: MigrationStats[] = [];
 
   try {
     // Run migrations in sequence
+    logger.info('=== Encrypting transaction data ===');
     allStats.push(await encryptTransactionPhoneNumbers());
     allStats.push(await encryptTransactionStellarAddresses());
     allStats.push(await encryptTransactionNotes());
+
+    logger.info('=== Encrypting user data ===');
+    allStats.push(await encryptUserPhoneNumbers());
+    allStats.push(await encryptUserEmails());
+
+    logger.info('=== Encrypting merchant data ===');
+    allStats.push(await encryptMerchantPhoneNumbers());
+    allStats.push(await encryptMerchantEmails());
 
     const endTime = Date.now();
     const duration = (endTime - startTime) / 1000;

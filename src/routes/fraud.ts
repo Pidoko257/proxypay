@@ -10,12 +10,29 @@ export const fraudRoutes = Router();
 const fraudAlertModel = new FraudAlertModel();
 
 /**
+ * Restrict fraud alert mutations to admins and analysts.
+ * Regular authenticated users must not be able to review alerts.
+ */
+const requireFraudReviewer = (req: Request, res: Response, next: () => void): void => {
+  if (req.userRole !== 'admin' && req.userRole !== 'analyst') {
+    res.status(403).json({ error: 'Forbidden: fraud review requires admin or analyst role' });
+    return;
+  }
+  next();
+};
+
+/**
  * GET /api/fraud/history/:userId
  * Retrieve fraud history for a specific user
  */
 fraudRoutes.get('/history/:userId', requireAuth, async (req: Request, res: Response) => {
   try {
     const { userId } = req.params;
+
+    if (req.jwtUser?.userId !== userId && req.userRole !== 'admin') {
+      res.status(403).json({ error: 'Forbidden: cannot access another user\'s fraud history' });
+      return;
+    }
 
     const pagination = parseRequestPagination(req, res);
     if (!pagination) {
@@ -55,9 +72,19 @@ fraudRoutes.get('/alerts', requireAuth, async (req: Request, res: Response) => {
       return;
     }
 
+    // Restrict userId filter: non-admin, non-fraud-analyst users can only see their own alerts
+    let userId: string | undefined = req.query.userId as string;
+    const userRole = (req as any).jwtUser?.role || (req as any).user?.role;
+    const isAdminOrAnalyst = userRole === 'admin' || userRole === 'fraud_analyst';
+    
+    if (!isAdminOrAnalyst) {
+      // Force the filter to the current user's ID
+      userId = (req as any).jwtUser?.userId || (req as any).user?.id;
+    }
+
     const filter: FraudAlertFilter = {
       status: req.query.status as any,
-      userId: req.query.userId as string,
+      userId: userId,
       riskLevel: req.query.riskLevel as any,
       isFalsePositive: req.query.isFalsePositive === 'true' ? true : req.query.isFalsePositive === 'false' ? false : undefined,
       limit: pagination.limit,
@@ -132,7 +159,7 @@ fraudRoutes.get('/transactions/:transactionId', requireAuth, async (req: Request
  * POST /api/fraud/alerts/:alertId/review
  * Review a fraud alert
  */
-fraudRoutes.post('/alerts/:alertId/review', requireAuth, async (req: Request, res: Response) => {
+fraudRoutes.post('/alerts/:alertId/review', requireAuth, requireFraudReviewer, async (req: Request, res: Response) => {
   try {
     const { alertId } = req.params;
     const { status, reviewNotes, isFalsePositive, falsePositiveReason } = req.body;
@@ -175,7 +202,7 @@ fraudRoutes.post('/alerts/:alertId/review', requireAuth, async (req: Request, re
  * POST /api/fraud/alerts/:alertId/false-positive
  * Mark a fraud alert as a false positive
  */
-fraudRoutes.post('/alerts/:alertId/false-positive', requireAuth, async (req: Request, res: Response) => {
+fraudRoutes.post('/alerts/:alertId/false-positive', requireAuth, requireFraudReviewer, async (req: Request, res: Response) => {
   try {
     const { alertId } = req.params;
     const { reason } = req.body;

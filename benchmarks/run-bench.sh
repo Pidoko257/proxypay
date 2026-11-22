@@ -10,6 +10,18 @@
 # Usage:
 #   chmod +x benchmarks/run-bench.sh
 #   ./benchmarks/run-bench.sh
+#
+# Mixed load scenario (issue #841):
+#   ./benchmarks/run-bench.sh --mixed
+#   Exercises database pool, provider throttle, and job queue traffic together.
+#   Requires PostgreSQL, Redis, and the provider mock server (see below).
+#
+# Tested budgets (recorded for capacity planning):
+#   Instance:  4 vCPU / 8 GiB RAM (c5.xlarge-class)
+#   DB pool:   max 20 connections per service instance
+#   Postgres:  max_connections=100, shared_buffers=2GB
+#   Redis:     maxmemory 1GB, no eviction for queue keys
+#   Thresholds: p95 < 250ms, p99 < 500ms, error rate < 1%, queue backlog < 500
 
 set -euo pipefail
 
@@ -39,6 +51,33 @@ run_bench() {
     "$SCRIPT_DIR/k6-bench.js"
   echo "  Results saved to $out"
 }
+
+run_mixed() {
+  local out="$RESULTS_DIR/mixed-load.json"
+  echo ""
+  echo "▶ Mixed load: DB pool + provider throttle + job queue  →  $NODE_URL"
+  k6 run \
+    -e TARGET_URL="$NODE_URL" \
+    -e DURATION="${MIXED_DURATION:-60s}" \
+    -e DB_POOL_SIZE="${DB_POOL_SIZE:-20}" \
+    -e QUEUE_BACKLOG_MAX="${QUEUE_BACKLOG_MAX:-500}" \
+    -e P95_MS="${P95_MS:-250}" \
+    -e P99_MS="${P99_MS:-500}" \
+    -e ERROR_RATE_MAX="${ERROR_RATE_MAX:-0.01}" \
+    --summary-export="$out" \
+    "$SCRIPT_DIR/k6-mixed-load.js"
+  echo "  Results saved to $out"
+}
+
+if [ "${1:-}" = "--mixed" ]; then
+  echo "========================================"
+  echo "  Mixed Load Test (DB pool / throttle / queue)"
+  echo "========================================"
+  run_mixed
+  echo ""
+  echo "  Mixed load complete. Results in: $RESULTS_DIR/mixed-load.json"
+  exit 0
+fi
 
 echo "========================================"
 echo "  Callback Ingestion Benchmark Suite"

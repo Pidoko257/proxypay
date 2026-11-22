@@ -1,5 +1,7 @@
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { pool } from "../config/database";
+import Decimal from "decimal.js";
+import logger from "../utils/logger";
 
 export const MIN_WITHDRAWAL_AMOUNT = 1;
 
@@ -25,39 +27,57 @@ export class TransactionService {
       throw new Error("Amount too small");
     }
 
-    // Validate user exists and has sufficient balance
-    const user = await pool.query(
-      `SELECT id, balance FROM users WHERE id = $1`,
-      [payload.userId],
-    );
-
-    if (user.rows.length === 0) {
-      throw new Error("User not found");
-    }
-
-    const currentBalance = parseFloat(user.rows[0].balance || "0");
-    if (currentBalance < payload.amount) {
-      throw new Error("Insufficient balance");
-    }
-
-    // Calculate fee
-    const fee = await this.calculateWithdrawalFee(payload.amount, payload.currency);
-
-    const totalDeduction = payload.amount + fee;
-    if (currentBalance < totalDeduction) {
-      throw new Error(`Insufficient balance. Required: ${totalDeduction} (amount: ${payload.amount} + fee: ${fee}), available: ${currentBalance}`);
-    }
-
     const client = await pool.connect();
 
     try {
       await client.query("BEGIN");
 
-      // Deduct from user balance
-      await client.query(
-        `UPDATE users SET balance = balance - $1 WHERE id = $2`,
-        [totalDeduction, payload.userId],
+      // ISSUE 1 & 2 FIX: Lock user row inside the transaction to prevent double-spend race conditions
+      // This also ensures we read the balance with an exclusive lock that is held until COMMIT
+      const user = await client.query(
+        `SELECT id, balance FROM users WHERE id = $1 FOR UPDATE`,
+        [payload.userId],
       );
+
+      if (user.rows.length === 0) {
+        throw new Error("User not found");
+      }
+
+      // ISSUE 4 FIX: Convert balance to Decimal for precise financial calculations
+      const currentBalance = new Decimal(user.rows[0].balance || "0");
+
+      // ISSUE 2 FIX: Move fee lookup and calculation inside the transaction
+      // Lock the fee configuration row with FOR UPDATE to prevent mid-transaction changes
+      const feeResult = await this.calculateWithdrawalFeeWithLock(
+        client,
+        new Decimal(payload.amount),
+        payload.currency,
+      );
+
+      const fee = feeResult.fee;
+      const totalDeduction = feeResult.totalDeduction;
+
+      // Check sufficient balance using Decimal for precision
+      if (currentBalance.lessThan(payload.amount)) {
+        throw new Error("Insufficient balance");
+      }
+
+      if (currentBalance.lessThan(totalDeduction)) {
+        throw new Error(
+          `Insufficient balance. Required: ${totalDeduction.toString()} (amount: ${payload.amount} + fee: ${fee.toString()}), available: ${currentBalance.toString()}`,
+        );
+      }
+
+      // Deduct from user balance atomically inside the transaction using Decimal
+      const deductionAmount = totalDeduction.toNumber();
+      const updateResult = await client.query(
+        `UPDATE users SET balance = balance - $1 WHERE id = $2 AND balance >= $1 RETURNING balance`,
+        [deductionAmount, payload.userId],
+      );
+
+      if (updateResult.rowCount === 0) {
+        throw new Error("Insufficient balance");
+      }
 
       // Create withdrawal transaction
       const transaction = await this.txModel.createTransaction({
@@ -66,15 +86,15 @@ export class TransactionService {
         currency: payload.currency,
         type: "WITHDRAWAL",
         status: TransactionStatus.Pending,
-        fee,
+        fee: fee.toNumber(),
         metadata: {
           provider: payload.provider || "mtn",
           destination_account: payload.destinationAccount,
           currency: payload.currency,
           fee_breakdown: {
             amount: payload.amount,
-            fee,
-            total: totalDeduction,
+            fee: fee.toNumber(),
+            total: totalDeduction.toNumber(),
           },
           ...payload,
         },
@@ -89,7 +109,7 @@ export class TransactionService {
           transaction.id,
           payload.userId,
           payload.amount,
-          fee,
+          fee.toNumber(),
           payload.currency,
           payload.provider || "mtn",
           "pending",
@@ -101,35 +121,56 @@ export class TransactionService {
       return {
         success: true,
         transaction,
-        fee,
-        totalDeduction,
-        newBalance: currentBalance - totalDeduction,
+        fee: fee.toNumber(),
+        totalDeduction: totalDeduction.toNumber(),
+        newBalance: currentBalance.minus(totalDeduction).toNumber(),
       };
     } catch (error) {
       await client.query("ROLLBACK");
+      logger.error(
+        { error, userId: payload.userId, amount: payload.amount },
+        "Withdrawal failed",
+      );
       throw error;
     } finally {
       client.release();
     }
   }
 
-  private async calculateWithdrawalFee(amount: number, currency: string): Promise<number> {
-    const result = await pool.query(
+  /**
+   * Calculate withdrawal fee inside a transaction with row locking
+   * ISSUE 2 FIX: Acquire exclusive lock on fee config to ensure consistency
+   * ISSUE 4 FIX: Use Decimal for precise financial arithmetic
+   */
+  private async calculateWithdrawalFeeWithLock(
+    client: any,
+    amount: Decimal,
+    currency: string,
+  ): Promise<{ fee: Decimal; totalDeduction: Decimal }> {
+    const result = await client.query(
       `SELECT fee_fixed, fee_percent FROM fee_configurations
        WHERE type = 'withdrawal' AND (currency = $1 OR currency = 'ALL')
-       ORDER BY updated_at DESC LIMIT 1`,
+       ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`,
       [currency],
     );
 
+    let fee: Decimal;
+
     if (result.rows.length === 0) {
-      // Default fee: 1% with $0.50 minimum
-      return Math.max(0.5, amount * 0.01);
+      // Default fee: 1% with $0.50 minimum, using Decimal
+      fee = Decimal.max(new Decimal("0.5"), amount.times(new Decimal("0.01")));
+    } else {
+      const config = result.rows[0];
+      const fixedFee = new Decimal(config.fee_fixed || "0");
+      const percentFee = amount.times(new Decimal(config.fee_percent || "0.01"));
+
+      fee = Decimal.max(fixedFee, percentFee);
     }
 
-    const config = result.rows[0];
-    const fixedFee = parseFloat(config.fee_fixed || "0");
-    const percentFee = amount * parseFloat(config.fee_percent || "0.01");
+    // Round to 2 decimal places (cents)
+    fee = fee.toDecimalPlaces(2);
+    const totalDeduction = amount.plus(fee);
 
-    return Math.max(fixedFee, percentFee);
+    return { fee, totalDeduction };
   }
 }

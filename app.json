@@ -103,6 +103,38 @@
     "AIRTEL_API_SECRET": {
       "description": "Airtel Money API secret.",
       "required": false
+    },
+    "DR_FAILOVER_ENABLED": {
+      "description": "Enable the controlled DR failover state machine (promotion, reconnection, write fencing, return to primary).",
+      "value": "false"
+    },
+    "DR_FAILOVER_REQUIRE_APPROVAL": {
+      "description": "Require an explicit operator approval before each failover transition is applied.",
+      "value": "true"
+    },
+    "DR_FAILOVER_APPROVAL_TOKEN": {
+      "description": "Shared secret an operator must present to approve a failover transition.",
+      "generator": "secret"
+    },
+    "DR_HEALTH_CHECK_INTERVAL_MS": {
+      "description": "Interval (ms) between automated replication/health checks during a failover.",
+      "value": "5000"
+    },
+    "DR_HEALTH_CHECK_TIMEOUT_MS": {
+      "description": "Timeout (ms) for a single health check before it is treated as failed.",
+      "value": "3000"
+    },
+    "DR_PRIMARY_DB_URL": {
+      "description": "Connection string for the primary database used by the failover state machine.",
+      "required": false
+    },
+    "DR_REPLICA_DB_URL": {
+      "description": "Connection string for the standby replica that is promoted during failover.",
+      "required": false
+    },
+    "DR_DRILL_MODE": {
+      "description": "Run the failover procedure as a staging drill (no production writes are fenced).",
+      "value": "false"
     }
   }
 }

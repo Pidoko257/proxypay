@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import { pool } from "../config/database";
+import logger from "../utils/logger";
 
 export type AMLTransactionType = "deposit" | "withdraw";
 export type AMLAlertStatus = "pending_review" | "reviewed" | "dismissed";
@@ -424,18 +425,30 @@ export class AMLService {
 
       // AUTOMATION: If severity is high, automatically prepare SAR draft
       if (alert.severity === "high") {
-        console.log(`[SAR AUTO-PREPARE] High severity alert ${alert.id} detected. Preparing SAR...`);
+        logger.info(
+          { alertId: alert.id, userId: alert.userId, severity: alert.severity },
+          `[SAR AUTO-PREPARE] High severity alert ${alert.id} detected. Preparing SAR...`,
+        );
         try {
           const { generateSAR } = require("../compliance/sar");
           generateSAR(alert.userId, alert.id).catch((err: any) => {
-            console.error(`[SAR AUTO-PREPARE ERROR] Failed for alert ${alert.id}:`, err);
+            logger.error(
+              { err, alertId: alert.id, userId: alert.userId },
+              `[SAR AUTO-PREPARE ERROR] Failed for alert ${alert.id}`,
+            );
           });
         } catch (err) {
-          console.error(`[SAR AUTO-PREPARE ERROR] Failed to load sar service:`, err);
+          logger.error(
+            { err, alertId: alert.id, userId: alert.userId },
+            "[SAR AUTO-PREPARE ERROR] Failed to load sar service",
+          );
         }
       }
     } catch (error) {
-      console.error("Failed to persist AML alert to database:", error);
+      logger.error(
+        { err: error, alertId: alert.id, transactionId: alert.transactionId, userId: alert.userId },
+        "Failed to persist AML alert to database",
+      );
       // Fallback to in-memory storage
       this.alerts.unshift(alert);
       if (this.alerts.length > this.config.alertBufferSize) {
@@ -445,19 +458,19 @@ export class AMLService {
   }
 
   private logAlert(alert: AMLAlert, transaction: AMLTransactionRecord): void {
-    const line = JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level: "WARN",
-      type: "AML_ALERT",
-      alertId: alert.id,
-      transactionId: alert.transactionId,
-      userId: alert.userId,
-      severity: alert.severity,
-      amount: transaction.amount,
-      rules: alert.ruleHits.map((hit) => hit.rule),
-      reasons: alert.reasons,
-    });
-    console.warn(line);
+    logger.warn(
+      {
+        type: "AML_ALERT",
+        alertId: alert.id,
+        transactionId: alert.transactionId,
+        userId: alert.userId,
+        severity: alert.severity,
+        amount: transaction.amount,
+        rules: alert.ruleHits.map((hit) => hit.rule),
+        reasons: alert.reasons,
+      },
+      `AML alert triggered for transaction ${alert.transactionId}`,
+    );
   }
 }
 

@@ -3,6 +3,7 @@ import { getStellarServer } from "../config/stellar";
 import { notifySlackAlert } from "../services/loggers";
 import { calculateStellarReserve, formatReserveInfo } from "../utils/stellarReserveCalculator";
 import { redisClient } from "../config/redis";
+import logger from "../utils/logger";
 
 /**
  * Balance Monitor Job
@@ -47,8 +48,14 @@ export async function acquireBalanceMonitorLock(): Promise<boolean> {
     );
     return res !== null;
   } catch (err) {
-    console.warn("[balance-monitor] Redis lock check failed:", err);
-    return true;
+    // Fail closed: if we cannot verify the distributed lock, do not run.
+    // Proceeding here would let every instance run concurrently, producing
+    // duplicate Slack/PagerDuty alerts and conflicting liquidity actions.
+    logger.error(
+      { err, lockKey: BALANCE_MONITOR_LOCK_KEY },
+      "[balance-monitor] Redis lock check failed; skipping run (fail closed)",
+    );
+    return false;
   }
 }
 

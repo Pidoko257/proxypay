@@ -81,6 +81,48 @@ import type {
   ReconciliationReport,
 } from "../types/reconciliation";
 
+// ─── Injectable clock / randomness providers ─────────────────────────────────
+
+/**
+ * Clock provider.  Returns the current time in milliseconds since the epoch.
+ *
+ * Injecting this (instead of calling `Date.now()` directly) lets tests drive
+ * expiry / replay windows deterministically with Jest fake timers.
+ */
+export interface Clock {
+  now(): number;
+}
+
+/**
+ * Randomness provider.  Returns a float in `[0, 1)`.
+ *
+ * Injecting this (instead of calling `Math.random()` directly) lets tests
+ * exercise jitter and probabilistic / threshold decisions with deterministic
+ * stubs.
+ */
+export interface RandomSource {
+  random(): number;
+}
+
+/** Default clock backed by the global `Date.now()`. */
+export const systemClock: Clock = {
+  now: () => Date.now(),
+};
+
+/** Default randomness source backed by the global `Math.random()`. */
+export const systemRandom: RandomSource = {
+  random: () => Math.random(),
+};
+
+/**
+ * Policy dependencies for retry / fraud logic.  Both providers default to the
+ * system implementations so existing callers keep their current behavior.
+ */
+export interface PolicyDeps {
+  clock?: Clock;
+  random?: RandomSource;
+}
+
 // ─── Transaction / consistency boundary ──────────────────────────────────────
 
 /**
@@ -382,7 +424,8 @@ export async function persistPayoutReference(
     return existing;
   }
 
-  const now = new Date().toISOString();
+  const clock = deps.clock ?? systemClock;
+  const now = new Date(clock.now()).toISOString();
   const record: Sep31PayoutReference = {
     reference,
     status: "pending",

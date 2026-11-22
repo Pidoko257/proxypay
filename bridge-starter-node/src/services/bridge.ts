@@ -218,6 +218,31 @@ export interface SorobanContractResult {
   completedAt: string;
 }
 
+/**
+ * Injectable time source. Defaults to the system clock so production behavior
+ * is unchanged, while tests can supply a deterministic clock.
+ */
+export interface Clock {
+  now(): number;
+}
+
+/**
+ * Injectable randomness source. Defaults to Math.random so production behavior
+ * is unchanged, while tests can supply deterministic stubs for jitter and
+ * probabilistic/threshold decisions.
+ */
+export interface RandomProvider {
+  random(): number;
+}
+
+export const systemClock: Clock = {
+  now: () => Date.now(),
+};
+
+export const systemRandom: RandomProvider = {
+  random: () => Math.random(),
+};
+
 export class SorobanResourceLimitError extends Error {
   readonly estimate: SorobanResourceEstimate;
   readonly limits: SorobanLimits;
@@ -390,6 +415,21 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Computes the backoff delay for a given attempt, applying full jitter drawn
+ * from the injected random provider. With the default provider this matches
+ * the previous exponential backoff behavior (jitter factor in [0, 1)).
+ */
+export const computeBackoffMs = (
+  attempt: number,
+  limits: SorobanLimits,
+  random: RandomProvider = systemRandom,
+): number => {
+  const base = limits.baseBackoffMs * 2 ** (attempt - 1);
+  const jitter = random.random();
+  return Math.floor(base * jitter);
+};
+
+/**
  * Runs a Soroban contract execution with bounded retries and backoff.
  * Captures the simulation estimate, enforces fee/gas ceilings, classifies
  * errors, and persists the final contract result for the job.
@@ -400,6 +440,8 @@ export const executeSorobanContract = async (
   submit: (estimate: SorobanResourceEstimate) => Promise<void>,
   persist: (result: SorobanContractResult) => Promise<void>,
   limits: SorobanLimits = getSorobanLimits(),
+  clock: Clock = systemClock,
+  random: RandomProvider = systemRandom,
 ): Promise<SorobanContractResult> => {
   let attempts = 0;
   let estimate: SorobanResourceEstimate | undefined;
@@ -416,7 +458,7 @@ export const executeSorobanContract = async (
         success: true,
         attempts,
         estimate,
-        completedAt: new Date().toISOString(),
+        completedAt: new Date(clock.now()).toISOString(),
       };
       await persist(result);
       logger.info({ jobId, attempts, estimate }, "Soroban contract executed");
@@ -438,7 +480,7 @@ export const executeSorobanContract = async (
           estimate,
           error: message,
           errorClass,
-          completedAt: new Date().toISOString(),
+          completedAt: new Date(clock.now()).toISOString(),
         };
         await persist(result);
         logger.error(
@@ -448,7 +490,7 @@ export const executeSorobanContract = async (
         return result;
       }
 
-      const backoff = limits.baseBackoffMs * 2 ** (attempts - 1);
+      const backoff = computeBackoffMs(attempts, limits, random);
       await sleep(backoff);
     }
   }
@@ -461,7 +503,7 @@ export const executeSorobanContract = async (
     estimate,
     error: "Soroban execution exhausted retries",
     errorClass: "terminal",
-    completedAt: new Date().toISOString(),
+    completedAt: new Date(clock.now()).toISOString(),
   };
   await persist(result);
   return result;

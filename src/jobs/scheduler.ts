@@ -57,6 +57,7 @@ interface JobConfig {
 const JOBS: JobConfig[] = [
   {
     name: "sanction-sync",
+    critical: true,
     // Daily at 1:00 AM - syncs internal sanction list with global lists
     schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
     handler: runSanctionSyncJob,
@@ -93,6 +94,7 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "balance-monitor",
+    critical: true,
     // Every 5 minutes - monitors hot wallet balances
     schedule: process.env.BALANCE_MONITOR_CRON || "*/5 * * * *",
     handler: runBalanceMonitorJob,
@@ -105,12 +107,14 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "fee-bump",
+    critical: true,
     // Every 30 seconds - monitors and bumps fees for stuck transactions
     schedule: process.env.FEE_BUMP_CRON || "*/30 * * * * *",
     handler: runFeeBumpJob,
   },
   {
     name: "sep31-fee-bump",
+    critical: true,
     // Every 30 seconds - bumps fees for stuck SEP-31 transactions
     schedule: process.env.SEP31_FEE_BUMP_CRON || "*/30 * * * * *",
     handler: runSep31FeeBumpJob,
@@ -136,6 +140,7 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "provider-reconciliation",
+    critical: true,
     // Daily at 4:00 AM - runs automated reconciliation against provider CSV reports
     schedule: process.env.PROVIDER_RECONCILIATION_CRON || "0 4 * * *",
     handler: runDailyProviderReconciliation,
@@ -185,18 +190,21 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "reconciliation",
+    critical: true,
     // Daily at 5:00 AM
     schedule: process.env.RECONCILIATION_CRON || "0 5 * * *",
     handler: runReconciliationJob,
   },
   {
     name: "database-backup",
+    critical: true,
     // Daily at 2:00 AM
     schedule: process.env.DATABASE_BACKUP_CRON || "0 2 * * *",
     handler: runDatabaseBackupJob,
   },
   {
     name: "database-backup-verify",
+    critical: true,
     // Daily at 3:00 AM
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
@@ -256,6 +264,7 @@ async function runJob(job: JobConfig): Promise<void> {
 export function startJobs(): void {
   // Initialize PagerDuty integration for monitoring
   const pagerDutyService = createPagerDutyService();
+  setJobFailureAlerting(pagerDutyService);
   MonitoringService.initialize(pagerDutyService);
 
   // Start the monitoring service (checks every 30 seconds)

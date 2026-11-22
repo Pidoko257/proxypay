@@ -39,7 +39,7 @@ async function fetchSARData(userId: string, alertId?: string): Promise<SARData> 
   const transactions = await transactionModel.findCompletedByUserSince(userId, ninetyDaysAgo);
 
   // Fetch recent alerts
-  const alerts = amlService.getAlerts({ userId }).filter(a => new Date(a.createdAt) >= ninetyDaysAgo);
+  const alerts = await amlService.getAlerts({ userId, startDate: ninetyDaysAgo });
   
   const alertContext = alertId ? alerts.find(a => a.id === alertId) : undefined;
 

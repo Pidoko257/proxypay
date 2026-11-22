@@ -317,6 +317,31 @@ export class UserModel {
     return result.rows[0]?.token_version || 0;
   }
 
+  /**
+   * Returns the stored admin dashboard configuration for a user.
+   * `undefined` means the user does not exist; `null` means no config saved.
+   */
+  async getDashboardConfig(id: string): Promise<unknown | null | undefined> {
+    const result = await queryRead(
+      "SELECT dashboard_config FROM users WHERE id = $1",
+      [id],
+    );
+    if (result.rows.length === 0) return undefined;
+    return result.rows[0].dashboard_config ?? null;
+  }
+
+  /**
+   * Persists the admin dashboard configuration for a user.
+   * Returns false when the user does not exist.
+   */
+  async updateDashboardConfig(id: string, config: unknown): Promise<boolean> {
+    const result = await queryWrite(
+      "UPDATE users SET dashboard_config = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [JSON.stringify(config), id],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async updateMandatory2FAWithdrawals(id: string, enabled: boolean): Promise<void> {
     await queryWrite(
       "UPDATE users SET mandatory_2fa_withdrawals = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",

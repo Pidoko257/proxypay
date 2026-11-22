@@ -291,18 +291,15 @@ export async function adminUnlock(
     const deleted = Number(
       await redisClient.del([lockedKey(identifier), attemptsKey(identifier)]),
     );
-    const wasLocked = deleted > 0;
-    if (wasLocked) {
-      lockoutEvents.emit("unlocked", {
+    if (deleted > 0) {
+      lockoutEvents.emit("reset", {
         identifier,
-        reason: "admin",
+        reason: "admin_unlock",
         adminId,
       });
-      console.info(
-        `[Lockout] Account manually unlocked: ${identifier}${adminId ? ` by admin ${adminId}` : ""}`,
-      );
+      return true;
     }
-    return wasLocked;
+    return false;
   } catch (err) {
     console.error("[Lockout] adminUnlock Redis error:", err);
     return false;
@@ -310,9 +307,22 @@ export async function adminUnlock(
 }
 
 /**
- * Returns whether an account is currently locked. Convenience wrapper.
+ * Normalizes a submitted phone number into a stable per-account identifier
+ * so that lockout state is shared across IPs for the same account.
  */
-export async function isAccountLocked(identifier: string): Promise<boolean> {
+export function accountIdentifier(phoneNumber: unknown): string | null {
+  if (typeof phoneNumber !== "string") return null;
+  const normalized = phoneNumber.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+/**
+ * Convenience guard used by the auth rate limiter: returns true when the
+ * account identified by the submitted phone number is currently locked out.
+ */
+export async function isAccountLocked(phoneNumber: unknown): Promise<boolean> {
+  const identifier = accountIdentifier(phoneNumber);
+  if (!identifier) return false;
   const status = await getLockoutStatus(identifier);
   return status.isLocked;
 }

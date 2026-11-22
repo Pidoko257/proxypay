@@ -50,63 +50,128 @@ export class ApiError extends Error {
   }
 }
 
-// ── Required translation gating ─────────────────────────────────────────────
-// Locales that MUST be fully translated before a deploy is allowed.
-// Keep in sync with the translations validator config consumed by CI.
-export const REQUIRED_LOCALES = ["en", "es", "fr", "de"] as const;
+// ── Sensitive data sanitization ─────────────────────────────────────────────
+// Centralized scrub rules applied before any event/request data leaves the
+// process (Sentry export, request logging, error logging). Covers payment
+// payloads, credentials, phone numbers, and identity documents, including
+// nested objects, query strings, and provider error bodies.
+const REDACTED = "[REDACTED]";
 
-// Critical user-facing keys (payment / compliance). A runtime fallback for
-// any of these means a required translation is missing and must be alerted.
-export const CRITICAL_TRANSLATION_KEYS = [
-  "payment.checkout.title",
-  "payment.checkout.confirm",
-  "payment.receipt.subject",
-  "payment.failed.body",
-  "compliance.terms.accept",
-  "compliance.privacy.notice",
-  "compliance.refund.policy",
-] as const;
+// Field names (case-insensitive, matched as substrings) whose values must be
+// scrubbed wherever they appear in a payload.
+const SENSITIVE_KEY_PATTERNS: RegExp[] = [
+  /password/i,
+  /passwd/i,
+  /secret/i,
+  /token/i,
+  /api[-_]?key/i,
+  /authorization/i,
+  /credential/i,
+  /cookie/i,
+  /session/i,
+  /card[-_]?number/i,
+  /cardnumber/i,
+  /cvv/i,
+  /cvc/i,
+  /pan/i,
+  /iban/i,
+  /account[-_]?number/i,
+  /routing[-_]?number/i,
+  /phone/i,
+  /msisdn/i,
+  /ssn/i,
+  /social[-_]?security/i,
+  /passport/i,
+  /driver[-_]?licen[cs]e/i,
+  /national[-_]?id/i,
+  /identity[-_]?document/i,
+  /id[-_]?document/i,
+  /document[-_]?number/i,
+  /date[-_]?of[-_]?birth/i,
+  /dob/i,
+];
 
-// ── Runtime fallback detection ──────────────────────────────────────────────
-// i18next emits a "missingKey" event whenever it falls back to a fallback
-// locale (or the key itself) for a requested translation. We surface those
-// events as structured logs and escalate critical payment/compliance keys to
-// an error-level alert so monitoring can page before bad copy ships.
-export interface MissingKeyEvent {
-  lng?: string;
-  ns?: string;
-  key?: string;
-  fallbackValue?: string;
+// Query-string parameter names that must be scrubbed.
+const SENSITIVE_QUERY_PATTERNS: RegExp[] = SENSITIVE_KEY_PATTERNS;
+
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_KEY_PATTERNS.some((re) => re.test(key));
 }
 
-export function reportTranslationFallback(event: MissingKeyEvent): void {
-  const key = event.key ?? "";
-  const isCritical = (CRITICAL_TRANSLATION_KEYS as readonly string[]).includes(key);
+function scrubQueryString(qs: string): string {
+  if (!qs) return qs;
+  const params = new URLSearchParams(qs);
+  let changed = false;
+  for (const key of Array.from(params.keys())) {
+    if (SENSITIVE_QUERY_PATTERNS.some((re) => re.test(key))) {
+      params.set(key, REDACTED);
+      changed = true;
+    }
+  }
+  return changed ? params.toString() : qs;
+}
 
-  const payload = {
-    locale: event.lng,
-    namespace: event.ns,
-    key,
-    fallbackValue: event.fallbackValue,
-    critical: isCritical,
-  };
+function scrubUrl(url: string): string {
+  const qIndex = url.indexOf("?");
+  if (qIndex === -1) return url;
+  const base = url.slice(0, qIndex);
+  const qs = url.slice(qIndex + 1);
+  return `${base}?${scrubQueryString(qs)}`;
+}
 
-  if (isCritical) {
-    logger.error(payload, "Critical translation fallback used");
-    return;
+// Recursively scrub an arbitrary value. Handles nested objects/arrays, query
+// strings embedded in URLs, and provider error bodies (which are often nested
+// objects or JSON strings).
+export function sanitize(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === "string") {
+    // Scrub query strings embedded in URLs.
+    if (value.includes("?")) return scrubUrl(value);
+    return value;
   }
 
-  logger.warn(payload, "Translation fallback used");
+  if (typeof value !== "object") return value;
+
+  if (seen.has(value as object)) return "[Circular]";
+  seen.add(value as object);
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitize(item, seen));
+  }
+
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: sanitize(value.message, seen),
+      stack: value.stack,
+    };
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (isSensitiveKey(key)) {
+      out[key] = REDACTED;
+    } else {
+      out[key] = sanitize(val, seen);
+    }
+  }
+  return out;
 }
 
-// Attach the fallback listener to an i18next instance. Kept dependency-free
-// (structural typing) so this module does not import i18next directly.
-export function registerTranslationFallbackAlerting(i18n: {
-  on: (event: "missingKey", cb: (lng: string, ns: string, key: string, fallbackValue: string) => void) => void;
-}): void {
-  i18n.on("missingKey", (lng, ns, key, fallbackValue) => {
-    reportTranslationFallback({ lng, ns, key, fallbackValue });
-  });
+// Sanitize a Sentry event before export.
+export function sanitizeSentryEvent<T extends Record<string, any>>(event: T): T {
+  const scrubbed = sanitize(event) as T;
+  if (scrubbed && typeof scrubbed === "object") {
+    const req = (scrubbed as any).request;
+    if (req && typeof req === "object") {
+      if (typeof req.url === "string") req.url = scrubUrl(req.url);
+      if (typeof req.query_string === "string") {
+        req.query_string = scrubQueryString(req.query_string);
+      }
+    }
+  }
+  return scrubbed;
 }
 
 const app = express();
@@ -122,7 +187,8 @@ app.use(
 
 // ── HTTP request / response logging ─────────────────────────────────────────
 // Logs every inbound request and its outcome as a structured JSON line.
-// Sensitive headers (Authorization, etc.) are redacted by the pino logger.
+// Sensitive headers (Authorization, etc.) are redacted by the pino logger, and
+// query strings are scrubbed via the centralized sanitizer.
 app.use((req: Request, res: Response, next: NextFunction) => {
   const startMs = Date.now();
 
@@ -136,6 +202,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       {
         method: req.method,
         path: req.path,
+        query: scrubQueryString(req.originalUrl.split("?")[1] ?? ""),
         statusCode: res.statusCode,
         durationMs,
         requestId: req.headers["x-request-id"] ?? undefined,
@@ -155,7 +222,8 @@ app.use("/api", webhookRoutes);
 
 // ── Shared error middleware ─────────────────────────────────────────────────
 // Maps expected domain errors (ApiError) to their stable status + code, and
-// falls back to a generic INTERNAL_ERROR for anything unexpected.
+// falls back to a generic INTERNAL_ERROR for anything unexpected. Error data
+// is sanitized before logging so provider error bodies never leak secrets.
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ApiError) {
     const body: ErrorResponse = {
@@ -169,7 +237,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     return;
   }
 
-  logger.error({ err }, "Unhandled error");
+  logger.error({ err: sanitize(err) }, "Unhandled error");
   const body: ErrorResponse = {
     error: {
       code: ErrorCode.INTERNAL_ERROR,

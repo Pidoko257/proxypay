@@ -22,27 +22,28 @@ interface SorobanConfig {
   retryMaxDelayMs: number;
 }
 
-interface I18nConfig {
-  /** Locales that must have complete translations before deploy. */
-  requiredLocales: string[];
-  /** Default/fallback locale used by i18next. */
-  fallbackLocale: string;
-  /**
-   * Translation keys that must exist in every required locale. These cover
-   * critical payment/compliance messages that must never fall back at runtime.
-   */
-  requiredKeys: string[];
-  /** Emit an alert when i18next falls back for a critical key. */
-  alertOnCriticalFallback: boolean;
+interface SchedulerConfig {
+  /** Unique identity for this replica, used as the lock owner. */
+  replicaId: string;
+  /** How long a job lease is held before it must be renewed. */
+  leaseTtlMs: number;
+  /** How often the lease holder renews its lease. */
+  leaseRenewIntervalMs: number;
+  /** Redis URL used for distributed job locks. Empty disables distributed locking. */
+  redisUrl: string;
+  /** Key prefix for scheduler lock keys. */
+  lockKeyPrefix: string;
 }
 
-interface ReportingConfig {
-  /**
-   * IANA timezone used to derive statement/tax report date boundaries when a
-   * merchant/provider does not override it. Report windows are computed in
-   * this zone and converted to half-open UTC intervals.
-   */
-  defaultTimezone: string;
+interface MonitoringConfig {
+  /** Sentry DSN. Empty disables Sentry export. */
+  sentryDsn: string;
+  /** Environment tag attached to exported events. */
+  environment: string;
+  /** Fraction of transactions sampled for tracing (0-1). */
+  tracesSampleRate: number;
+  /** When true, request/response bodies are scrubbed before logging. */
+  scrubRequestData: boolean;
 }
 
 interface Config {
@@ -52,8 +53,8 @@ interface Config {
   webhookSecret: string;
   stellar: StellarConfig;
   soroban: SorobanConfig;
-  i18n: I18nConfig;
-  reporting: ReportingConfig;
+  scheduler: SchedulerConfig;
+  monitoring: MonitoringConfig;
 }
 
 const STELLAR_NETWORKS: Record<
@@ -137,16 +138,18 @@ function resolvePositiveInt(name: string, fallback: number): number {
   return value;
 }
 
-function resolveList(name: string, fallback: string[]): string[] {
+function resolveSampleRate(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") {
     return fallback;
   }
-  const values = raw
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-  return values.length > 0 ? values : fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(
+      `Invalid ${name} "${raw}". Expected a number between 0 and 1.`
+    );
+  }
+  return value;
 }
 
 function resolveBoolean(name: string, fallback: boolean): boolean {
@@ -154,25 +157,41 @@ function resolveBoolean(name: string, fallback: boolean): boolean {
   if (raw === undefined || raw.trim() === "") {
     return fallback;
   }
-  return raw.trim().toLowerCase() === "true";
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  throw new Error(
+    `Invalid ${name} "${raw}". Expected a boolean (true/false).`
+  );
 }
 
-function resolveTimezone(name: string, fallback: string): string {
-  const raw = process.env[name];
-  const candidate = raw === undefined || raw.trim() === "" ? fallback : raw.trim();
-  try {
-    // Throws RangeError for unknown IANA zones, so misconfiguration fails fast.
-    new Intl.DateTimeFormat("en-US", { timeZone: candidate });
-  } catch {
-    throw new Error(
-      `Invalid ${name} "${candidate}". Expected an IANA timezone (e.g. "America/New_York").`
-    );
+function resolveReplicaId(): string {
+  const raw = (process.env.SCHEDULER_REPLICA_ID || "").trim();
+  if (raw) {
+    return raw;
   }
-  return candidate;
+  return `${process.env.HOSTNAME || "replica"}-${process.pid}`;
 }
 
 const stellarNetwork = resolveStellarNetwork();
 const stellarNetworkDefaults = STELLAR_NETWORKS[stellarNetwork];
+
+const schedulerLeaseTtlMs = resolvePositiveInt("SCHEDULER_LEASE_TTL_MS", 30_000);
+const schedulerLeaseRenewIntervalMs = resolvePositiveInt(
+  "SCHEDULER_LEASE_RENEW_INTERVAL_MS",
+  Math.max(1, Math.floor(schedulerLeaseTtlMs / 3))
+);
+
+if (schedulerLeaseRenewIntervalMs >= schedulerLeaseTtlMs) {
+  throw new Error(
+    `Invalid SCHEDULER_LEASE_RENEW_INTERVAL_MS "${schedulerLeaseRenewIntervalMs}". ` +
+      `Must be less than SCHEDULER_LEASE_TTL_MS "${schedulerLeaseTtlMs}".`
+  );
+}
 
 export const config: Config = {
   port: Number(process.env.PORT) || 3000,
@@ -198,13 +217,17 @@ export const config: Config = {
     retryBaseDelayMs: resolvePositiveInt("SOROBAN_RETRY_BASE_DELAY_MS", 500),
     retryMaxDelayMs: resolvePositiveInt("SOROBAN_RETRY_MAX_DELAY_MS", 8_000),
   },
-  i18n: {
-    requiredLocales: resolveList("I18N_REQUIRED_LOCALES", DEFAULT_REQUIRED_LOCALES),
-    fallbackLocale: process.env.I18N_FALLBACK_LOCALE || "en",
-    requiredKeys: resolveList("I18N_REQUIRED_KEYS", DEFAULT_REQUIRED_KEYS),
-    alertOnCriticalFallback: resolveBoolean("I18N_ALERT_ON_CRITICAL_FALLBACK", true),
+  scheduler: {
+    replicaId: resolveReplicaId(),
+    leaseTtlMs: schedulerLeaseTtlMs,
+    leaseRenewIntervalMs: schedulerLeaseRenewIntervalMs,
+    redisUrl: process.env.SCHEDULER_REDIS_URL || process.env.REDIS_URL || "",
+    lockKeyPrefix: process.env.SCHEDULER_LOCK_KEY_PREFIX || "scheduler:lock:",
   },
-  reporting: {
-    defaultTimezone: resolveTimezone("REPORTING_DEFAULT_TIMEZONE", "UTC"),
+  monitoring: {
+    sentryDsn: process.env.SENTRY_DSN || "",
+    environment: process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV || "development",
+    tracesSampleRate: resolveSampleRate("SENTRY_TRACES_SAMPLE_RATE", 0),
+    scrubRequestData: resolveBoolean("MONITORING_SCRUB_REQUEST_DATA", true),
   },
 };

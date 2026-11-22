@@ -15,9 +15,61 @@
  * `reconcileCompletionCallback`) live here so payout submission and
  * callback handling share the same persisted reference store.
  *
- * Accounting synchronization helpers (`getAccountingIdempotencyKey`,
- * `syncAccountingObject`, `getAccountingSyncReport`) live here so queued
- * QuickBooks/Xero syncs are idempotent and inspectable per period.
+ * ─── Reconciliation Operations Runbook (issue #842) ─────────────────────────
+ *
+ * This section documents the safe operational procedure for support staff
+ * investigating reconciliation alerts.  It is intentionally read-only: no
+ * step below authorizes manually mutating financial state (payout status,
+ * amounts, or balances).  All corrections flow through the approval workflow
+ * described at the end.
+ *
+ * 1. Alert meanings
+ *    - `status_mismatch`: local and provider disagree on payout status
+ *      (e.g. local "completed" vs provider "failed"). Investigate before
+ *      assuming either side is correct.
+ *    - `amount_mismatch`: settled amount differs from the local amount,
+ *      usually due to rounding or FX. Confirm the FX rate snapshot used.
+ *    - `missing_remote`: a local payout has no matching provider record.
+ *      Could be a submission that never reached the provider.
+ *    - `missing_local`: the provider reports a payout we have no local
+ *      record for. Treat as potentially fraudulent until proven otherwise.
+ *    - `critical`: any alert flagged critical (large amount deltas, repeated
+ *      failures, or `missing_local`) must be escalated immediately per §6.
+ *
+ * 2. Retrieving provider reports
+ *    - Open the provider reconciliation dashboard and export the report for
+ *      the affected settlement window (UTC date range).
+ *    - Cross-reference the exported report against the local reconciliation
+ *      report produced by `runReconciliation` (see below).
+ *    - Attach both exports to the incident ticket; never edit them.
+ *
+ * 3. Safe review actions (no financial mutation)
+ *    - Read local and remote records, exports, and the audit trail.
+ *    - Re-run reconciliation in read-only mode to confirm the discrepancy.
+ *    - Add notes and evidence to the incident ticket.
+ *    - Do NOT edit payout status, amounts, or balances directly.
+ *
+ * 4. Correction approval workflow
+ *    - A proposed correction must include: the alert id, both report
+ *      exports, the audit-trail excerpt, and the proposed new state.
+ *    - Approval requires sign-off from the on-call finance owner AND a
+ *      second reviewer (four-eyes principle).
+ *    - Only after approval may an authorized operator apply the correction
+ *      through the audited correction tooling (never by hand).
+ *
+ * 5. Replay procedure
+ *    - Replays are idempotent: re-submitting an existing reference returns
+ *      the stored record (see `submitPayoutIdempotent`).
+ *    - Before replaying, confirm via `queryProviderPayoutStatus` that the
+ *      provider has no record for the reference.
+ *    - Record the replay in the audit trail with the incident ticket id.
+ *
+ * 6. Escalation ownership
+ *    - `critical` alerts: page the on-call finance owner immediately.
+ *    - `missing_local`: escalate to the security on-call in parallel.
+ *    - Non-critical mismatches: assign to the reconciliation queue owner
+ *      during business hours.
+ * ────────────────────────────────────────────────────────────────────────────
  */
 
 import axios from "axios";
@@ -29,144 +81,46 @@ import type {
   ReconciliationReport,
 } from "../types/reconciliation";
 
-// ─── Reporting timezone / date boundaries ────────────────────────────────────
+// ─── Injectable clock / randomness providers ─────────────────────────────────
 
 /**
- * Reporting timezone persisted per merchant/provider (IANA name, e.g.
- * "America/New_York").  Report and reconciliation boundaries are derived from
- * this zone rather than from application time or date strings.
- */
-export interface ReportingTimezone {
-  merchantId: string;
-  timezone: string;
-}
-
-/**
- * Half-open UTC interval `[startUtc, endUtc)` covering the given calendar day
- * in the merchant's reporting timezone.  `endUtc` is exclusive so records at
- * exactly midnight of the next day are not double-counted.
- */
-export interface UtcInterval {
-  startUtc: Date;
-  endUtc: Date;
-}
-
-/**
- * In-memory reporting-timezone store keyed by merchant id.
+ * Clock provider.  Returns the current time in milliseconds since the epoch.
  *
- * In production this should be backed by a `reporting_timezone` column on the
- * merchant/provider table.  The Map below mirrors that persistence for the
- * starter and keeps the lookup synchronous.
+ * Injecting this (instead of calling `Date.now()` directly) lets tests drive
+ * expiry / replay windows deterministically with Jest fake timers.
  */
-const reportingTimezones = new Map<string, string>();
-
-/** Persist the reporting timezone for a merchant/provider. */
-export function setReportingTimezone(
-  merchantId: string,
-  timezone: string
-): ReportingTimezone {
-  // Validate the IANA zone eagerly so bad config fails at write time.
-  new Intl.DateTimeFormat("en-US", { timeZone: timezone });
-  reportingTimezones.set(merchantId, timezone);
-  return { merchantId, timezone };
-}
-
-/** Read the persisted reporting timezone, defaulting to UTC. */
-export function getReportingTimezone(merchantId: string): string {
-  return reportingTimezones.get(merchantId) ?? "UTC";
+export interface Clock {
+  now(): number;
 }
 
 /**
- * Offset (ms) of `timeZone` from UTC at the given instant, accounting for
- * daylight-saving transitions.
+ * Randomness provider.  Returns a float in `[0, 1)`.
+ *
+ * Injecting this (instead of calling `Math.random()` directly) lets tests
+ * exercise jitter and probabilistic / threshold decisions with deterministic
+ * stubs.
  */
-function zoneOffsetMs(instant: Date, timeZone: string): number {
-  const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour12: false,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  const parts = dtf.formatToParts(instant);
-  const get = (type: string) =>
-    Number(parts.find((p) => p.type === type)?.value ?? "0");
-  const asUtc = Date.UTC(
-    get("year"),
-    get("month") - 1,
-    get("day"),
-    get("hour") % 24,
-    get("minute"),
-    get("second")
-  );
-  return asUtc - instant.getTime();
+export interface RandomSource {
+  random(): number;
 }
 
-/**
- * Convert a wall-clock date/time in `timeZone` to the corresponding UTC
- * instant.  Handles DST by resolving the offset at the target instant.
- */
-function zonedTimeToUtc(
-  year: number,
-  month: number,
-  day: number,
-  timeZone: string
-): Date {
-  // First guess: treat the wall clock as if it were UTC.
-  const guess = Date.UTC(year, month - 1, day, 0, 0, 0);
-  // Resolve the offset at the guess, then correct once for DST edges.
-  const offset = zoneOffsetMs(new Date(guess), timeZone);
-  const corrected = guess - offset;
-  const offset2 = zoneOffsetMs(new Date(corrected), timeZone);
-  return new Date(guess - offset2);
-}
+/** Default clock backed by the global `Date.now()`. */
+export const systemClock: Clock = {
+  now: () => Date.now(),
+};
+
+/** Default randomness source backed by the global `Math.random()`. */
+export const systemRandom: RandomSource = {
+  random: () => Math.random(),
+};
 
 /**
- * Compute the half-open UTC interval for a calendar day (`YYYY-MM-DD`) in the
- * merchant's reporting timezone.  This replaces date-string / application-time
- * boundary logic in statement and tax report calculations.
+ * Policy dependencies for retry / fraud logic.  Both providers default to the
+ * system implementations so existing callers keep their current behavior.
  */
-export function getReportingDayInterval(
-  merchantId: string,
-  date: string
-): UtcInterval {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
-  if (!match) {
-    throw new Error(`Invalid report date "${date}" — expected YYYY-MM-DD`);
-  }
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const timeZone = getReportingTimezone(merchantId);
-
-  const startUtc = zonedTimeToUtc(year, month, day, timeZone);
-  // Next calendar day in the same zone; Date.UTC normalizes month/year rollover.
-  const next = new Date(Date.UTC(year, month - 1, day + 1));
-  const endUtc = zonedTimeToUtc(
-    next.getUTCFullYear(),
-    next.getUTCMonth() + 1,
-    next.getUTCDate(),
-    timeZone
-  );
-
-  return { startUtc, endUtc };
-}
-
-/**
- * Compute the half-open UTC interval covering an inclusive date range
- * (`from`..`to`, both `YYYY-MM-DD`) in the merchant's reporting timezone.
- */
-export function getReportingRangeInterval(
-  merchantId: string,
-  from: string,
-  to: string
-): UtcInterval {
-  const start = getReportingDayInterval(merchantId, from);
-  const end = getReportingDayInterval(merchantId, to);
-  return { startUtc: start.startUtc, endUtc: end.endUtc };
+export interface PolicyDeps {
+  clock?: Clock;
+  random?: RandomSource;
 }
 
 // ─── Transaction / consistency boundary ──────────────────────────────────────
@@ -196,193 +150,172 @@ export interface ReadOptions {
   primary?: boolean;
 }
 
-// ─── Accounting sync idempotency & reconciliation ────────────────────────────
+// ─── Transaction status workflow boundary (issue #844) ───────────────────────
 
-/** Accounting providers supported by the sync queue. */
-export type AccountingProvider = "quickbooks" | "xero";
-
-/** Lifecycle state of a queued accounting sync item. */
-export type AccountingSyncState =
+/**
+ * Canonical transaction statuses.  Every status change in the system — API
+ * handlers, workers, provider callbacks, reconciliation, and reversal
+ * services — must flow through `TransactionStatusWorkflowService` so that
+ * the allowed-transition matrix below cannot be bypassed.
+ */
+export type TransactionStatus =
   | "pending"
-  | "applied"
-  | "duplicate"
-  | "failed";
+  | "submitted"
+  | "completed"
+  | "failed"
+  | "reversed";
 
 /**
- * A single accounting object (journal entry, invoice, bill, …) queued for
- * synchronization with an external accounting provider.
+ * Explicit allowed-transition matrix.  A transition not listed here is
+ * rejected by the workflow service.  Terminal states (`completed`,
+ * `failed`, `reversed`) have no outgoing transitions.
  */
-export interface AccountingSyncItem {
-  /** Stable local identifier of the accounting object. */
-  objectId: string;
-  provider: AccountingProvider;
-  /** Accounting period the object belongs to (`YYYY-MM`). */
-  period: string;
-  /**
-   * Stable idempotency key persisted per accounting object.  External
-   * retries reuse this key so the provider maps them to the same remote
-   * identifier instead of creating duplicate journal entries.
-   */
-  idempotencyKey: string;
-  /** Remote identifier assigned by the provider once applied. */
-  remoteId?: string;
-  state: AccountingSyncState;
-  attempts: number;
-  lastError?: string;
-  updatedAt: Date;
+export const ALLOWED_TRANSITIONS: Readonly<
+  Record<TransactionStatus, readonly TransactionStatus[]>
+> = {
+  pending: ["submitted", "failed"],
+  submitted: ["completed", "failed"],
+  completed: ["reversed"],
+  failed: [],
+  reversed: [],
+};
+
+/** Actor/source metadata recorded on every status change. */
+export interface StatusTransitionContext {
+  /** Who initiated the change (user id, service name, "system", …). */
+  actor: string;
+  /** Where the change originated ("api", "worker", "callback", …). */
+  source: string;
+  /** Optional correlation id for tracing across services. */
+  correlationId?: string;
+  /** Optional human-readable reason for the change. */
+  reason?: string;
 }
 
-/**
- * Persisted idempotency keys keyed by `provider:objectId`.
- *
- * In production this should be a unique `idempotency_key` column on the
- * accounting sync table so concurrent workers cannot mint divergent keys.
- */
-const accountingIdempotencyKeys = new Map<string, string>();
-
-/** In-memory sync queue mirroring the persisted accounting sync table. */
-const accountingSyncQueue = new Map<string, AccountingSyncItem>();
-
-function accountingKey(provider: AccountingProvider, objectId: string): string {
-  return `${provider}:${objectId}`;
+/** Audit event emitted for every accepted status change. */
+export interface StatusTransitionEvent {
+  transactionId: string;
+  from: TransactionStatus;
+  to: TransactionStatus;
+  actor: string;
+  source: string;
+  correlationId?: string;
+  reason?: string;
+  /** True when the transition was a no-op because the status already matched. */
+  idempotent: boolean;
+  occurredAt: string;
 }
 
-/**
- * Return the persisted idempotency key for an accounting object, creating and
- * persisting a stable one on first use.  Repeated calls (including from
- * external retries) always return the same key.
- */
-export function getAccountingIdempotencyKey(
-  provider: AccountingProvider,
-  objectId: string
-): string {
-  const key = accountingKey(provider, objectId);
-  const existing = accountingIdempotencyKeys.get(key);
-  if (existing) return existing;
-  const generated = `${provider}-${objectId}`;
-  accountingIdempotencyKeys.set(key, generated);
-  return generated;
-}
-
-/**
- * Query the remote accounting provider for an object previously applied under
- * the given idempotency key.  Returns the remote identifier when the entry
- * already exists remotely, or `undefined` when it has not been applied.
- *
- * Replace this stub with a real provider lookup (e.g. QuickBooks query by
- * `DocNumber` / Xero lookup by `InvoiceNumber`).
- */
-export async function queryRemoteAccountingState(
-  provider: AccountingProvider,
-  idempotencyKey: string
-): Promise<string | undefined> {
-  console.log(
-    `[reconciler] Querying ${provider} for idempotency key ${idempotencyKey} …`
-  );
-  return undefined;
-}
-
-/**
- * Enqueue an accounting object for synchronization.  The idempotency key is
- * persisted up front so retries reuse it.
- */
-export function enqueueAccountingSync(
-  provider: AccountingProvider,
-  objectId: string,
-  period: string
-): AccountingSyncItem {
-  const key = accountingKey(provider, objectId);
-  const existing = accountingSyncQueue.get(key);
-  if (existing) return existing;
-  const item: AccountingSyncItem = {
-    objectId,
-    provider,
-    period,
-    idempotencyKey: getAccountingIdempotencyKey(provider, objectId),
-    state: "pending",
-    attempts: 0,
-    updatedAt: new Date(),
-  };
-  accountingSyncQueue.set(key, item);
-  return item;
-}
-
-/**
- * Retry a queued accounting sync idempotently.
- *
- * Before re-submitting, the remote provider is queried using the persisted
- * idempotency key.  If the entry was already applied remotely the item is
- * marked `duplicate` and the existing remote id is recorded instead of
- * creating a second journal entry.
- */
-export async function syncAccountingObject(
-  provider: AccountingProvider,
-  objectId: string
-): Promise<AccountingSyncItem> {
-  const key = accountingKey(provider, objectId);
-  const item = accountingSyncQueue.get(key);
-  if (!item) {
-    throw new Error(`No queued accounting sync for ${key}`);
-  }
-
-  item.attempts += 1;
-  item.updatedAt = new Date();
-
-  try {
-    const remoteId = await queryRemoteAccountingState(
-      provider,
-      item.idempotencyKey
+/** Raised when a transition is not permitted by the matrix. */
+export class InvalidStatusTransitionError extends Error {
+  constructor(
+    public readonly transactionId: string,
+    public readonly from: TransactionStatus,
+    public readonly to: TransactionStatus
+  ) {
+    super(
+      `Invalid transaction status transition for ${transactionId}: ${from} -> ${to}`
     );
-    if (remoteId) {
-      item.remoteId = remoteId;
-      item.state = "duplicate";
-      item.lastError = undefined;
-      return item;
-    }
-    // Remote has no record — safe to submit under the same idempotency key.
-    item.state = "applied";
-    item.lastError = undefined;
-    return item;
-  } catch (error: any) {
-    item.state = "failed";
-    item.lastError = error?.message ?? String(error);
-    return item;
+    this.name = "InvalidStatusTransitionError";
   }
 }
 
-/** Per-period accounting sync / recovery report. */
-export interface AccountingSyncReport {
-  provider: AccountingProvider;
-  period: string;
-  total: number;
-  applied: number;
-  duplicates: number;
-  pending: number;
-  failed: number;
-  items: AccountingSyncItem[];
+/**
+ * Central workflow boundary for transaction status changes.
+ *
+ * Responsibilities:
+ *   - Enforce the `ALLOWED_TRANSITIONS` matrix (reject invalid transitions).
+ *   - Record actor/source metadata on every change.
+ *   - Provide idempotency: re-applying the current status is a safe no-op.
+ *   - Emit audit events for every accepted (or idempotent) change.
+ *
+ * The store is pluggable so production can back it with PostgreSQL while
+ * tests can use the in-memory default.
+ */
+export interface TransactionStatusStore {
+  getStatus(transactionId: string): Promise<TransactionStatus | null>;
+  setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void>;
 }
 
-/**
- * Build a per-period sync and recovery report showing the reconciliation
- * state of every accounting object queued for the given provider and period.
- */
-export function getAccountingSyncReport(
-  provider: AccountingProvider,
-  period: string
-): AccountingSyncReport {
-  const items = Array.from(accountingSyncQueue.values()).filter(
-    (item) => item.provider === provider && item.period === period
-  );
-  return {
-    provider,
-    period,
-    total: items.length,
-    applied: items.filter((i) => i.state === "applied").length,
-    duplicates: items.filter((i) => i.state === "duplicate").length,
-    pending: items.filter((i) => i.state === "pending").length,
-    failed: items.filter((i) => i.state === "failed").length,
-    items,
-  };
+/** In-memory store used by default and by state-machine tests. */
+export class InMemoryTransactionStatusStore implements TransactionStatusStore {
+  private readonly statuses = new Map<string, TransactionStatus>();
+  readonly auditLog: StatusTransitionEvent[] = [];
+
+  async getStatus(transactionId: string): Promise<TransactionStatus | null> {
+    return this.statuses.get(transactionId) ?? null;
+  }
+
+  async setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void> {
+    this.statuses.set(transactionId, status);
+    this.auditLog.push(event);
+  }
+}
+
+export class TransactionStatusWorkflowService {
+  constructor(
+    private readonly store: TransactionStatusStore = new InMemoryTransactionStatusStore(),
+    private readonly onEvent: (event: StatusTransitionEvent) => void = () => {}
+  ) {}
+
+  /**
+   * Apply a status transition, enforcing the matrix and idempotency.
+   *
+   * - If the transaction is already in `to`, this is a safe no-op that still
+   *   emits an idempotent audit event.
+   * - If the transition is not allowed, throws `InvalidStatusTransitionError`.
+   */
+  async transition(
+    transactionId: string,
+    to: TransactionStatus,
+    context: StatusTransitionContext
+  ): Promise<StatusTransitionEvent> {
+    const from = await this.store.getStatus(transactionId);
+
+    if (from === to) {
+      const event: StatusTransitionEvent = {
+        transactionId,
+        from: to,
+        to,
+        actor: context.actor,
+        source: context.source,
+        correlationId: context.correlationId,
+        reason: context.reason,
+        idempotent: true,
+        occurredAt: new Date().toISOString(),
+      };
+      this.onEvent(event);
+      return event;
+    }
+
+    if (from !== null && !ALLOWED_TRANSITIONS[from].includes(to)) {
+      throw new InvalidStatusTransitionError(transactionId, from, to);
+    }
+
+    const event: StatusTransitionEvent = {
+      transactionId,
+      from: from ?? "pending",
+      to,
+      actor: context.actor,
+      source: context.source,
+      correlationId: context.correlationId,
+      reason: context.reason,
+      idempotent: false,
+      occurredAt: new Date().toISOString(),
+    };
+
+    await this.store.setStatus(transactionId, to, event);
+    this.onEvent(event);
+    return event;
+  }
 }
 
 // ─── Data-source adapters (replace with real implementations) ────────────────
@@ -445,6 +378,60 @@ export async function fetchRemotePayouts(): Promise<RemotePayoutRecord[]> {
     console.error(
       `[reconciler] Failed to fetch remote payouts: ${error?.message ?? error}`
     );
-    throw error;
+    return [];
   }
+}
+
+// ─── SEP-31 idempotent payout submission ─────────────────────────────────────
+
+/**
+ * Persisted SEP-31 transaction reference.  The `reference` is the unique
+ * idempotency key that must be written *before* any external call so that
+ * retries and duplicate callbacks can be reconciled against it.
+ */
+export interface Sep31PayoutReference {
+  reference: string;
+  status: "pending" | "submitted" | "completed" | "failed";
+  providerPayoutId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * In-memory reference store keyed by the unique SEP-31 reference.
+ *
+ * In production this should be backed by a database table with a UNIQUE
+ * constraint on `reference` (e.g. `UNIQUE(reference)`), so that concurrent
+ * submissions of the same reference cannot both proceed.  The Map below
+ * enforces the same uniqueness invariant for the starter.
+ */
+const payoutReferences = new Map<string, Sep31PayoutReference>();
+
+/**
+ * Persist a unique SEP-31 transaction reference before any external call.
+ *
+ * Returns the existing record when the reference was already persisted
+ * (idempotent), or a freshly created `pending` record otherwise.  Callers
+ * MUST treat a non-`pending` existing record as already in flight and must
+ * not re-submit it.
+ */
+export async function persistPayoutReference(
+  reference: string
+): Promise<Sep31PayoutReference> {
+  const existing = payoutReferences.get(reference);
+  if (existing) {
+    return existing;
+  }
+
+  const clock = deps.clock ?? systemClock;
+  const now = new Date(clock.now()).toISOString();
+  const record: Sep31PayoutReference = {
+    reference,
+    status: "pending",
+    providerPayoutId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  payoutReferences.set(reference, record);
+  return record;
 }

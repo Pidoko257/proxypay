@@ -1,6 +1,7 @@
 ﻿import crypto from "node:crypto";
 import { Request, Response, NextFunction, RequestHandler } from "express";
 import logger from "../utils/logger";
+import redisClient from "../config/redis";
 
 export interface CallbackRecord {
   idempotencyKey: string;
@@ -10,6 +11,12 @@ export interface CallbackRecord {
   status: "received" | "processed" | "duplicate";
   responseBody?: unknown;
   statusCode?: number;
+}
+
+const DEFAULT_TTL_SECONDS = 86400; // 24 hours
+
+function buildRedisKey(provider: string, idempotencyKey: string): string {
+  return `callback:${provider}:${idempotencyKey}`;
 }
 
 export class CallbackIdempotencyStore {
@@ -23,6 +30,10 @@ export class CallbackIdempotencyStore {
     if (maxEntries !== undefined) this.maxEntries = maxEntries;
   }
 
+  private get ttlSeconds(): number {
+    return Math.max(1, Math.floor(this.ttlMs / 1000)) || DEFAULT_TTL_SECONDS;
+  }
+
   hashPayload(body: unknown): string {
     return crypto
       .createHash("sha256")
@@ -30,7 +41,11 @@ export class CallbackIdempotencyStore {
       .digest("hex");
   }
 
-  findDuplicate(provider: string, idempotencyKey: string, payloadHash: string): CallbackRecord | null {
+  async findDuplicate(
+    provider: string,
+    idempotencyKey: string,
+    payloadHash: string
+  ): Promise<CallbackRecord | null> {
     const fullKey = `${provider}:${idempotencyKey}`;
     const record = this.records.get(fullKey);
     if (record) {
@@ -51,10 +66,43 @@ export class CallbackIdempotencyStore {
       }
     }
 
+    // Fall back to Redis so duplicates are detected across restarts and replicas
+    try {
+      const redisKey = buildRedisKey(provider, idempotencyKey);
+      const exists = await redisClient.exists(redisKey);
+      if (exists) {
+        return {
+          idempotencyKey,
+          payloadHash,
+          provider,
+          receivedAt: new Date(),
+          status: "duplicate",
+        };
+      }
+    } catch (err) {
+      logger.error({ err, provider, idempotencyKey }, "Callback idempotency Redis lookup failed");
+    }
+
     return null;
   }
 
-  recordCallback(provider: string, idempotencyKey: string, payloadHash: string): CallbackRecord {
+  async recordCallback(
+    provider: string,
+    idempotencyKey: string,
+    payloadHash: string
+  ): Promise<CallbackRecord | null> {
+    // Atomically claim the callback in Redis. If the key already exists, this
+    // callback is a duplicate (e.g. retry landing on another replica).
+    try {
+      const redisKey = buildRedisKey(provider, idempotencyKey);
+      const claimed = await redisClient.set(redisKey, "1", "EX", this.ttlSeconds, "NX");
+      if (claimed === null) {
+        return null;
+      }
+    } catch (err) {
+      logger.error({ err, provider, idempotencyKey }, "Callback idempotency Redis claim failed");
+    }
+
     // Evict oldest if reached capacity
     if (this.records.size >= this.maxEntries) {
       const oldestKey = this.records.keys().next().value;
@@ -153,7 +201,7 @@ export function callbackIdempotency(options: CallbackIdempotencyOptions): Reques
     const idempotencyKey = extractCallbackIdempotencyKey(req, provider);
     const payloadHash = store.hashPayload(req.body);
 
-    const existing = store.findDuplicate(provider, idempotencyKey, payloadHash);
+    const existing = await store.findDuplicate(provider, idempotencyKey, payloadHash);
 
     if (existing) {
       logger.warn(
@@ -181,8 +229,27 @@ export function callbackIdempotency(options: CallbackIdempotencyOptions): Reques
       });
     }
 
-    // New callback: record it
-    store.recordCallback(provider, idempotencyKey, payloadHash);
+    // New callback: atomically claim it in Redis (SET NX EX). If another
+    // replica already claimed it, treat this as a duplicate.
+    const record = await store.recordCallback(provider, idempotencyKey, payloadHash);
+
+    if (!record) {
+      logger.warn(
+        { provider, idempotencyKey, payloadHash },
+        `Duplicate mobile money callback detected for ${provider} (Redis); skipping processing`
+      );
+
+      res.setHeader("X-Callback-Duplicate", "true");
+      res.setHeader("X-Callback-Idempotency-Key", idempotencyKey);
+
+      return res.status(200).json({
+        status: "accepted",
+        duplicate: true,
+        message: "Duplicate callback already processed",
+        provider,
+        idempotencyKey,
+      });
+    }
 
     // Intercept response to mark processed
     const originalJson = res.json.bind(res);

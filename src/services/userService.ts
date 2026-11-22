@@ -1,6 +1,6 @@
 import { Pool, PoolClient } from "pg";
 import { pool } from "../config/database";
-import { encrypt, decrypt } from "../utils/encryption";
+import { encrypt, decrypt, deterministicLookupValues } from "../utils/encryption";
 import { flushUserSessions } from "../config/redis";
 import { UserModel } from "../models/users";
 import { isValidMerchantMCC, requireValidMerchantMCC } from "../utils/merchantMcc";
@@ -44,7 +44,9 @@ export interface LoginRequest {
 export async function getUserByPhoneNumber(
   phoneNumber: string,
 ): Promise<User | null> {
-  const encryptedPhone = encrypt(phoneNumber, true);
+  // Match both the current HMAC-derived-IV ciphertext and the legacy
+  // fixed-IV form so users created before the IV change can still log in.
+  const encryptedPhoneCandidates = deterministicLookupValues(phoneNumber);
   const query = `
     SELECT 
       u.id,
@@ -64,10 +66,11 @@ export async function getUserByPhoneNumber(
       r.name as role_name
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
-    WHERE u.phone_number = $1
+    WHERE u.phone_number = ANY($1::text[])
+    LIMIT 1
   `;
 
-  const result = await pool.query(query, [encryptedPhone]);
+  const result = await pool.query(query, [encryptedPhoneCandidates]);
   if (result.rows.length === 0) return null;
   
   const row = result.rows[0];

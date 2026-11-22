@@ -64,6 +64,10 @@
       "description": "Global AES-256-GCM key material for encrypting PII fields (>=32 chars).",
       "generator": "secret"
     },
+    "DB_ENCRYPTION_HKDF_SALT": {
+      "description": "Secret HKDF salt used when deriving PII encryption keys. Required; rotating it requires re-encrypting stored PII.",
+      "generator": "secret"
+    },
     "PII_MASTER_KEY": {
       "description": "Master key for per-user HKDF key derivation. Keep distinct from DB_ENCRYPTION_KEY.",
       "generator": "secret"

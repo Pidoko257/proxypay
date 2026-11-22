@@ -509,6 +509,144 @@ export const executeSorobanContract = async (
   return result;
 };
 
+/**
+ * Accounting object kinds that participate in QuickBooks/Xero sync.
+ */
+export type AccountingObjectKind = "journal_entry" | "sync_item";
+
+/**
+ * Reconciliation state of a single accounting object after a sync attempt.
+ */
+export type AccountingSyncState =
+  | "pending"
+  | "applied"
+  | "duplicate_skipped"
+  | "failed";
+
+/**
+ * A queued accounting sync object with a stable idempotency key so external
+ * retries map to the same remote identifier instead of creating duplicates.
+ */
+export interface AccountingSyncObject {
+  kind: AccountingObjectKind;
+  /** Stable, deterministic key persisted per accounting object. */
+  idempotencyKey: string;
+  /** Remote identifier assigned once the object is applied remotely. */
+  remoteId?: string;
+  state: AccountingSyncState;
+  period: string;
+  attempts: number;
+  lastError?: string;
+  updatedAt: string;
+}
+
+/**
+ * Per-period reconciliation report exposing sync/recovery state.
+ */
+export interface AccountingSyncReport {
+  period: string;
+  total: number;
+  applied: number;
+  duplicateSkipped: number;
+  failed: number;
+  pending: number;
+  objects: AccountingSyncObject[];
+  generatedAt: string;
+}
+
+/**
+ * Derives a stable idempotency key for an accounting object. The key is a pure
+ * function of the object identity so retries always resolve to the same value.
+ */
+export const buildAccountingIdempotencyKey = (
+  kind: AccountingObjectKind,
+  objectId: string,
+  period: string,
+): string => `${kind}:${period}:${objectId}`;
+
+/**
+ * Queries remote accounting state for an already-applied object. Returns the
+ * remote identifier when the object exists remotely, otherwise undefined.
+ */
+export type RemoteAccountingLookup = (
+  idempotencyKey: string,
+) => Promise<string | undefined>;
+
+/**
+ * Applies a queued accounting object idempotently. Before retrying, the remote
+ * state is queried by idempotency key; if the object is already applied the
+ * retry is skipped and the existing remote identifier is recorded.
+ */
+export const syncAccountingObject = async (
+  object: AccountingSyncObject,
+  lookupRemote: RemoteAccountingLookup,
+  applyRemote: (object: AccountingSyncObject) => Promise<string>,
+): Promise<AccountingSyncObject> => {
+  const now = new Date().toISOString();
+
+  try {
+    const existingRemoteId = await lookupRemote(object.idempotencyKey);
+    if (existingRemoteId) {
+      logger.info(
+        { idempotencyKey: object.idempotencyKey, remoteId: existingRemoteId },
+        "Accounting object already applied remotely; skipping retry",
+      );
+      return {
+        ...object,
+        remoteId: existingRemoteId,
+        state: "duplicate_skipped",
+        updatedAt: now,
+      };
+    }
+
+    const remoteId = await applyRemote(object);
+    return {
+      ...object,
+      remoteId,
+      state: "applied",
+      attempts: object.attempts + 1,
+      lastError: undefined,
+      updatedAt: now,
+    };
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    logger.warn(
+      { idempotencyKey: object.idempotencyKey, err: message },
+      "Accounting object sync failed",
+    );
+    return {
+      ...object,
+      state: "failed",
+      attempts: object.attempts + 1,
+      lastError: message,
+      updatedAt: now,
+    };
+  }
+};
+
+/**
+ * Builds a per-period sync/recovery report from the current accounting objects.
+ */
+export const buildAccountingSyncReport = (
+  period: string,
+  objects: AccountingSyncObject[],
+): AccountingSyncReport => {
+  const inPeriod = objects.filter((object) => object.period === period);
+  const count = (state: AccountingSyncState): number =>
+    inPeriod.filter((object) => object.state === state).length;
+
+  return {
+    period,
+    total: inPeriod.length,
+    applied: count("applied"),
+    duplicateSkipped: count("duplicate_skipped"),
+    failed: count("failed"),
+    pending: count("pending"),
+    objects: inPeriod,
+    generatedAt: new Date().toISOString(),
+  };
+};
+
 const client = axios.create({
   baseURL: config.bridgeApiUrl,
   headers: {

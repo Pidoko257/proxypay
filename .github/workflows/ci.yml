@@ -10,6 +10,30 @@ on:
     - cron: "0 3 * * 0" # Weekly backup restore drill (Sundays 03:00 UTC)
 
 jobs:
+  translations:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Verify package-lock.json exists
+        run: |
+          if [ ! -f package-lock.json ]; then
+            npm install --package-lock-only
+          fi
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate required translations
+        run: npm run validate:translations
+
   cert-check:
     runs-on: ubuntu-latest
     steps:

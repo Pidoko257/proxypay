@@ -75,6 +75,19 @@ const STELLAR_NETWORKS: Record<
   },
 };
 
+const DEFAULT_REQUIRED_LOCALES = ["en"];
+
+const DEFAULT_REQUIRED_KEYS = [
+  "payment.status.pending",
+  "payment.status.completed",
+  "payment.status.failed",
+  "payment.error.insufficient_funds",
+  "payment.error.invalid_destination",
+  "compliance.kyc.required",
+  "compliance.aml.flagged",
+  "compliance.disclaimer",
+];
+
 function resolveStellarNetwork(): StellarConfig["network"] {
   const raw = (process.env.STELLAR_NETWORK || "testnet").toLowerCase();
   if (raw === "testnet" || raw === "public" || raw === "futurenet") {

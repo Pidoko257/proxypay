@@ -178,12 +178,78 @@ export async function runWithLease(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/**
+ * Returns the UTC offset (in minutes) of `timeZone` at the given instant.
+ * Uses Intl so daylight-saving transitions are handled by the platform.
+ */
+function getTimeZoneOffsetMinutes(timeZone: string, at: Date): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = dtf.formatToParts(at);
+  const get = (type: string): number =>
+    Number(parts.find((p) => p.type === type)?.value ?? "0");
+  const asUtc = Date.UTC(
+    get("year"),
+    get("month") - 1,
+    get("day"),
+    get("hour") % 24,
+    get("minute"),
+    get("second")
+  );
+  return (asUtc - at.getTime()) / 60_000;
+}
+
+/**
+ * Converts a wall-clock date (Y-M-D) in `timeZone` to the UTC instant of
+ * local midnight. Handles DST by resolving the offset at that instant.
+ */
+function zonedMidnightUtc(
+  year: number,
+  month: number,
+  day: number,
+  timeZone: string
+): Date {
+  // First guess: treat the wall-clock as UTC, then correct by the offset.
+  const guess = Date.UTC(year, month - 1, day, 0, 0, 0);
+  const offset = getTimeZoneOffsetMinutes(timeZone, new Date(guess));
+  return new Date(guess - offset * 60_000);
+}
+
+/**
+ * Builds a half-open UTC interval [start, end) covering the calendar day
+ * `dateStr` (YYYY-MM-DD) in the configured reporting timezone.
+ */
+export function reportingDayInterval(
+  dateStr: string,
+  timeZone: string = REPORTING_TIMEZONE
+): { start: Date; end: Date } {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const start = zonedMidnightUtc(year, month, day, timeZone);
+  const next = new Date(Date.UTC(year, month - 1, day + 1));
+  const end = zonedMidnightUtc(
+    next.getUTCFullYear(),
+    next.getUTCMonth() + 1,
+    next.getUTCDate(),
+    timeZone
+  );
+  return { start, end };
+}
+
 function printReport(report: ReconciliationReport): void {
   console.log("\n╔══════════════════════════════════════════════════════╗");
   console.log("║         PROVIDER RECONCILIATION REPORT              ║");
   console.log("╚══════════════════════════════════════════════════════╝\n");
 
   console.log(`  Reconciled at : ${report.reconciledAt}`);
+  console.log(`  Timezone      : ${REPORTING_TIMEZONE}`);
   console.log(`  Local records : ${report.totalLocal}`);
   console.log(`  Remote records: ${report.totalRemote}`);
   console.log(`  ─────────────────────────────────`);

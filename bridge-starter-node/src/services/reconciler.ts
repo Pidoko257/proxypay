@@ -376,8 +376,7 @@ export async function fetchRemotePayouts(): Promise<RemotePayoutRecord[]> {
     return response.data;
   } catch (error: any) {
     console.error(
-      "[reconciler] Failed to fetch remote payouts:",
-      error.response?.data || error.message
+      `[reconciler] Failed to fetch remote payouts: ${error?.message ?? error}`
     );
     return [];
   }

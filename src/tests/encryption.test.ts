@@ -22,6 +22,8 @@ import {
   decryptField,
   encryptFieldForUser,
   decryptFieldForUser,
+  encrypt,
+  decrypt,
 } from "../utils/encryption";
 import {
   encryptPiiFields,
@@ -354,5 +356,239 @@ describe("zero-downtime key rotation / fallback keys support", () => {
     process.env.DB_ENCRYPTION_KEYS_FALLBACK = wrongKey;
 
     expect(() => decryptField(encrypted)).toThrow(/PII decryption failed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Email and Phone Number PII Fields (GDPR/CCPA)
+// ---------------------------------------------------------------------------
+
+describe("Email and Phone Number PII Encryption", () => {
+  describe("Global key encryption for contact fields", () => {
+    it("encrypts email addresses correctly", () => {
+      const email = "alice@example.com";
+      const encrypted = encryptField(email) as string;
+      expect(encrypted).not.toBe(email);
+      expect(encrypted).not.toContain("@");
+      expect(decryptField(encrypted)).toBe(email);
+    });
+
+    it("encrypts phone numbers correctly", () => {
+      const phone = "+237671234567";
+      const encrypted = encryptField(phone) as string;
+      expect(encrypted).not.toBe(phone);
+      expect(encrypted).not.toContain("+237");
+      expect(decryptField(encrypted)).toBe(phone);
+    });
+
+    it("handles international phone formats", () => {
+      const phones = [
+        "+237671234567",    // Cameroon
+        "+441632960000",    // UK
+        "+33123456789",     // France
+        "0612345678",       // France (domestic)
+      ];
+
+      for (const phone of phones) {
+        const encrypted = encryptField(phone) as string;
+        expect(decryptField(encrypted)).toBe(phone);
+      }
+    });
+
+    it("handles various email formats", () => {
+      const emails = [
+        "alice@example.com",
+        "user.name+tag@example.co.uk",
+        "test_email@subdomain.example.com",
+        "user123@domain.org",
+      ];
+
+      for (const email of emails) {
+        const encrypted = encryptField(email) as string;
+        expect(decryptField(encrypted)).toBe(email);
+      }
+    });
+  });
+
+  describe("Per-user key encryption for contact fields", () => {
+    it("encrypts email with per-user key", () => {
+      const userId = "user-123";
+      const email = "alice@example.com";
+      const encrypted = encryptFieldForUser(email, userId) as string;
+      expect(encrypted).not.toBe(email);
+      expect(decryptFieldForUser(encrypted, userId)).toBe(email);
+    });
+
+    it("encrypts phone with per-user key", () => {
+      const userId = "user-456";
+      const phone = "+237671234567";
+      const encrypted = encryptFieldForUser(phone, userId) as string;
+      expect(encrypted).not.toBe(phone);
+      expect(decryptFieldForUser(encrypted, userId)).toBe(phone);
+    });
+
+    it("same email produces different ciphertext for different users (data isolation)", () => {
+      const email = "alice@example.com";
+      const enc1 = encryptFieldForUser(email, "user-1") as string;
+      const enc2 = encryptFieldForUser(email, "user-2") as string;
+      expect(enc1).not.toBe(enc2);
+    });
+  });
+
+  describe("Contact fields in PII middleware", () => {
+    it("encrypts email and phone_number alongside existing PII fields", () => {
+      const row = {
+        id: "merchant-123",
+        name: "Acme Corp",
+        email: "contact@acme.com",
+        phone_number: "+237671234567",
+        address: "123 Business St",
+        id_number: "RCCM-CM2024001",
+        status: "active",
+      };
+
+      const encrypted = encryptPiiFields(row);
+
+      // Non-PII fields unchanged
+      expect(encrypted.id).toBe("merchant-123");
+      expect(encrypted.status).toBe("active");
+
+      // All PII fields encrypted
+      expect(encrypted.name).not.toBe("Acme Corp");
+      expect(encrypted.email).not.toBe("contact@acme.com");
+      expect(encrypted.phone_number).not.toBe("+237671234567");
+      expect(encrypted.address).not.toBe("123 Business St");
+      expect(encrypted.id_number).not.toBe("RCCM-CM2024001");
+    });
+
+    it("decrypts email and phone_number correctly", () => {
+      const row = {
+        name: "Acme Corp",
+        email: "contact@acme.com",
+        phone_number: "+237671234567",
+        address: "123 Business St",
+        id_number: "RCCM-CM2024001",
+      };
+
+      const encrypted = encryptPiiFields(row);
+      const decrypted = decryptPiiFields(encrypted);
+
+      expect(decrypted.name).toBe("Acme Corp");
+      expect(decrypted.email).toBe("contact@acme.com");
+      expect(decrypted.phone_number).toBe("+237671234567");
+      expect(decrypted.address).toBe("123 Business St");
+      expect(decrypted.id_number).toBe("RCCM-CM2024001");
+    });
+
+    it("handles null and undefined email/phone gracefully", () => {
+      const row = {
+        name: "User",
+        email: null,
+        phone_number: undefined,
+        address: "Some Address",
+      };
+
+      const encrypted = encryptPiiFields(row);
+      const decrypted = decryptPiiFields(encrypted);
+
+      expect(decrypted.email).toBeNull();
+      expect(decrypted.phone_number).toBeUndefined();
+      expect(decrypted.name).toBe("User");
+      expect(decrypted.address).toBe("Some Address");
+    });
+
+    it("handles empty string email/phone correctly", () => {
+      const row = {
+        name: "User",
+        email: "",
+        phone_number: "",
+        address: "Some Address",
+      };
+
+      const encrypted = encryptPiiFields(row);
+      const decrypted = decryptPiiFields(encrypted);
+
+      expect(decrypted.email).toBe("");
+      expect(decrypted.phone_number).toBe("");
+      expect(decrypted.name).toBe("User");
+    });
+  });
+
+  describe("User contact data (users table)", () => {
+    it("encrypts a typical user record with phone_number and email", () => {
+      const user = {
+        id: "user-999",
+        phone_number: "+237671234567",
+        email: "alice@example.com",
+        kyc_level: "full",
+        created_at: "2024-01-01T00:00:00Z",
+      };
+
+      const encrypted = encryptPiiFields(user);
+      expect(encrypted.phone_number).not.toBe(user.phone_number);
+      expect(encrypted.email).not.toBe(user.email);
+      expect(encrypted.kyc_level).toBe("full");
+
+      const decrypted = decryptPiiFields(encrypted);
+      expect(decrypted.phone_number).toBe("+237671234567");
+      expect(decrypted.email).toBe("alice@example.com");
+    });
+  });
+
+  describe("Merchant contact data (merchants table)", () => {
+    it("encrypts a typical merchant record with all PII fields", () => {
+      const merchant = {
+        id: "merchant-123",
+        name: "Acme Corporation",
+        email: "legal@acme.com",
+        phone_number: "+237670555555",
+        address: "123 Business Boulevard",
+        country: "CM",
+        status: "active",
+        kyc_status: "verified",
+      };
+
+      const encrypted = encryptPiiFields(merchant);
+
+      // Check non-PII fields
+      expect(encrypted.id).toBe("merchant-123");
+      expect(encrypted.country).toBe("CM");
+      expect(encrypted.status).toBe("active");
+      expect(encrypted.kyc_status).toBe("verified");
+
+      // Check PII fields are encrypted
+      expect(encrypted.name).not.toBe("Acme Corporation");
+      expect(encrypted.email).not.toBe("legal@acme.com");
+      expect(encrypted.phone_number).not.toBe("+237670555555");
+      expect(encrypted.address).not.toBe("123 Business Boulevard");
+
+      // Verify decryption
+      const decrypted = decryptPiiFields(encrypted);
+      expect(decrypted.name).toBe("Acme Corporation");
+      expect(decrypted.email).toBe("legal@acme.com");
+      expect(decrypted.phone_number).toBe("+237670555555");
+      expect(decrypted.address).toBe("123 Business Boulevard");
+    });
+  });
+
+  describe("Transaction phone data (transactions table)", () => {
+    it("encrypts a typical transaction with phone_number", () => {
+      const transaction = {
+        id: "txn-456",
+        reference_number: "REF-2024-001",
+        type: "deposit",
+        phone_number: "+237671234567",
+        status: "completed",
+        amount: "100.00",
+      };
+
+      const encrypted = encryptPiiFields(transaction);
+      expect(encrypted.phone_number).not.toBe("+237671234567");
+      expect(encrypted.reference_number).toBe("REF-2024-001");
+      expect(encrypted.status).toBe("completed");
+
+      const decrypted = decryptPiiFields(encrypted);
+      expect(decrypted.phone_number).toBe("+237671234567");
+    });
   });
 });

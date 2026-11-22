@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import { logger } from "../utils/logger";
 import {
   cancelTransactionHandler,
   depositHandler,
@@ -73,7 +74,7 @@ transactionRoutes.get(
 
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Failed to generate receipt PDF:", err);
+      logger.error({ err }, "Failed to generate receipt PDF");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to generate receipt PDF",
@@ -121,7 +122,7 @@ transactionRoutes.get(
 
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Failed to generate invoice PDF:", err);
+      logger.error({ err }, "Failed to generate invoice PDF");
       res.status(500).json({ error: "Failed to generate invoice PDF" });
     }
   },
@@ -152,7 +153,7 @@ transactionRoutes.post(
         expiresAt: Math.floor(Date.now() / 1000) + Number(expiresIn),
       });
     } catch (err) {
-      console.error("Failed to create shareable receipt URL:", err);
+      logger.error({ err }, "Failed to create shareable receipt URL");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to create shareable receipt URL",
@@ -188,7 +189,7 @@ transactionRoutes.get(
       );
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Invalid or expired share token:", err);
+      logger.error({ err }, "Invalid or expired share token");
       throw createError(
         ERROR_CODES.TOKEN_EXPIRED,
         "Invalid or expired share token",
@@ -216,6 +217,7 @@ transactionRoutes.post(
 
 transactionRoutes.get(
   "/",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   getTransactionHistoryHandler,
@@ -223,6 +225,7 @@ transactionRoutes.get(
 
 transactionRoutes.get(
   "/search",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   searchTransactionsHandler,
@@ -272,96 +275,42 @@ transactionRoutes.post(
   withdrawHandler,
 );
 
-/**
- * Refund a failed or disputed transaction by posting a compensating ledger
- * transaction and moving it to the reversed state.
- */
-transactionRoutes.post(
-  "/:id/refund",
-  authenticateToken,
-  requirePermission("dispute:manage"),
-  async (req: Request, res: Response) => {
-    const reason = req.body?.reason;
-    if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
-      throw createError(
-        ERROR_CODES.INVALID_INPUT,
-        'Field "reason" is required and must be a non-empty string',
-        { error: 'Field "reason" is required and must be a non-empty string' },
-      );
-    }
-
-    try {
-      const result = await transactionReversalService.reverse(
-        req.params.id,
-        reason.trim(),
-        req.user?.id,
-      );
-      return res.json({
-        transaction: result.transaction,
-        alreadyRefunded: result.reversal.alreadyReversed,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Refund failed";
-      const code = message.includes("not found")
-        ? ERROR_CODES.NOT_FOUND
-        : message.includes("Cannot reverse") || message.includes("No ledger")
-          ? ERROR_CODES.UNPROCESSABLE_CONTENT
-          : ERROR_CODES.INTERNAL_ERROR;
-      throw createError(code, message, { error: message });
-    }
-  },
-);
-
-transactionRoutes.get(
-  "/:id",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  getTransactionHandler,
-);
-
-transactionRoutes.post(
-  "/:id/cancel",
-  authenticateToken,
-  cancelTransactionRateLimiter,
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  cancelTransactionHandler,
-);
-
+// Metadata mutation endpoints — require authentication and ownership/role guard
 transactionRoutes.patch(
   "/:id/notes",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   updateNotesHandler,
 );
 
-// Replace metadata
 transactionRoutes.put(
   "/:id/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   updateMetadataHandler,
 );
 
-// Merge metadata keys
 transactionRoutes.patch(
   "/:id/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   patchMetadataHandler,
 );
 
-// Delete metadata keys
 transactionRoutes.delete(
   "/:id/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   deleteMetadataKeysHandler,
 );
 
-// Search by metadata
 transactionRoutes.post(
   "/search/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   searchByMetadataHandler,

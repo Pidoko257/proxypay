@@ -189,51 +189,41 @@ export class KYCService {
   private api: AxiosInstance;
   private db: Pool;
   private readonly baseURL: string;
-  private readonly apiKey: string;
+  private apiKey: string;
 
   constructor(db: Pool) {
     this.db = db;
     this.baseURL = process.env.KYC_API_URL || 'https://api.eu.onfido.com/v3.6';
-    this.apiKey = process.env.KYC_API_KEY || (process.env.NODE_ENV === 'test' ? 'test_key' : '');
-
-    if (!this.apiKey) {
-      throw new Error('KYC_API_KEY environment variable is required');
-    }
+    this.apiKey = process.env.KYC_API_KEY || '';
 
     this.api = axios.create({
       baseURL: this.baseURL,
       headers: {
-        'Authorization': `Token token=${this.apiKey}`,
+        ...(this.apiKey ? { 'Authorization': `Token token=${this.apiKey}` } : {}),
         'Content-Type': 'application/json',
       },
       timeout: 30000,
     });
 
-    // Request/response interceptors: structured, PII-free logging only.
-    // Never log request/response bodies (error.response?.data included) —
-    // KYC provider payloads contain applicant PII.
+    // Add request/response interceptors for logging and deferred API key validation
     this.api.interceptors.request.use((config) => {
-      logger.debug({ url: config.url, method: config.method }, 'KYC API request');
+      const apiKey = this.requireApiKey();
+      if (config.headers) {
+        config.headers['Authorization'] = `Token token=${apiKey}`;
+      }
+      logger.info({ method: config.method?.toUpperCase(), url: config.url }, `KYC API Request: ${config.method?.toUpperCase()} ${config.url}`);
       return config;
     });
 
     this.api.interceptors.response.use(
       (response) => {
-        logger.debug(
-          { url: response.config.url, method: response.config.method, status: response.status },
-          'KYC API response',
-        );
+        logger.info({ status: response.status, url: response.config.url }, `KYC API Response: ${response.status} ${response.config.url}`);
         return response;
       },
       (error) => {
-        logger.warn(
-          {
-            url: error.config?.url,
-            method: error.config?.method,
-            status: error.response?.status,
-            code: error.code,
-          },
-          'KYC API error',
+        logger.error(
+          { status: error.response?.status, url: error.config?.url, data: error.response?.data },
+          `KYC API Error: ${error.response?.status} ${error.config?.url}`,
         );
         return Promise.reject(error);
       }
@@ -241,9 +231,22 @@ export class KYCService {
   }
 
   /**
+   * Resolve and validate the KYC API key on the first actual KYC call rather than at module load time.
+   */
+  private requireApiKey(): string {
+    const key = this.apiKey || process.env.KYC_API_KEY || (process.env.NODE_ENV === 'test' ? 'test_key' : '');
+    if (!key) {
+      throw new Error('KYC_API_KEY environment variable is required');
+    }
+    this.apiKey = key;
+    return key;
+  }
+
+  /**
    * Create a new KYC applicant
    */
   async createApplicant(applicantData: z.infer<typeof CreateApplicantSchema>): Promise<KYCApplicant> {
+    this.requireApiKey();
     try {
       const validatedData = CreateApplicantSchema.parse(applicantData);
 
@@ -254,10 +257,9 @@ export class KYCService {
         validatedData.dob,
       );
       if (existing) {
-        // Do not log name/DOB — only the existing record id.
         logger.info(
-          { applicantId: existing.id },
-          '[KYCService] Duplicate applicant detected — returning existing record',
+          { applicantId: existing.id, firstName: validatedData.first_name, lastName: validatedData.last_name },
+          `[KYCService] Duplicate applicant detected for ${validatedData.first_name} ${validatedData.last_name} (dob: ${validatedData.dob ?? 'n/a'}) — returning existing record ${existing.id}`,
         );
         return existing;
       }
@@ -281,6 +283,7 @@ export class KYCService {
    * Retrieve an existing applicant
    */
   async getApplicant(applicantId: string): Promise<KYCApplicant> {
+    this.requireApiKey();
     try {
       const response = await this.api.get(`/applicants/${applicantId}`);
       return response.data as KYCApplicant;
@@ -293,6 +296,7 @@ export class KYCService {
    * Upload a document for verification
    */
   async uploadDocument(documentData: z.infer<typeof UploadDocumentSchema>): Promise<any> {
+    this.requireApiKey();
     try {
       const validatedData = UploadDocumentSchema.parse(documentData);
       
@@ -321,6 +325,7 @@ export class KYCService {
    * Create a workflow run for comprehensive verification
    */
   async createWorkflowRun(applicantId: string, workflowId?: string): Promise<WorkflowRun> {
+    this.requireApiKey();
     try {
       const workflowData = {
         applicant_id: applicantId,
@@ -338,6 +343,7 @@ export class KYCService {
    * Generate SDK token for client-side SDK integration
    */
   async generateSDKToken(applicantId: string, applicationId: string): Promise<string> {
+    this.requireApiKey();
     try {
       const response = await this.api.post('/sdk_token', {
         applicant_id: applicantId,
@@ -348,6 +354,128 @@ export class KYCService {
     } catch (error) {
       throw new Error(`Failed to generate SDK token: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  }
+
+  /**
+   * Get verification status for an applicant
+   */
+  async getVerificationStatus(applicantId: string): Promise<{
+    status: KYCStatus;
+    level: KYCLevel;
+    checks: KYCCheck[];
+    reports: KYCReport[];
+  }> {
+    this.requireApiKey();
+    try {
+      const checksResponse = await this.api.get(`/checks?applicant_id=${applicantId}`);
+      const checks = checksResponse.data.checks as KYCCheck[];
+
+      const reportsResponse = await this.api.get(`/reports?applicant_id=${applicantId}`);
+      const reports = reportsResponse.data.reports as KYCReport[];
+
+      const status = this.determineOverallStatus(checks, reports);
+      const level = this.determineKYCLevel(checks, reports);
+
+      return {
+        status,
+        level,
+        checks,
+        reports,
+      };
+    } catch (error) {
+      throw new Error(`Failed to get verification status: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Handle webhook events from KYC provider
+   */
+  async handleWebhook(event: WebhookEvent): Promise<void> {
+    try {
+      const { payload } = event;
+
+      switch (payload.action) {
+        case 'workflow_run.completed':
+          await this.handleWorkflowRunCompleted(payload.object);
+          break;
+        case 'check.completed':
+          await this.handleCheckCompleted(payload.object);
+          break;
+        default:
+          logger.info({ action: payload.action }, `Unhandled webhook event: ${payload.action}`);
+      }
+    } catch (error) {
+      logger.error({ err: error }, `Failed to handle webhook: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Update user KYC level in database
+   */
+  async updateUserKYCLevel(userId: string, kycLevel: KYCLevel): Promise<void> {
+    try {
+      const query = `
+        UPDATE users 
+        SET kyc_level = $1, updated_at = CURRENT_TIMESTAMP 
+        WHERE id = $2
+      `;
+
+      await this.db.query(query, [kycLevel, userId]);
+
+      logger.info({ userId, kycLevel }, `Updated KYC level for user ${userId} to ${kycLevel}`);
+      try {
+        if (kycLevel !== KYCLevel.NONE) {
+          const accountingSvc = new AccountingService();
+          await accountingSvc.syncContactForUser(userId);
+        }
+      } catch (err) {
+        logger.error(
+          { err, userId },
+          `Failed to sync accounting contact after KYC update for user ${userId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } catch (error) {
+      logger.error({ err: error, userId, kycLevel }, `Failed to update user KYC level: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get transaction limits for KYC level
+   */
+  getTransactionLimits(kycLevel: KYCLevel): {
+    dailyLimit: number;
+    perTransactionLimit: {
+      min: number;
+      max: number;
+    };
+  } {
+    const limits = {
+      [KYCLevel.NONE]: {
+        dailyLimit: parseInt(process.env.LIMIT_UNVERIFIED || '0'),
+        perTransactionLimit: {
+          min: parseInt(process.env.MIN_TRANSACTION_AMOUNT || '100'),
+          max: parseInt(process.env.MAX_TRANSACTION_AMOUNT || '1000000'),
+        },
+      },
+      [KYCLevel.BASIC]: {
+        dailyLimit: parseInt(process.env.LIMIT_BASIC || '100000'),
+        perTransactionLimit: {
+          min: parseInt(process.env.MIN_TRANSACTION_AMOUNT || '100'),
+          max: parseInt(process.env.MAX_TRANSACTION_AMOUNT || '1000000'),
+        },
+      },
+      [KYCLevel.FULL]: {
+        dailyLimit: parseInt(process.env.LIMIT_FULL || '10000000'),
+        perTransactionLimit: {
+          min: parseInt(process.env.MIN_TRANSACTION_AMOUNT || '100'),
+          max: parseInt(process.env.MAX_TRANSACTION_AMOUNT || '1000000'),
+        },
+      },
+    };
+
+    return limits[kycLevel] || limits[KYCLevel.NONE];
   }
 
   /**
@@ -364,7 +492,7 @@ export class KYCService {
     if (existing) {
       logger.info(
         { customerId: validated.customerId, requestId: validated.requestId, version: existing.version },
-        '[KYCService] Duplicate SEP-12 customer update — returning existing version',
+        `[KYCService] Duplicate SEP-12 customer update for ${validated.customerId} (request ${validated.requestId}) — returning existing version ${existing.version}`,
       );
       return existing;
     }
@@ -397,7 +525,7 @@ export class KYCService {
     if (existing) {
       logger.info(
         { customerId: validated.customerId, requestId: validated.requestId, version: existing.version },
-        '[KYCService] Duplicate SEP-12 document update — returning existing version',
+        `[KYCService] Duplicate SEP-12 document update for ${validated.customerId} (request ${validated.requestId}) — returning existing version ${existing.version}`,
       );
       return existing;
     }
@@ -406,7 +534,7 @@ export class KYCService {
     if (existingDoc) {
       logger.info(
         { customerId: validated.customerId, documentId: validated.documentId, version: existingDoc.version },
-        '[KYCService] Duplicate SEP-12 document — returning existing version',
+        `[KYCService] Duplicate SEP-12 document ${validated.documentId} for ${validated.customerId} — returning existing version ${existingDoc.version}`,
       );
       return existingDoc;
     }
@@ -551,43 +679,156 @@ export class KYCService {
     lastName: string,
     dob?: string,
   ): Promise<KYCApplicant | null> {
-    const result = await this.db.query(
-      `SELECT applicant_id, first_name, last_name, dob, created_at
-         FROM kyc_applicants
-        WHERE lower(first_name) = lower($1)
-          AND lower(last_name) = lower($2)
-          AND ($3::text IS NULL OR dob = $3)
-        LIMIT 1`,
-      [firstName, lastName, dob ?? null],
-    );
+    try {
+      const result = await this.db.query(
+        `SELECT applicant_id, first_name, last_name, dob, created_at, applicant_data
+           FROM kyc_applicants
+          WHERE lower(first_name) = lower($1)
+            AND lower(last_name) = lower($2)
+            AND ($3::text IS NULL OR dob = $3)
+          LIMIT 1`,
+        [firstName, lastName, dob ?? null],
+      );
 
-    if (!result.rows.length) {
+      if (!result.rows.length) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      if (row.applicant_data) {
+        return row.applicant_data as KYCApplicant;
+      }
+      return {
+        id: row.applicant_id,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        dob: row.dob ?? undefined,
+        created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+        sandbox: process.env.NODE_ENV !== 'production',
+      };
+    } catch (error) {
+      logger.error(
+        { err: error },
+        `[KYCService] findDuplicateApplicant error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
       return null;
     }
-
-    const row = result.rows[0];
-    return {
-      id: row.applicant_id,
-      first_name: row.first_name,
-      last_name: row.last_name,
-      dob: row.dob ?? undefined,
-      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
-      sandbox: process.env.NODE_ENV !== 'production',
-    };
   }
 
   private async storeApplicantReference(applicant: KYCApplicant): Promise<void> {
-    await this.db.query(
-      `INSERT INTO kyc_applicants (applicant_id, first_name, last_name, dob, created_at)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (applicant_id) DO NOTHING`,
-      [
-        applicant.id,
-        applicant.first_name,
-        applicant.last_name,
-        applicant.dob ?? null,
-        applicant.created_at,
-      ],
+    try {
+      await this.db.query(
+        `INSERT INTO kyc_applicants (applicant_id, first_name, last_name, dob, created_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (applicant_id) DO NOTHING`,
+        [
+          applicant.id,
+          applicant.first_name,
+          applicant.last_name,
+          applicant.dob ?? null,
+          applicant.created_at,
+        ],
+      );
+    } catch (error) {
+      logger.error(
+        { err: error, applicantId: applicant.id },
+        `Failed to store applicant reference: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+  }
+
+  private determineOverallStatus(checks: KYCCheck[], reports: KYCReport[]): KYCStatus {
+    if (checks.length === 0 && reports.length === 0) {
+      return KYCStatus.PENDING;
+    }
+
+    const hasRejected = reports.some(report => report.status === KYCStatus.REJECTED);
+    if (hasRejected) return KYCStatus.REJECTED;
+
+    const hasReview = reports.some(report => report.status === KYCStatus.REVIEW);
+    if (hasReview) return KYCStatus.REVIEW;
+
+    const allApproved = reports.every(report => report.status === KYCStatus.APPROVED);
+    if (allApproved) return KYCStatus.APPROVED;
+
+    return KYCStatus.PENDING;
+  }
+
+  private determineKYCLevel(checks: KYCCheck[], reports: KYCReport[]): KYCLevel {
+    const documentReports = reports.filter(report =>
+      report.name.includes('document') || report.name.includes('identity')
     );
+
+    if (documentReports.length === 0) {
+      return KYCLevel.NONE;
+    }
+
+    const hasBasicDocuments = documentReports.some(report =>
+      report.status === KYCStatus.APPROVED
+    );
+
+    if (!hasBasicDocuments) {
+      return KYCLevel.NONE;
+    }
+
+    const hasAdvancedVerification = reports.some(report =>
+      report.name.includes('facial') ||
+      report.name.includes('address') ||
+      report.name.includes('enhanced')
+    );
+
+    return hasAdvancedVerification ? KYCLevel.FULL : KYCLevel.BASIC;
+  }
+
+  private async handleWorkflowRunCompleted(workflowRun: any): Promise<void> {
+    try {
+      const applicantId = workflowRun.id;
+      const verificationStatus = await this.getVerificationStatus(applicantId);
+
+      const userQuery = `
+        SELECT u.id FROM users u
+        JOIN kyc_applicants ka ON u.id = ka.user_id
+        WHERE ka.applicant_id = $1
+      `;
+
+      const result = await this.db.query(userQuery, [applicantId]);
+
+      if (result.rows.length > 0) {
+        const userId = result.rows[0].id;
+        await this.updateUserKYCLevel(userId, verificationStatus.level);
+      }
+    } catch (error) {
+      logger.error(
+        { err: error },
+        `Failed to handle workflow run completion: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+  }
+
+  private async handleCheckCompleted(check: any): Promise<void> {
+    try {
+      const applicantId = check.applicant_id;
+      const verificationStatus = await this.getVerificationStatus(applicantId);
+
+      const userQuery = `
+        SELECT u.id FROM users u
+        JOIN kyc_applicants ka ON u.id = ka.user_id
+        WHERE ka.applicant_id = $1
+      `;
+
+      const result = await this.db.query(userQuery, [applicantId]);
+
+      if (result.rows.length > 0) {
+        const userId = result.rows[0].id;
+        await this.updateUserKYCLevel(userId, verificationStatus.level);
+      }
+    } catch (error) {
+      logger.error(
+        { err: error },
+        `Failed to handle check completion: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
   }
 }
+
+export default KYCService;

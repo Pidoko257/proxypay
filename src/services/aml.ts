@@ -1,9 +1,6 @@
 import * as crypto from "crypto";
 import { pool } from "../config/database";
 import logger from "../utils/logger";
-import { sarGenerationFailuresTotal } from "../utils/metrics";
-import { enqueueSarGeneration } from "../queue/sarGenerationQueue";
-import { AMLAlertModel } from "../models/amlAlert";
 
 export type AMLTransactionType = "deposit" | "withdraw";
 export type AMLAlertStatus = "pending_review" | "reviewed" | "dismissed";
@@ -429,60 +426,58 @@ export class AMLService {
     wasHigh: boolean,
   ): Promise<void> {
     try {
-      await this.alertModel.updateEscalation(alert.id, {
-        severity: alert.severity,
-        ruleHits: alert.ruleHits,
-        reasons: alert.reasons,
-      });
+      const { AMLAlertModel } = await import("../models/amlAlert.js");
+      const model = new AMLAlertModel();
+      await model.create(alert);
+
+      // AUTOMATION: If severity is high, automatically prepare SAR draft
+      if (alert.severity === "high") {
+        logger.info(
+          { alertId: alert.id, userId: alert.userId, severity: alert.severity },
+          `[SAR AUTO-PREPARE] High severity alert ${alert.id} detected. Preparing SAR...`,
+        );
+        try {
+          const { generateSAR } = require("../compliance/sar");
+          generateSAR(alert.userId, alert.id).catch((err: any) => {
+            logger.error(
+              { err, alertId: alert.id, userId: alert.userId },
+              `[SAR AUTO-PREPARE ERROR] Failed for alert ${alert.id}`,
+            );
+          });
+        } catch (err) {
+          logger.error(
+            { err, alertId: alert.id, userId: alert.userId },
+            "[SAR AUTO-PREPARE ERROR] Failed to load sar service",
+          );
+        }
+      }
     } catch (error) {
       logger.error(
-        { alertId: alert.id, err: error },
-        "Failed to persist AML alert escalation",
+        { err: error, alertId: alert.id, transactionId: alert.transactionId, userId: alert.userId },
+        "Failed to persist AML alert to database",
       );
-      throw error;
-    }
-
-    if (!wasHigh && alert.severity === "high") {
-      await this.scheduleSarPreparation(alert);
-    }
-  }
-
-  /**
-   * Enqueue SAR preparation as a durable job so it survives process exits
-   * and is retried with backoff. Enqueue failures are logged via the
-   * structured logger and counted so on-call can alert on them; they do not
-   * fail the caller because the alert itself is already persisted.
-   */
-  private async scheduleSarPreparation(alert: AMLAlert): Promise<void> {
-    try {
-      await enqueueSarGeneration({ userId: alert.userId, alertId: alert.id });
-      logger.info(
-        { alertId: alert.id },
-        "[SAR AUTO-PREPARE] Enqueued SAR generation for high-severity alert",
-      );
-    } catch (err) {
-      sarGenerationFailuresTotal.inc({ stage: "enqueue" });
-      logger.error(
-        { alertId: alert.id, err },
-        "[SAR AUTO-PREPARE] Failed to enqueue SAR generation",
-      );
+      // Fallback to in-memory storage
+      this.alerts.unshift(alert);
+      if (this.alerts.length > this.config.alertBufferSize) {
+        this.alerts = this.alerts.slice(0, this.config.alertBufferSize);
+      }
     }
   }
 
   private logAlert(alert: AMLAlert, transaction: AMLTransactionRecord): void {
-    const line = JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level: "WARN",
-      type: "AML_ALERT",
-      alertId: alert.id,
-      transactionId: alert.transactionId,
-      userId: alert.userId,
-      severity: alert.severity,
-      amount: transaction.amount,
-      rules: alert.ruleHits.map((hit) => hit.rule),
-      reasons: alert.reasons,
-    });
-    console.warn(line);
+    logger.warn(
+      {
+        type: "AML_ALERT",
+        alertId: alert.id,
+        transactionId: alert.transactionId,
+        userId: alert.userId,
+        severity: alert.severity,
+        amount: transaction.amount,
+        rules: alert.ruleHits.map((hit) => hit.rule),
+        reasons: alert.reasons,
+      },
+      `AML alert triggered for transaction ${alert.transactionId}`,
+    );
   }
 }
 

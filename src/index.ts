@@ -158,6 +158,8 @@ validateStellarNetwork();
 logStellarNetwork();
 
 const app = express();
+// The application is reachable only through its single trusted load-balancer hop.
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 const SHUTDOWN_TIMEOUT_MS = parseInt(
   process.env.SHUTDOWN_TIMEOUT_MS || "30000",

@@ -309,47 +309,64 @@ export class LedgerService {
     transactionId: string,
     userId: string
   ): Promise<PostedEntry[]> {
-    // Determine settlement delay from user
-    const { UserModel } = await import('../models/users.js');
-    const userModel = new UserModel();
-    const user = await userModel.findById(userId);
-    const delayDays = user?.settlementDelayDays || 0;
-    
-    // Calculate settlement date
-    const settlementDate = new Date();
-    settlementDate.setDate(settlementDate.getDate() + delayDays);
-    const settlementDateStr = settlementDate.toISOString().split('T')[0];
+    const client = await this.pool.connect();
 
-    const entries: LedgerEntry[] = [
-      {
-        account_code: '1100', // Mobile Money Float
-        debit_amount: amount,
-        description: 'Customer deposit received'
-      },
-      {
-        account_code: '2000', // Customer Balances
-        credit_amount: amount - fee,
-        description: 'Customer balance credited',
-        settlement_date: settlementDateStr
+    try {
+      await client.query('BEGIN');
+
+      // Read the settlement delay inside the same transaction as the ledger
+      // write, locking the user row so the delay cannot change underneath us.
+      const userResult = await client.query(
+        'SELECT settlement_delay_days FROM users WHERE id = $1 FOR SHARE',
+        [userId],
+      );
+      const delayDays = Number(userResult.rows[0]?.settlement_delay_days ?? 0) || 0;
+
+      // Calculate settlement date
+      const settlementDate = new Date();
+      settlementDate.setDate(settlementDate.getDate() + delayDays);
+      const settlementDateStr = settlementDate.toISOString().split('T')[0];
+
+      const entries: LedgerEntry[] = [
+        {
+          account_code: '1100', // Mobile Money Float
+          debit_amount: amount,
+          description: 'Customer deposit received'
+        },
+        {
+          account_code: '2000', // Customer Balances
+          credit_amount: amount - fee,
+          description: 'Customer balance credited',
+          settlement_date: settlementDateStr
+        }
+      ];
+
+      // Add fee revenue if applicable
+      if (fee > 0) {
+        entries.push({
+          account_code: '4100', // Deposit Fee Revenue
+          credit_amount: fee,
+          description: 'Deposit fee earned'
+        });
       }
-    ];
 
-    // Add fee revenue if applicable
-    if (fee > 0) {
-      entries.push({
-        account_code: '4100', // Deposit Fee Revenue
-        credit_amount: fee,
-        description: 'Deposit fee earned'
-      });
+      const postedEntries = await this.postTransactionWithClient(
+        client,
+        referenceNumber,
+        `Deposit: ${amount} (fee: ${fee})`,
+        entries,
+        transactionId,
+        userId,
+      );
+
+      await client.query('COMMIT');
+      return postedEntries;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-
-    return this.postTransaction(
-      referenceNumber,
-      `Deposit: ${amount} (fee: ${fee})`,
-      entries,
-      transactionId,
-      userId
-    );
   }
 
   /**

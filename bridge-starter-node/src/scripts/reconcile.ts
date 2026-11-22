@@ -310,12 +310,19 @@ async function runOnce(leaseClient?: LeaseClient): Promise<void> {
   } catch (err) {
     console.error("[reconciler] Lease-guarded run failed:", err);
     process.exitCode = 1;
+  } finally {
+    metrics.active -= 1;
+    metrics.depth -= 1;
+    logMetrics();
   }
 }
 
 async function runLoop(leaseClient?: LeaseClient): Promise<void> {
   console.log(
     `[reconciler] Starting reconciliation loop (interval: ${LOOP_INTERVAL_MS / 1000}s) …`
+  );
+  console.log(
+    `[reconciler] Bounded queue: concurrency=${RECONCILE_CONCURRENCY}, capacity=${RECONCILE_QUEUE_CAPACITY}`
   );
   console.log("[reconciler] Press Ctrl+C to stop.\n");
 

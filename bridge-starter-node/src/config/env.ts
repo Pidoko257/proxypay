@@ -194,10 +194,19 @@ if (schedulerLeaseRenewIntervalMs >= schedulerLeaseTtlMs) {
 }
 
 export const config: Config = {
-  port: Number(process.env.PORT) || 3000,
-  bridgeApiUrl: process.env.BRIDGE_API_URL || "",
-  bridgeApiKey: process.env.BRIDGE_API_KEY || "",
-  webhookSecret: process.env.WEBHOOK_SECRET || "",
+  port: resolvePort(),
+  bridgeApiUrl: resolveRequiredInProduction(
+    "BRIDGE_API_URL",
+    process.env.BRIDGE_API_URL || ""
+  ),
+  bridgeApiKey: resolveRequiredInProduction(
+    "BRIDGE_API_KEY",
+    process.env.BRIDGE_API_KEY || ""
+  ),
+  webhookSecret: resolveRequiredInProduction(
+    "WEBHOOK_SECRET",
+    process.env.WEBHOOK_SECRET || ""
+  ),
   stellar: {
     network: stellarNetwork,
     horizonUrl: process.env.STELLAR_HORIZON_URL || stellarNetworkDefaults.horizonUrl,
@@ -206,16 +215,29 @@ export const config: Config = {
     assetCode: resolveAssetCode(),
     assetIssuer: resolveAssetIssuer(),
   },
-  soroban: {
-    rpcUrl: process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org",
-    contractId: process.env.SOROBAN_CONTRACT_ID || "",
-    maxFeeStroops: resolvePositiveInt("SOROBAN_MAX_FEE_STROOPS", 1_000_000),
-    maxInstructions: resolvePositiveInt("SOROBAN_MAX_INSTRUCTIONS", 100_000_000),
-    maxCpuInsns: resolvePositiveInt("SOROBAN_MAX_CPU_INSNS", 100_000_000),
-    maxMemoryBytes: resolvePositiveInt("SOROBAN_MAX_MEMORY_BYTES", 41_943_040),
-    maxRetries: resolvePositiveInt("SOROBAN_MAX_RETRIES", 3),
-    retryBaseDelayMs: resolvePositiveInt("SOROBAN_RETRY_BASE_DELAY_MS", 500),
-    retryMaxDelayMs: resolvePositiveInt("SOROBAN_RETRY_MAX_DELAY_MS", 8_000),
+  soroban: resolveSorobanConfig(),
+  queues: {
+    payment: resolveQueuePolicy("QUEUE_PAYMENT", {
+      concurrency: 4,
+      capacity: 500,
+      providerRatePerSecond: 20,
+      providerRateBurst: 40,
+      admission: "reject",
+    }),
+    reconciliation: resolveQueuePolicy("QUEUE_RECONCILIATION", {
+      concurrency: 2,
+      capacity: 200,
+      providerRatePerSecond: 5,
+      providerRateBurst: 10,
+      admission: "defer",
+    }),
+    notification: resolveQueuePolicy("QUEUE_NOTIFICATION", {
+      concurrency: 8,
+      capacity: 1_000,
+      providerRatePerSecond: 50,
+      providerRateBurst: 100,
+      admission: "defer",
+    }),
   },
   scheduler: {
     replicaId: resolveReplicaId(),

@@ -1,7 +1,25 @@
 import express, { Request, Response, NextFunction } from "express";
 import webhookRoutes from "./routes/webhook";
-import { config } from "./config/env";
+import { config, validateEnv } from "./config/env";
 import logger from "./logger";
+
+// ── Startup configuration validation ────────────────────────────────────────
+// Fail fast on invalid operational configuration before the server binds a
+// port. In production any validation error is fatal; in other environments
+// the error is logged loudly so misconfiguration is never silent.
+function assertValidConfig(): void {
+  const result = validateEnv(process.env);
+  if (result.ok) return;
+
+  const summary = result.errors.join("; ");
+  if (config.nodeEnv === "production") {
+    logger.error({ errors: result.errors }, "Invalid environment configuration");
+    throw new Error(`Invalid environment configuration: ${summary}`);
+  }
+  logger.warn({ errors: result.errors }, "Invalid environment configuration (non-production)");
+}
+
+assertValidConfig();
 
 // ── Shared typed error contract ─────────────────────────────────────────────
 // Stable, machine-readable error codes. These codes are part of the public
@@ -218,6 +236,40 @@ app.get("/", (_req: Request, res: Response) => {
   res.send("Bridge Starter API running 🚀");
 });
 
+// Public health: minimal overall state only — no topology or failure detail.
+app.get("/health", async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const detailed = await collectDetailedHealth();
+    const body: PublicHealth = { status: detailed.status };
+    res.status(detailed.status === "down" ? 503 : 200).json(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Detailed diagnostics: admin-only, and every access is audit logged.
+app.get(
+  "/health/detailed",
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const detailed = await collectDetailedHealth();
+      logger.info(
+        {
+          audit: "health.detailed.access",
+          actor: (req as any).user?.id ?? req.headers["x-user-id"] ?? "unknown",
+          requestId: req.headers["x-request-id"] ?? undefined,
+          status: detailed.status,
+        },
+        "Detailed health diagnostics accessed",
+      );
+      res.status(detailed.status === "down" ? 503 : 200).json(detailed);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 app.use("/api", webhookRoutes);
 
 // ── Shared error middleware ─────────────────────────────────────────────────
@@ -227,11 +279,7 @@ app.use("/api", webhookRoutes);
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (err instanceof ApiError) {
     const body: ErrorResponse = {
-      error: {
-        code: err.code,
-        message: err.message,
-        ...(err.details !== undefined ? { details: err.details } : {}),
-      },
+      error: { code: err.code, message: err.message, details: err.details },
     };
     res.status(err.status).json(body);
     return;
@@ -239,14 +287,9 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
   logger.error({ err: sanitize(err) }, "Unhandled error");
   const body: ErrorResponse = {
-    error: {
-      code: ErrorCode.INTERNAL_ERROR,
-      message: "Internal server error",
-    },
+    error: { code: ErrorCode.INTERNAL_ERROR, message: "Internal server error" },
   };
-  res.status(STATUS_BY_CODE[ErrorCode.INTERNAL_ERROR]).json(body);
+  res.status(500).json(body);
 });
 
-app.listen(config.port, () => {
-  logger.info({ port: config.port }, "Server started");
-});
+export default app;

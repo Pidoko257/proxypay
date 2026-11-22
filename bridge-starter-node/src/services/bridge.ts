@@ -33,6 +33,79 @@ export class PayoutValidationError extends Error {
   }
 }
 
+/**
+ * Bounded taxonomy of provider failure codes used as Prometheus labels.
+ * Keeping this set small prevents unbounded time-series cardinality from
+ * free-form upstream error messages.
+ */
+export type ProviderErrorCode =
+  | "timeout"
+  | "network"
+  | "rate_limited"
+  | "auth"
+  | "bad_request"
+  | "server_error"
+  | "validation"
+  | "unknown";
+
+/**
+ * Maps an arbitrary provider failure to a bounded error code. Free-form
+ * details should be logged separately, never used as a metric label.
+ */
+export const classifyProviderError = (err: unknown): ProviderErrorCode => {
+  if (err instanceof PayoutValidationError) {
+    return "validation";
+  }
+
+  if (err instanceof SorobanResourceLimitError) {
+    return "validation";
+  }
+
+  const axiosErr = err as AxiosError | undefined;
+  if (axiosErr && axiosErr.isAxiosError) {
+    if (axiosErr.code === "ECONNABORTED" || axiosErr.code === "ETIMEDOUT") {
+      return "timeout";
+    }
+    if (
+      axiosErr.code === "ECONNRESET" ||
+      axiosErr.code === "ECONNREFUSED" ||
+      axiosErr.code === "ENOTFOUND" ||
+      axiosErr.code === "EAI_AGAIN"
+    ) {
+      return "network";
+    }
+    const status = axiosErr.response?.status;
+    if (status === 401 || status === 403) {
+      return "auth";
+    }
+    if (status === 429) {
+      return "rate_limited";
+    }
+    if (status !== undefined && status >= 400 && status < 500) {
+      return "bad_request";
+    }
+    if (status !== undefined && status >= 500) {
+      return "server_error";
+    }
+    return "network";
+  }
+
+  const message = (err as Error)?.message ?? String(err);
+  if (/timeout|timed out/i.test(message)) {
+    return "timeout";
+  }
+  if (/rate limit/i.test(message)) {
+    return "rate_limited";
+  }
+  if (/unauthori[sz]ed|forbidden|auth/i.test(message)) {
+    return "auth";
+  }
+  if (/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|network/i.test(message)) {
+    return "network";
+  }
+  return "unknown";
+};
+
 interface StellarAssetConfig {
   network: string;
   assetCode: string;

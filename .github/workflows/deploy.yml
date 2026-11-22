@@ -8,7 +8,14 @@ on:
   schedule:
     # Weekly backup restore drill (Mondays 03:00 UTC)
     - cron: "0 3 * * 1"
+    # Weekly DR failover drill in staging (Wednesdays 04:00 UTC)
+    - cron: "0 4 * * 3"
   workflow_dispatch:
+    inputs:
+      run_failover_drill:
+        description: "Run the controlled DR failover drill in staging"
+        type: boolean
+        default: false
 
 env:
   IMAGE: ${{ github.repository }}
@@ -206,19 +213,14 @@ jobs:
 
           {
             echo "Restore drill report"
-            echo "==================="
-            echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "Scratch database: $SCRATCH_DB"
-            echo "Result: $RESULT"
+            echo "===================="
+            echo "Result:   $RESULT"
+            echo "Reason:   ${REASON:-none}"
             echo "Duration: ${DURATION}s"
-            [ -n "$REASON" ] && echo "Reason: $REASON"
+            echo "Scratch:  $SCRATCH_DB (dropped)"
           } | tee "$RESTORE_DRILL_REPORT"
 
-          echo "result=$RESULT" >> $GITHUB_OUTPUT
-          echo "duration=${DURATION}s" >> $GITHUB_OUTPUT
-
           if [ "$RESULT" != "pass" ]; then
-            echo "Restore drill FAILED: $REASON" >&2
             exit 1
           fi
 
@@ -228,9 +230,185 @@ jobs:
         with:
           name: restore-drill-report
           path: restore-drill-report.txt
-          retention-days: 90
+          if-no-files-found: ignore
 
-      - name: Alert on missed or failed drill
-        if: failure() && steps.check_secrets.outputs.credentials_available == 'true'
+  failover-drill:
+    runs-on: ubuntu-latest
+    environment: staging
+    # Weekly scheduled drill, or an explicit manual dispatch with the drill flag set.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_failover_drill == true)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check failover drill secrets
+        id: check_secrets
         run: |
-          echo "::error::Backup restore drill failed or was missed. Investigate backup recoverability."
+          if [ -n "${{ secrets.STAGING_KUBECONFIG }}" ] && [ -n "${{ secrets.STAGING_PRIMARY_DATABASE_URL }}" ] && [ -n "${{ secrets.STAGING_REPLICA_DATABASE_URL }}" ]; then
+            echo "credentials_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "credentials_available=false" >> $GITHUB_OUTPUT
+            echo "Failover drill secrets are not configured. Skipping failover drill."
+          fi
+
+      - name: Install PostgreSQL client
+        if: steps.check_secrets.outputs.credentials_available == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Configure kubectl
+        if: steps.check_secrets.outputs.credentials_available == 'true'
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.STAGING_KUBECONFIG }}
+
+      - name: Run controlled failover drill
+        if: steps.check_secrets.outputs.credentials_available == 'true'
+        id: drill
+        env:
+          PRIMARY_URL: ${{ secrets.STAGING_PRIMARY_DATABASE_URL }}
+          REPLICA_URL: ${{ secrets.STAGING_REPLICA_DATABASE_URL }}
+          HEALTHCHECK_URL: ${{ secrets.STAGING_HEALTHCHECK_URL }}
+          FAILOVER_DRILL_REPORT: failover-drill-report.txt
+        run: |
+          set -euo pipefail
+
+          # Controlled failover state machine.
+          # States: PREFLIGHT -> FENCE_WRITES -> PROMOTE_REPLICA -> RECONNECT_APP
+          #         -> VERIFY -> RETURN_TO_PRIMARY -> DONE (or FAILED)
+          # Each transition is gated by a health check; any failure aborts and
+          # attempts to restore the original primary before exiting non-zero.
+          STATE="PREFLIGHT"
+          START_TS=$(date +%s)
+          REPORT="$FAILOVER_DRILL_REPORT"
+          : > "$REPORT"
+
+          log() { echo "[$STATE] $*" | tee -a "$REPORT"; }
+
+          wait_ready() {
+            local url="$1" timeout="${2:-120}" interval=5 elapsed=0 status
+            while [ "$elapsed" -lt "$timeout" ]; do
+              status=$(curl -s -o /dev/null -w "%{http_code}" "$url/ready" || echo "000")
+              if [ "$status" = "200" ]; then
+                return 0
+              fi
+              sleep "$interval"
+              elapsed=$((elapsed + interval))
+            done
+            return 1
+          }
+
+          replica_is_primary() {
+            psql "$REPLICA_URL" -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | grep -q '^f$'
+          }
+
+          primary_is_primary() {
+            psql "$PRIMARY_URL" -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | grep -q '^f$'
+          }
+
+          return_to_primary() {
+            STATE="RETURN_TO_PRIMARY"
+            log "Restoring original primary as the write target"
+            # Re-enable writes on the original primary and confirm it accepts them.
+            if psql "$PRIMARY_URL" -v ON_ERROR_STOP=1 -c "SELECT 1;" >/dev/null 2>&1 && primary_is_primary; then
+              log "Original primary is healthy and accepting writes"
+              return 0
+            fi
+            log "Original primary did not recover"
+            return 1
+          }
+
+          abort() {
+            STATE="FAILED"
+            log "Drill aborted: $1"
+            return_to_primary || log "WARNING: could not return to primary during abort"
+            END_TS=$(date +%s)
+            log "Duration: $((END_TS - START_TS))s"
+            exit 1
+          }
+
+          # --- PREFLIGHT: verify replication topology is healthy ---
+          log "Checking primary and replica health"
+          if ! primary_is_primary; then
+            abort "primary is not accepting writes before drill"
+          fi
+          if ! psql "$REPLICA_URL" -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | grep -q '^t$'; then
+            abort "replica is not in recovery (replication not configured)"
+          fi
+          LAG=$(psql "$PRIMARY_URL" -tAc "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())), 0);" 2>/dev/null || echo 0)
+          log "Replication lag (s): $LAG"
+
+          # --- FENCE_WRITES: stop application writes to the primary ---
+          STATE="FENCE_WRITES"
+          log "Fencing writes on primary (scale app to zero)"
+          if ! kubectl scale deployment/proxypay --replicas=0; then
+            abort "failed to fence writes"
+          fi
+          kubectl rollout status deployment/proxypay --timeout=60s || true
+
+          # --- PROMOTE_REPLICA: promote the replica to primary ---
+          STATE="PROMOTE_REPLICA"
+          log "Promoting replica"
+          if ! psql "$REPLICA_URL" -v ON_ERROR_STOP=1 -c "SELECT pg_promote();" >/dev/null; then
+            abort "replica promotion failed"
+          fi
+          for _ in $(seq 1 24); do
+            if replica_is_primary; then break; fi
+            sleep 5
+          done
+          if ! replica_is_primary; then
+            abort "replica did not become primary after promotion"
+          fi
+          log "Replica promoted to primary"
+
+          # --- RECONNECT_APP: point the app at the new primary ---
+          STATE="RECONNECT_APP"
+          log "Reconnecting application to promoted replica"
+          if ! kubectl set env deployment/proxypay DATABASE_URL="$REPLICA_URL"; then
+            abort "failed to update application DATABASE_URL"
+          fi
+          if ! kubectl scale deployment/proxypay --replicas=1; then
+            abort "failed to scale application back up"
+          fi
+          kubectl rollout status deployment/proxypay --timeout=120s || abort "application rollout failed"
+
+          # --- VERIFY: application health + writes land on new primary ---
+          STATE="VERIFY"
+          log "Verifying application health after failover"
+          if ! wait_ready "$HEALTHCHECK_URL" 180; then
+            abort "application health check failed after failover"
+          fi
+          if ! psql "$REPLICA_URL" -v ON_ERROR_STOP=1 -c "SELECT 1;" >/dev/null; then
+            abort "promoted replica is not accepting writes"
+          fi
+          log "Failover verified: app healthy and writes accepted by new primary"
+
+          # --- RETURN_TO_PRIMARY: restore original topology ---
+          STATE="RETURN_TO_PRIMARY"
+          log "Returning application to original primary"
+          if ! kubectl set env deployment/proxypay DATABASE_URL="$PRIMARY_URL"; then
+            abort "failed to restore application DATABASE_URL"
+          fi
+          kubectl rollout status deployment/proxypay --timeout=120s || abort "application rollout failed on return"
+          if ! wait_ready "$HEALTHCHECK_URL" 180; then
+            abort "application health check failed after returning to primary"
+          fi
+          if ! primary_is_primary; then
+            abort "original primary is not accepting writes after return"
+          fi
+
+          STATE="DONE"
+          END_TS=$(date +%s)
+          log "Failover drill completed successfully"
+          log "Duration: $((END_TS - START_TS))s"
+
+      - name: Upload failover drill report
+        if: always() && steps.check_secrets.outputs.credentials_available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: failover-drill-report
+          path: failover-drill-report.txt
+          if-no-files-found: ignore

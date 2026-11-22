@@ -6,6 +6,7 @@ import { TransactionModel, Transaction } from "../models/transaction";
 import { getUserById, User } from "../services/userService";
 import { uploadToS3, UploadResult } from "../services/s3Upload";
 import { DB_ENCRYPTION_KEY } from "../config/env";
+import logger from "../utils/logger";
 
 /**
  * Data needed for SAR generation
@@ -293,10 +294,16 @@ export async function generateSAR(userId: string, alertId?: string): Promise<{ p
       storeSARFile(encryptBuffer(xmlBuffer), userId, "xml")
     ]);
 
-    console.log(`SAR reports generated for user ${userId}. PDF: ${pdfUrl}, XML: ${xmlUrl}`);
+    logger.info(
+      { userId, alertId, pdfUrl, xmlUrl },
+      `SAR reports generated for user ${userId}. PDF: ${pdfUrl}, XML: ${xmlUrl}`,
+    );
     return { pdfUrl, xmlUrl };
   } catch (error) {
-    console.error(`Error generating SAR for user ${userId}:`, error);
+    logger.error(
+      { err: error, userId, alertId },
+      `Error generating SAR for user ${userId}`,
+    );
     throw error;
   }
 }

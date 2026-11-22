@@ -55,9 +55,19 @@ fraudRoutes.get('/alerts', requireAuth, async (req: Request, res: Response) => {
       return;
     }
 
+    // Restrict userId filter: non-admin, non-fraud-analyst users can only see their own alerts
+    let userId: string | undefined = req.query.userId as string;
+    const userRole = (req as any).jwtUser?.role || (req as any).user?.role;
+    const isAdminOrAnalyst = userRole === 'admin' || userRole === 'fraud_analyst';
+    
+    if (!isAdminOrAnalyst) {
+      // Force the filter to the current user's ID
+      userId = (req as any).jwtUser?.userId || (req as any).user?.id;
+    }
+
     const filter: FraudAlertFilter = {
       status: req.query.status as any,
-      userId: req.query.userId as string,
+      userId: userId,
       riskLevel: req.query.riskLevel as any,
       isFalsePositive: req.query.isFalsePositive === 'true' ? true : req.query.isFalsePositive === 'false' ? false : undefined,
       limit: pagination.limit,

@@ -39,13 +39,63 @@ When running behind PgBouncer, size pools against the PgBouncer pool, not the
 raw PostgreSQL `max_connections`:
 
 - **Transaction pooling** (recommended): server-side connections are shared per
-transaction, so application pool sizes can be larger. Set
+  transaction, so application pool sizes can be larger. Set
   `DB_CONNECTION_BUDGET` to the PgBouncer `max_db_connections` (or
   `default_pool_size` × databases) rather than PostgreSQL `max_connections`.
 - **Session pooling**: each client holds a server connection for the session
   lifetime, so the aggregate application pool sizing must fit within the
   PgBouncer server pool. Keep `DB_POOL_MAX` and `DB_WRITE_POOL_MAX` conservative
   and set `DB_CONNECTION_BUDGET` to the PgBouncer server pool size.
+
+## Disaster-recovery failover
+
+Database replication and DR configuration are in place. This section documents
+the **controlled failover procedure** that validates promotion, application
+reconnection, write fencing, and return to primary. The procedure is a state
+machine with automated health checks and explicit operator approval gates.
+
+### Failover state machine
+
+```
+HEALTHY ──(primary unhealthy)──▶ DETECTED
+DETECTED ──(operator approves)──▶ FENCING
+FENCING ──(writes fenced)──▶ PROMOTING
+PROMOTING ──(replica promoted)──▶ RECONNECTING
+RECONNECTING ──(apps healthy)──▶ FAILED_OVER
+FAILED_OVER ──(operator approves)──▶ RETURNING
+RETURNING ──(old primary caught up)──▶ HEALTHY
+```
+
+Any state can transition to `ABORTED` on a failed health check or operator
+rejection; `ABORTED` requires manual review before re-entering `HEALTHY`.
+
+| State | Meaning | Automated check | Operator gate |
+| --- | --- | --- | --- |
+| `HEALTHY` | Primary serving reads/writes | Primary liveness + replication lag | — |
+| `DETECTED` | Primary unhealthy, failover proposed | Replica reachable, lag within RPO | Approve failover |
+| `FENCING` | Writes blocked on old primary | Write fencing confirmed | — |
+| `PROMOTING` | Replica being promoted | Promotion command succeeded | — |
+| `RECONNECTING` | Apps pointed at new primary | App health + write probe | — |
+| `FAILED_OVER` | New primary serving traffic | Sustained health window | Approve return |
+| `RETURNING` | Old primary re-synced and restored | Replication caught up | — |
+
+### Write fencing
+
+Before promotion, writes to the old primary **must** be fenced so split-brain
+cannot occur. Fencing is confirmed by a write probe that is expected to fail;
+if the probe succeeds, the failover aborts.
+
+### Running a staging drill
+
+Exercise the procedure regularly in staging (never against production):
+
+1. Confirm staging replication is healthy and lag is within RPO.
+2. Trigger the drill: `DR_DRILL=1 npm run dr:drill` (or the equivalent staging
+   job). This walks the state machine, pausing at each operator gate.
+3. Approve each gate and verify: promotion succeeded, applications reconnected,
+   write fencing held, and the return to primary completed.
+4. Record the drill outcome and time-to-recover; investigate any `ABORTED`
+   transitions before the next drill.
 
 **Built with ❤️ for financial inclusion in Africa**
 

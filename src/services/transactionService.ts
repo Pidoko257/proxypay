@@ -25,39 +25,45 @@ export class TransactionService {
       throw new Error("Amount too small");
     }
 
-    // Validate user exists and has sufficient balance
-    const user = await pool.query(
-      `SELECT id, balance FROM users WHERE id = $1`,
-      [payload.userId],
-    );
-
-    if (user.rows.length === 0) {
-      throw new Error("User not found");
-    }
-
-    const currentBalance = parseFloat(user.rows[0].balance || "0");
-    if (currentBalance < payload.amount) {
-      throw new Error("Insufficient balance");
-    }
-
-    // Calculate fee
+    // Calculate fee before acquiring the row lock
     const fee = await this.calculateWithdrawalFee(payload.amount, payload.currency);
-
     const totalDeduction = payload.amount + fee;
-    if (currentBalance < totalDeduction) {
-      throw new Error(`Insufficient balance. Required: ${totalDeduction} (amount: ${payload.amount} + fee: ${fee}), available: ${currentBalance}`);
-    }
 
     const client = await pool.connect();
 
     try {
       await client.query("BEGIN");
 
-      // Deduct from user balance
-      await client.query(
-        `UPDATE users SET balance = balance - $1 WHERE id = $2`,
+      // Lock user row inside the transaction to prevent double-spend race conditions
+      const user = await client.query(
+        `SELECT id, balance FROM users WHERE id = $1 FOR UPDATE`,
+        [payload.userId],
+      );
+
+      if (user.rows.length === 0) {
+        throw new Error("User not found");
+      }
+
+      const currentBalance = parseFloat(user.rows[0].balance || "0");
+      if (currentBalance < payload.amount) {
+        throw new Error("Insufficient balance");
+      }
+
+      if (currentBalance < totalDeduction) {
+        throw new Error(
+          `Insufficient balance. Required: ${totalDeduction} (amount: ${payload.amount} + fee: ${fee}), available: ${currentBalance}`,
+        );
+      }
+
+      // Deduct from user balance atomically inside the transaction
+      const updateResult = await client.query(
+        `UPDATE users SET balance = balance - $1 WHERE id = $2 AND balance >= $1 RETURNING balance`,
         [totalDeduction, payload.userId],
       );
+
+      if (updateResult.rowCount === 0) {
+        throw new Error("Insufficient balance");
+      }
 
       // Create withdrawal transaction
       const transaction = await this.txModel.createTransaction({

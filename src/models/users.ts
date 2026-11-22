@@ -285,7 +285,8 @@ export class UserModel {
         a.created_at AS "createdAt",
         a.ip_address AS "ipAddress",
         a.user_agent AS "userAgent",
-        u.phone_number AS "changedByUser"
+        u.phone_number AS "changedByUser",
+        u.display_name AS "changedByDisplayName"
       FROM user_status_audit a
       JOIN users u ON a.changed_by = u.id
       WHERE a.user_id = $1
@@ -293,7 +294,10 @@ export class UserModel {
     `;
 
     const result = await queryRead(query, [userId]);
-    return result.rows;
+    return result.rows.map(row => ({
+      ...row,
+      changedByUser: row.changedByUser ? decrypt(row.changedByUser) : null,
+    }));
   }
   async incrementTokenVersion(id: string): Promise<number> {
     const query = `

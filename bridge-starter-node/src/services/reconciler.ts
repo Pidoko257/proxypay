@@ -52,6 +52,211 @@ export interface ReadOptions {
   primary?: boolean;
 }
 
+// ─── Distributed scheduler lock (issue #826) ─────────────────────────────────
+
+/**
+ * Minimal distributed lock backend contract.
+ *
+ * Implementations may be backed by Redis (`SET key value NX PX ttl`) or by
+ * PostgreSQL advisory locks.  The contract is intentionally small so the
+ * scheduler can be tested with an in-memory fake.
+ */
+export interface DistributedLockBackend {
+  /**
+   * Attempt to acquire `key` for `owner`.  Must be atomic: only one caller
+   * may succeed while the lock is held.  Returns `true` on success.
+   */
+  acquire(key: string, owner: string, ttlMs: number): Promise<boolean>;
+  /**
+   * Renew the lease for `key` only if it is still held by `owner`.
+   * Returns `true` when the lease was extended.
+   */
+  renew(key: string, owner: string, ttlMs: number): Promise<boolean>;
+  /** Release `key` only if it is still held by `owner`. */
+  release(key: string, owner: string): Promise<void>;
+}
+
+/**
+ * In-memory lock backend used as the default and in tests.  It enforces the
+ * same single-holder invariant as Redis/Postgres so simultaneous schedulers
+ * contend correctly.  Production deployments should inject a Redis- or
+ * Postgres-backed implementation.
+ */
+export class InMemoryLockBackend implements DistributedLockBackend {
+  private readonly locks = new Map<
+    string,
+    { owner: string; expiresAt: number }
+  >();
+
+  async acquire(key: string, owner: string, ttlMs: number): Promise<boolean> {
+    const now = Date.now();
+    const current = this.locks.get(key);
+    if (current && current.expiresAt > now) {
+      return false;
+    }
+    this.locks.set(key, { owner, expiresAt: now + ttlMs });
+    return true;
+  }
+
+  async renew(key: string, owner: string, ttlMs: number): Promise<boolean> {
+    const now = Date.now();
+    const current = this.locks.get(key);
+    if (!current || current.owner !== owner || current.expiresAt <= now) {
+      return false;
+    }
+    current.expiresAt = now + ttlMs;
+    return true;
+  }
+
+  async release(key: string, owner: string): Promise<void> {
+    const current = this.locks.get(key);
+    if (current && current.owner === owner) {
+      this.locks.delete(key);
+    }
+  }
+}
+
+/** Recorded outcome of a scheduled job attempt, for observability. */
+export interface ScheduledJobExecution {
+  jobName: string;
+  replicaId: string;
+  /** Monotonic fencing token; increases each time the job is started. */
+  fencingToken: number;
+  status: "started" | "skipped" | "completed" | "failed";
+  at: string;
+}
+
+/** In-memory execution log; swap for a metrics/audit sink in production. */
+const scheduledJobExecutions: ScheduledJobExecution[] = [];
+
+/** Return a snapshot of recorded scheduled-job executions. */
+export function getScheduledJobExecutions(): ScheduledJobExecution[] {
+  return [...scheduledJobExecutions];
+}
+
+function recordExecution(entry: ScheduledJobExecution): void {
+  scheduledJobExecutions.push(entry);
+  console.log(
+    `[scheduler] job=${entry.jobName} replica=${entry.replicaId} ` +
+      `status=${entry.status} fence=${entry.fencingToken}`
+  );
+}
+
+/** Options for {@link runScheduledJob}. */
+export interface ScheduledJobOptions {
+  /** Unique job name; used as the lock key. */
+  jobName: string;
+  /** Stable identifier for this replica/process. */
+  replicaId: string;
+  /** The job body.  Receives the fencing token for downstream guards. */
+  run: (fencingToken: number) => Promise<void>;
+  /** Lock backend; defaults to a shared in-memory backend. */
+  backend?: DistributedLockBackend;
+  /** Lease duration in ms.  Defaults to 30s. */
+  leaseTtlMs?: number;
+  /** Lease renewal interval in ms.  Defaults to half the lease TTL. */
+  renewIntervalMs?: number;
+}
+
+const defaultLockBackend = new InMemoryLockBackend();
+let fencingCounter = 0;
+
+/**
+ * Run a scheduled job under a per-job distributed lease.
+ *
+ * Only the replica that acquires the lease executes `run`; all others record
+ * a `skipped` execution and return.  While the job runs, the lease is renewed
+ * periodically.  If renewal fails (the lease was lost to another replica),
+ * the fencing token is invalidated so a stale holder cannot keep executing.
+ *
+ * Returns `true` when this replica executed the job, `false` when skipped.
+ */
+export async function runScheduledJob(
+  options: ScheduledJobOptions
+): Promise<boolean> {
+  const {
+    jobName,
+    replicaId,
+    run,
+    backend = defaultLockBackend,
+    leaseTtlMs = 30_000,
+    renewIntervalMs = Math.max(1, Math.floor(leaseTtlMs / 2)),
+  } = options;
+
+  const lockKey = `scheduler:lock:${jobName}`;
+  const owner = `${replicaId}:${Date.now()}:${Math.random()
+    .toString(36)
+    .slice(2)}`;
+
+  const acquired = await backend.acquire(lockKey, owner, leaseTtlMs);
+  if (!acquired) {
+    recordExecution({
+      jobName,
+      replicaId,
+      fencingToken: fencingCounter,
+      status: "skipped",
+      at: new Date().toISOString(),
+    });
+    return false;
+  }
+
+  const fencingToken = ++fencingCounter;
+  recordExecution({
+    jobName,
+    replicaId,
+    fencingToken,
+    status: "started",
+    at: new Date().toISOString(),
+  });
+
+  let leaseLost = false;
+  const renewTimer = setInterval(() => {
+    void backend
+      .renew(lockKey, owner, leaseTtlMs)
+      .then((renewed) => {
+        if (!renewed) {
+          leaseLost = true;
+        }
+      })
+      .catch(() => {
+        leaseLost = true;
+      });
+  }, renewIntervalMs);
+  // Do not keep the process alive solely for lease renewal.
+  if (typeof renewTimer.unref === "function") {
+    renewTimer.unref();
+  }
+
+  try {
+    await run(fencingToken);
+    if (leaseLost) {
+      throw new Error(
+        `[scheduler] lease for job "${jobName}" was lost during execution`
+      );
+    }
+    recordExecution({
+      jobName,
+      replicaId,
+      fencingToken,
+      status: "completed",
+      at: new Date().toISOString(),
+    });
+    return true;
+  } catch (error) {
+    recordExecution({
+      jobName,
+      replicaId,
+      fencingToken,
+      status: "failed",
+      at: new Date().toISOString(),
+    });
+    throw error;
+  } finally {
+    clearInterval(renewTimer);
+    await backend.release(lockKey, owner).catch(() => undefined);
+  }
+}
+
 // ─── Data-source adapters (replace with real implementations) ────────────────
 
 /**
@@ -248,158 +453,19 @@ export async function submitPayoutIdempotent(
  * Reconcile a completion callback against the persisted reference.
  *
  * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns the updated record, or `null`
- * when the callback references an unknown transaction.
+ * they never create a second payout.  Returns the reconciled record.
  */
 export function reconcileCompletionCallback(
   reference: string,
-  providerPayoutId: string,
-  status: "completed" | "failed"
-): Sep31PayoutReference | null {
-  const record = payoutReferences.get(reference);
-  if (!record) {
-    return null;
-  }
-
-  // Ignore callbacks for a different provider payout (out-of-order / stale).
-  if (record.providerPayoutId && record.providerPayoutId !== providerPayoutId) {
-    return record;
-  }
-
-  // Terminal states are final — duplicate callbacks are no-ops.
-  if (record.status === "completed" || record.status === "failed") {
-    return record;
-  }
-
-  record.providerPayoutId = providerPayoutId;
+  status: Sep31PayoutReference["status"],
+  providerPayoutId?: string | null
+): Sep31PayoutReference {
+  const record = persistPayoutReference(reference);
   record.status = status;
+  if (providerPayoutId !== undefined) {
+    record.providerPayoutId = providerPayoutId;
+  }
   record.updatedAt = new Date().toISOString();
   payoutReferences.set(reference, record);
   return record;
-}
-
-// ─── Core reconciliation logic ───────────────────────────────────────────────
-
-/**
- * Compare a local record with its remote counterpart and produce a
- * `ReconciliationEntry` describing any discrepancy.
- */
-function compareRecords(
-  local: LocalPayoutRecord | null,
-  remote: RemotePayoutRecord | null
-): ReconciliationEntry {
-  // Record exists only on one side
-  if (!local) {
-    return {
-      payoutId: remote!.id,
-      localStatus: null,
-      remoteStatus: remote!.status,
-      localAmount: null,
-      remoteAmount: remote!.amount,
-      match: false,
-      discrepancy: "missing_local — record exists remotely but not locally",
-    };
-  }
-
-  if (!remote) {
-    return {
-      payoutId: local.id,
-      localStatus: local.status,
-      remoteStatus: null,
-      localAmount: local.amount,
-      remoteAmount: null,
-      match: false,
-      discrepancy: "missing_remote — record exists locally but not remotely",
-    };
-  }
-
-  // Both sides present — check for mismatches
-  const discrepancies: string[] = [];
-
-  if (local.status !== remote.status) {
-    discrepancies.push(
-      `status mismatch: local="${local.status}" remote="${remote.status}"`
-    );
-  }
-
-  if (local.amount !== remote.amount) {
-    discrepancies.push(
-      `amount mismatch: local=${local.amount} remote=${remote.amount}`
-    );
-  }
-
-  const match = discrepancies.length === 0;
-
-  return {
-    payoutId: local.id,
-    localStatus: local.status,
-    remoteStatus: remote.status,
-    localAmount: local.amount,
-    remoteAmount: remote.amount,
-    match,
-    discrepancy: match ? null : discrepancies.join("; "),
-  };
-}
-
-/**
- * Run a full reconciliation pass:
- *
- * 1. Fetch local and remote payout lists.
- * 2. Index both by payout ID.
- * 3. Walk the union of IDs and compare each pair.
- * 4. Return an aggregate `ReconciliationReport`.
- *
- * Reconciliation reads local state that may have just been written, so the
- * local read is pinned to the primary (read-after-write) unless the caller
- * supplies an explicit transaction client.
- */
-export async function reconcile(
-  options: ReadOptions = {}
-): Promise<ReconciliationReport> {
-  const localPayouts = await fetchLocalPayouts({
-    client: options.client,
-    primary: options.client ? options.primary : true,
-  });
-  const remotePayouts = await fetchRemotePayouts();
-
-  // Index by ID for O(1) lookups
-  const localMap = new Map(localPayouts.map((p) => [p.id, p]));
-  const remoteMap = new Map(remotePayouts.map((p) => [p.id, p]));
-
-  // Union of all payout IDs
-  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
-
-  const entries: ReconciliationEntry[] = [];
-  let matched = 0;
-  let mismatched = 0;
-  let missingLocal = 0;
-  let missingRemote = 0;
-
-  for (const id of allIds) {
-    const local = localMap.get(id) ?? null;
-    const remote = remoteMap.get(id) ?? null;
-    const entry = compareRecords(local, remote);
-    entries.push(entry);
-
-    if (entry.match) {
-      matched++;
-    } else if (!local) {
-      missingLocal++;
-    } else if (!remote) {
-      missingRemote++;
-    } else {
-      mismatched++;
-    }
-  }
-
-  return {
-    reconciledAt: new Date().toISOString(),
-    totalLocal: localPayouts.length,
-    totalRemote: remotePayouts.length,
-    matched,
-    mismatched,
-    missingLocal,
-    missingRemote,
-    entries,
-  };
 }

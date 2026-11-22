@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import { pool } from "../config/database";
+import logger from "../utils/logger";
 
 export type AMLTransactionType = "deposit" | "withdraw";
 export type AMLAlertStatus = "pending_review" | "reviewed" | "dismissed";
@@ -54,7 +55,6 @@ export interface AMLConfig {
   rapidWindowMinutes: number;
   rapidTransactionCount: number;
   structuringFloorXaf: number;
-  alertBufferSize: number;
 }
 
 export interface AMLMonitoringResult {
@@ -95,7 +95,6 @@ const defaultConfig: AMLConfig = {
   rapidWindowMinutes: Number(process.env.AML_RAPID_WINDOW_MINUTES || 15),
   rapidTransactionCount: Number(process.env.AML_RAPID_TRANSACTION_COUNT || 3),
   structuringFloorXaf: Number(process.env.AML_STRUCTURING_FLOOR_XAF || 100_000),
-  alertBufferSize: Number(process.env.AML_ALERT_BUFFER_SIZE || 5000),
 };
 
 import { sanctionService } from "./sanctionService";
@@ -110,10 +109,11 @@ function safeDate(value: string | Date): Date {
 
 export class AMLService {
   private readonly config: AMLConfig;
-  private alerts: AMLAlert[] = [];
+  private readonly alertModel: AMLAlertModel;
 
-  constructor(config?: Partial<AMLConfig>) {
+  constructor(config?: Partial<AMLConfig>, alertModel?: AMLAlertModel) {
     this.config = { ...defaultConfig, ...config };
+    this.alertModel = alertModel ?? new AMLAlertModel();
   }
 
   getConfig(): AMLConfig {
@@ -318,11 +318,13 @@ export class AMLService {
             createdAt: nowIso,
             updatedAt: nowIso,
           };
-          this.recordAlert(result.alert);
+          await this.recordAlert(result.alert);
         } else {
+          const wasHigh = result.alert.severity === "high";
           result.alert.severity = "high";
           result.alert.ruleHits.push(sanctionHit);
           result.alert.reasons.push(sanctionHit.message);
+          await this.persistEscalation(result.alert, wasHigh);
         }
       }
     }
@@ -334,46 +336,28 @@ export class AMLService {
     return result;
   }
 
-  getAlerts(filter?: AMLAlertFilter): AMLAlert[] {
-    const startMs = filter?.startDate?.getTime() ?? Number.NEGATIVE_INFINITY;
-    const endMs = filter?.endDate?.getTime() ?? Number.POSITIVE_INFINITY;
-
-    return this.alerts
-      .filter((alert) => {
-        if (filter?.status && alert.status !== filter.status) return false;
-        if (filter?.userId && alert.userId !== filter.userId) return false;
-        const ts = safeDate(alert.createdAt).getTime();
-        return ts >= startMs && ts <= endMs;
-      })
-      .sort(
-        (a, b) =>
-          safeDate(b.createdAt).getTime() - safeDate(a.createdAt).getTime(),
-      );
+  async getAlerts(filter?: AMLAlertFilter): Promise<AMLAlert[]> {
+    return this.alertModel.findAll({
+      status: filter?.status,
+      userId: filter?.userId,
+      startDate: filter?.startDate,
+      endDate: filter?.endDate,
+    });
   }
 
-  getPendingReviewAlerts(): AMLAlert[] {
+  async getPendingReviewAlerts(): Promise<AMLAlert[]> {
     return this.getAlerts({ status: "pending_review" });
   }
 
-  reviewAlert(alertId: string, input: AMLReviewInput): AMLAlert | null {
-    const idx = this.alerts.findIndex((alert) => alert.id === alertId);
-    if (idx === -1) return null;
-
-    const nowIso = new Date().toISOString();
-    const updated: AMLAlert = {
-      ...this.alerts[idx],
-      status: input.status,
-      reviewedBy: input.reviewedBy,
-      reviewNotes: input.reviewNotes,
-      reviewedAt: nowIso,
-      updatedAt: nowIso,
-    };
-    this.alerts[idx] = updated;
-    return updated;
+  async reviewAlert(
+    alertId: string,
+    input: AMLReviewInput,
+  ): Promise<AMLAlert | null> {
+    return this.alertModel.review(alertId, input, input.reviewedBy);
   }
 
-  generateReport(startDate: Date, endDate: Date): AMLReport {
-    const alerts = this.getAlerts({ startDate, endDate });
+  async generateReport(startDate: Date, endDate: Date): Promise<AMLReport> {
+    const alerts = await this.getAlerts({ startDate, endDate });
     const summary = {
       totalAlerts: alerts.length,
       pendingReview: alerts.filter((a) => a.status === "pending_review").length,
@@ -411,12 +395,36 @@ export class AMLService {
     };
   }
 
-  clearAlerts(): void {
-    this.alerts = [];
+  /**
+   * Persist an alert to aml_alerts. Database failures are logged and
+   * rethrown: an AML alert must never be silently dropped or kept only in
+   * process memory.
+   */
+  private async recordAlert(alert: AMLAlert): Promise<void> {
+    try {
+      await this.alertModel.create(alert);
+    } catch (error) {
+      logger.error(
+        { alertId: alert.id, transactionId: alert.transactionId, err: error },
+        "Failed to persist AML alert to database",
+      );
+      throw error;
+    }
+
+    // AUTOMATION: If severity is high, automatically prepare SAR draft
+    if (alert.severity === "high") {
+      await this.scheduleSarPreparation(alert);
+    }
   }
 
-  private async recordAlert(alert: AMLAlert): Promise<void> {
-    // Store in database for persistence
+  /**
+   * Re-persist an alert that was escalated in memory after its initial
+   * insert, and trigger SAR preparation if it has just become high severity.
+   */
+  private async persistEscalation(
+    alert: AMLAlert,
+    wasHigh: boolean,
+  ): Promise<void> {
     try {
       const { AMLAlertModel } = await import("../models/amlAlert.js");
       const model = new AMLAlertModel();
@@ -424,18 +432,30 @@ export class AMLService {
 
       // AUTOMATION: If severity is high, automatically prepare SAR draft
       if (alert.severity === "high") {
-        console.log(`[SAR AUTO-PREPARE] High severity alert ${alert.id} detected. Preparing SAR...`);
+        logger.info(
+          { alertId: alert.id, userId: alert.userId, severity: alert.severity },
+          `[SAR AUTO-PREPARE] High severity alert ${alert.id} detected. Preparing SAR...`,
+        );
         try {
           const { generateSAR } = require("../compliance/sar");
           generateSAR(alert.userId, alert.id).catch((err: any) => {
-            console.error(`[SAR AUTO-PREPARE ERROR] Failed for alert ${alert.id}:`, err);
+            logger.error(
+              { err, alertId: alert.id, userId: alert.userId },
+              `[SAR AUTO-PREPARE ERROR] Failed for alert ${alert.id}`,
+            );
           });
         } catch (err) {
-          console.error(`[SAR AUTO-PREPARE ERROR] Failed to load sar service:`, err);
+          logger.error(
+            { err, alertId: alert.id, userId: alert.userId },
+            "[SAR AUTO-PREPARE ERROR] Failed to load sar service",
+          );
         }
       }
     } catch (error) {
-      console.error("Failed to persist AML alert to database:", error);
+      logger.error(
+        { err: error, alertId: alert.id, transactionId: alert.transactionId, userId: alert.userId },
+        "Failed to persist AML alert to database",
+      );
       // Fallback to in-memory storage
       this.alerts.unshift(alert);
       if (this.alerts.length > this.config.alertBufferSize) {
@@ -445,19 +465,19 @@ export class AMLService {
   }
 
   private logAlert(alert: AMLAlert, transaction: AMLTransactionRecord): void {
-    const line = JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level: "WARN",
-      type: "AML_ALERT",
-      alertId: alert.id,
-      transactionId: alert.transactionId,
-      userId: alert.userId,
-      severity: alert.severity,
-      amount: transaction.amount,
-      rules: alert.ruleHits.map((hit) => hit.rule),
-      reasons: alert.reasons,
-    });
-    console.warn(line);
+    logger.warn(
+      {
+        type: "AML_ALERT",
+        alertId: alert.id,
+        transactionId: alert.transactionId,
+        userId: alert.userId,
+        severity: alert.severity,
+        amount: transaction.amount,
+        rules: alert.ruleHits.map((hit) => hit.rule),
+        reasons: alert.reasons,
+      },
+      `AML alert triggered for transaction ${alert.transactionId}`,
+    );
   }
 }
 

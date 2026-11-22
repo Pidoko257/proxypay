@@ -44,7 +44,7 @@ describe("SAR Generation", () => {
     
     (userService.getUserById as jest.Mock).mockResolvedValue(mockUser);
     (TransactionModel.prototype.findCompletedByUserSince as jest.Mock).mockResolvedValue(mockTransactions);
-    (amlService.getAlerts as jest.Mock).mockReturnValue(mockAlerts);
+    (amlService.getAlerts as jest.Mock).mockResolvedValue(mockAlerts);
     (s3Upload.uploadToS3 as jest.Mock).mockResolvedValue({
       success: true,
       fileUrl: "https://s3.amazonaws.com/bucket/sar-123.pdf.enc",

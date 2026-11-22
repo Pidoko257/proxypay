@@ -6,6 +6,7 @@ process.env.STELLAR_ISSUER_SECRET ??=
 process.env.JWT_SECRET ??= "test-jwt-secret";
 process.env.ADMIN_API_KEY ??= "test-admin-key";
 process.env.DB_ENCRYPTION_KEY ??= "development-encryption-key-32-chars-long";
+process.env.DB_ENCRYPTION_HKDF_SALT ??= "test-hkdf-salt-not-for-production";
 process.env.KEY_VAULT_MASTER_SECRET ??= "test-key-vault-master-secret-32-chars-long";
 process.env.GEOLOCATION_API_KEY ??= "";
 

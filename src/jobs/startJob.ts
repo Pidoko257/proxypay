@@ -1,4 +1,6 @@
+import logger from "../utils/logger";
+
 export function startJobs() {
   // start your workers / scheduled jobs here
-  console.log('Jobs started');
+  logger.info("Jobs started");
 }

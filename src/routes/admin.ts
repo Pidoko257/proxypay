@@ -61,6 +61,7 @@ import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 import { logBulkAdminAudit, searchAuditLogs } from "../utils/log-audit-event";
+import logger from '../utils/logger';
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -128,12 +129,54 @@ const normalizeBulkIds = (value: unknown): string[] => {
 
 const MAX_BULK_IDS = 100;
 
-/**
- * Mock services (replace with real DB/services)
- */
-const users: User[] = [];
 const transactionModel = new TransactionModel();
 const complianceDocumentModel = new ComplianceDocumentModel();
+
+const DEFAULT_DASHBOARD_CONFIG: DashboardConfig = {
+  layout: "grid",
+  widgets: [],
+} as DashboardConfig;
+
+/**
+ * Wraps an async handler so rejected promises reach the Express error
+ * handler (Express 4 does not do this automatically).
+ */
+const asyncRoute =
+  (handler: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    handler(req, res).catch(next);
+  };
+
+const userNotFound = () =>
+  createError(ERROR_CODES.NOT_FOUND, "User not found", {
+    message: "User not found",
+  });
+
+/** Loads a user's dashboard config from the database (404 if user missing). */
+const loadDashboardConfig = async (userId: string): Promise<DashboardConfig> => {
+  const stored = await new UserModel().getDashboardConfig(userId);
+  if (stored === undefined) throw userNotFound();
+  return (stored as DashboardConfig | null) ?? DEFAULT_DASHBOARD_CONFIG;
+};
+
+/** Persists a user's dashboard config to the database (404 if user missing). */
+const saveDashboardConfig = async (
+  userId: string,
+  config: DashboardConfig,
+): Promise<void> => {
+  const updated = await new UserModel().updateDashboardConfig(userId, config);
+  if (!updated) throw userNotFound();
+};
+
+const requireActorId = (req: Request): string => {
+  const userId = (req as AuthRequest).user?.id;
+  if (!userId) {
+    throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+      message: "Authentication required",
+    });
+  }
+  return userId;
+};
 
 const isAdminRole = (role?: string) =>
   role === "admin" || role === "super-admin";
@@ -162,11 +205,11 @@ const logImpersonationAuditEvent = (
   req: Request,
   details: Record<string, unknown>,
 ) => {
-  console.log("[ADMIN IMPERSONATION]", {
+  logger.info({
     event,
     ...buildAuditContext(req),
     ...details,
-  });
+  }, '[ADMIN IMPERSONATION]');
 };
 
 /**
@@ -205,13 +248,13 @@ const requireSuperAdmin = (req: Request, res: Response, next: NextFunction) => {
  */
 export const logAdminAction = (action: string) => {
   return (req: Request, res: Response, next: NextFunction) => {
-    console.log(`[ADMIN ACTION] ${action}`, {
+    logger.info({
       adminId: (req as AuthRequest).user?.id,
       method: req.method,
       path: req.originalUrl,
       body: req.body,
       timestamp: new Date().toISOString(),
-    });
+    }, '[ADMIN ACTION]');
     next();
   };
 };
@@ -305,7 +348,7 @@ router.get(
         sla_threshold_hours: 24,
       });
     } catch (err) {
-      console.error("Error fetching transaction resolution metrics:", err);
+      logger.error({ error: err }, 'Error fetching transaction resolution metrics:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve transaction resolution metrics",
@@ -452,7 +495,7 @@ router.post(
     } catch (error) {
       // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error bulk freezing users:", error);
+      logger.error({ error: error }, 'Error bulk freezing users:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -590,7 +633,7 @@ router.post(
     } catch (error) {
       // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error bulk unfreezing users:", error);
+      logger.error({ error: error }, 'Error bulk unfreezing users:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -615,7 +658,7 @@ router.get(
         sla_threshold_hours: 24,
       });
     } catch (err) {
-      console.error("Error fetching dispute resolution metrics:", err);
+      logger.error({ error: err }, 'Error fetching dispute resolution metrics:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve dispute resolution metrics",
@@ -675,9 +718,9 @@ router.post(
   "/users/:id/impersonation-token",
   requireAdmin,
   requireSuperAdmin,
-  (req: Request, res: Response) => {
+  asyncRoute(async (req: Request, res: Response) => {
     const actor = (req as AuthRequest).user;
-    const targetUser = users.find((u) => u.id === req.params.id);
+    const targetUser = await new UserModel().findById(req.params.id);
     const reason =
       typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
 
@@ -772,7 +815,7 @@ router.post(
       },
       guidance: READ_ONLY_IMPERSONATION_MESSAGE,
     });
-  },
+  }),
 );
 
 // POST /api/admin/users/bulk/unlock
@@ -811,10 +854,11 @@ router.post(
       }
 
       const results: BulkActionResult[] = [];
+      const userModel = new UserModel();
 
       for (const userId of userIds) {
         try {
-          const user = users.find((u) => u.id === userId);
+          const user = await userModel.findById(userId);
           if (!user) {
             results.push({
               userId,
@@ -824,7 +868,7 @@ router.post(
             continue;
           }
 
-          user.locked = false;
+          await adminUnlock(user.phoneNumber, adminUser.id);
           results.push({ userId, status: "success" });
         } catch (error) {
           results.push({
@@ -861,7 +905,7 @@ router.post(
     } catch (error) {
       // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error bulk unlocking users:", error);
+      logger.error({ error: error }, 'Error bulk unlocking users:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -872,19 +916,25 @@ router.put(
   "/users/:id",
   requireAdmin,
   logAdminAction("UPDATE_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  asyncRoute(async (req: Request, res: Response) => {
+    const userModel = new UserModel();
+    const existing = await userModel.findById(req.params.id);
 
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
+    if (!existing) throw userNotFound();
+
+    // Only explicitly supported fields may be changed; arbitrary body keys
+    // are ignored to prevent mass assignment (role, status, etc.).
+    const { email, displayName } = req.body ?? {};
+    if (typeof email === "string" && email.trim()) {
+      await userModel.updateEmail(existing.id, email.trim());
+    }
+    if (typeof displayName === "string" || displayName === null) {
+      await userModel.updateDisplayName(existing.id, displayName);
     }
 
-    Object.assign(user, req.body);
-
+    const user = await userModel.findById(existing.id);
     res.json({ message: "User updated", user });
-  },
+  }),
 );
 
 // POST /api/admin/users/:id/unlock
@@ -892,19 +942,15 @@ router.post(
   "/users/:id/unlock",
   requireAdmin,
   logAdminAction("UNLOCK_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  asyncRoute(async (req: Request, res: Response) => {
+    const user = await new UserModel().findById(req.params.id);
 
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
+    if (!user) throw userNotFound();
 
-    user.locked = false;
+    await adminUnlock(user.phoneNumber, (req as AuthRequest).user?.id);
 
     res.json({ message: "User account unlocked" });
-  },
+  }),
 );
 
 // POST /api/admin/users/:id/freeze
@@ -976,12 +1022,12 @@ router.post(
         );
       }
 
-      console.log(`[ADMIN] User account frozen: ${userId}`, {
+      logger.info({
         adminId: adminUser.id,
         targetUserId: userId,
         reason: reason.trim(),
         timestamp: new Date().toISOString(),
-      });
+      }, '[ADMIN]');
 
       res.json({
         message: "User account frozen successfully",
@@ -991,7 +1037,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error("Error freezing user account:", error);
+      logger.error({ error: error }, 'Error freezing user account:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1062,12 +1108,12 @@ router.post(
         );
       }
 
-      console.log(`[ADMIN] User account unfrozen: ${userId}`, {
+      logger.info({
         adminId: adminUser.id,
         targetUserId: userId,
         reason: reason.trim(),
         timestamp: new Date().toISOString(),
-      });
+      }, '[ADMIN]');
 
       res.json({
         message: "User account unfrozen successfully",
@@ -1077,7 +1123,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error("Error unfreezing user account:", error);
+      logger.error({ error: error }, 'Error unfreezing user account:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1109,7 +1155,7 @@ router.get(
         history: auditHistory,
       });
     } catch (error) {
-      console.error("Error fetching user status history:", error);
+      logger.error({ error: error }, 'Error fetching user status history:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1126,25 +1172,14 @@ router.get(
   "/users/:id/dashboard-config",
   requireAdmin,
   logAdminAction("GET_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
-
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
-
-    const config = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
+  asyncRoute(async (req: Request, res: Response) => {
+    const config = await loadDashboardConfig(req.params.id);
 
     res.json({
-      userId: user.id,
+      userId: req.params.id,
       config,
     });
-  },
+  }),
 );
 
 // PUT /api/admin/users/:id/dashboard-config
@@ -1152,15 +1187,7 @@ router.put(
   "/users/:id/dashboard-config",
   requireAdmin,
   logAdminAction("UPDATE_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
-
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
-
+  asyncRoute(async (req: Request, res: Response) => {
     const { config } = req.body;
 
     // Validate the dashboard config against the JSON schema
@@ -1176,14 +1203,14 @@ router.put(
     }
 
     // Save the configuration
-    user.dashboard_config = config;
+    await saveDashboardConfig(req.params.id, config);
 
     res.json({
       message: "Dashboard configuration saved",
-      userId: user.id,
-      config: user.dashboard_config,
+      userId: req.params.id,
+      config,
     });
-  },
+  }),
 );
 
 // GET /api/admin/dashboard/config — get current user's dashboard config
@@ -1191,16 +1218,11 @@ router.get(
   "/dashboard/config",
   requireAdmin,
   logAdminAction("GET_MY_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
-    const user = users.find((u) => u.id === userId);
-    const config: DashboardConfig = user?.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
+    const config = await loadDashboardConfig(userId);
     res.json({ userId, config });
-  },
+  }),
 );
 
 // PUT /api/admin/dashboard/config — replace entire dashboard config
@@ -1208,9 +1230,8 @@ router.put(
   "/dashboard/config",
   requireAdmin,
   logAdminAction("PUT_MY_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { config } = req.body;
 
     if (!validateDashboardConfig(config)) {
@@ -1224,15 +1245,10 @@ router.put(
       );
     }
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
-    user.dashboard_config = config;
+    await saveDashboardConfig(userId, config);
 
     res.json({ message: "Dashboard configuration saved", userId, config });
-  },
+  }),
 );
 
 // PATCH /api/admin/dashboard/widgets/reorder — reorder widgets
@@ -1240,9 +1256,8 @@ router.patch(
   "/dashboard/widgets/reorder",
   requireAdmin,
   logAdminAction("REORDER_DASHBOARD_WIDGETS"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { fromIndex, toIndex } = req.body;
 
     if (typeof fromIndex !== "number" || typeof toIndex !== "number") {
@@ -1253,24 +1268,16 @@ router.patch(
       );
     }
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
+    const current = await loadDashboardConfig(userId);
 
-    const current: DashboardConfig = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
-
-    user.dashboard_config = reorderWidgets(current, fromIndex, toIndex);
+    const config = reorderWidgets(current, fromIndex, toIndex);
+    await saveDashboardConfig(userId, config);
     res.json({
       message: "Widgets reordered",
       userId,
-      config: user.dashboard_config,
+      config,
     });
-  },
+  }),
 );
 
 // PATCH /api/admin/dashboard/widgets/:widgetId/visibility — toggle visibility
@@ -1278,29 +1285,20 @@ router.patch(
   "/dashboard/widgets/:widgetId/visibility",
   requireAdmin,
   logAdminAction("TOGGLE_WIDGET_VISIBILITY"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { widgetId } = req.params;
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
+    const current = await loadDashboardConfig(userId);
 
-    const current: DashboardConfig = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
-
-    user.dashboard_config = toggleWidgetVisibility(current, widgetId);
+    const config = toggleWidgetVisibility(current, widgetId);
+    await saveDashboardConfig(userId, config);
     res.json({
       message: "Widget visibility toggled",
       userId,
-      config: user.dashboard_config,
+      config,
     });
-  },
+  }),
 );
 
 // PATCH /api/admin/dashboard/widgets/:widgetId/refresh-rate — set refresh rate
@@ -1308,9 +1306,8 @@ router.patch(
   "/dashboard/widgets/:widgetId/refresh-rate",
   requireAdmin,
   logAdminAction("SET_WIDGET_REFRESH_RATE"),
-  (req: Request, res: Response) => {
-    const authReq = req as AuthRequest;
-    const userId = authReq.user?.id;
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
     const { widgetId } = req.params;
     const { refreshRateSecs } = req.body;
 
@@ -1322,28 +1319,16 @@ router.patch(
       );
     }
 
-    let user = users.find((u) => u.id === userId);
-    if (!user) {
-      user = { id: userId as string, role: authReq.user?.role || "admin" };
-      users.push(user);
-    }
+    const current = await loadDashboardConfig(userId);
 
-    const current: DashboardConfig = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
-
-    user.dashboard_config = setWidgetRefreshRate(
-      current,
-      widgetId,
-      refreshRateSecs,
-    );
+    const config = setWidgetRefreshRate(current, widgetId, refreshRateSecs);
+    await saveDashboardConfig(userId, config);
     res.json({
       message: "Widget refresh rate updated",
       userId,
-      config: user.dashboard_config,
+      config,
     });
-  },
+  }),
 );
 
 // provider balance route
@@ -1400,7 +1385,7 @@ router.get(
         },
       });
     } catch (err) {
-      console.error("Error listing transactions for admin:", err);
+      logger.error({ error: err }, 'Error listing transactions for admin:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to list transactions",
@@ -1443,7 +1428,7 @@ router.put(
       const updatedTx = await transactionModel.findById(req.params.id);
       res.json({ message: "Transaction updated", transaction: updatedTx });
     } catch (err) {
-      console.error("Error updating transaction:", err);
+      logger.error({ error: err }, 'Error updating transaction:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to update transaction",
@@ -1568,7 +1553,7 @@ router.patch(
     } catch (error) {
       // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error bulk updating transaction admin notes:", error);
+      logger.error({ error: error }, 'Error bulk updating transaction admin notes:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1678,7 +1663,7 @@ router.patch(
     } catch (error) {
       // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error bulk updating transaction status:", error);
+      logger.error({ error: error }, 'Error bulk updating transaction status:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1806,7 +1791,7 @@ router.post(
     } catch (error) {
       // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error bulk refunding transactions:", error);
+      logger.error({ error: error }, 'Error bulk refunding transactions:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1879,7 +1864,7 @@ router.get(
       const transfers = await getLiquidityTransfers(limit, offset);
       res.json({ transfers });
     } catch (err) {
-      console.error("[liquidity] Failed to list transfers:", err);
+      logger.error({ error: err }, '[liquidity]Failed to list transfers:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve liquidity transfers",
@@ -1941,7 +1926,7 @@ router.post(
       res.status(201).json({ message: "Transfer initiated", ...result });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Transfer failed";
-      console.error("[liquidity] Manual transfer error:", err);
+      logger.error({ error: err }, '[liquidity]Manual transfer error:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, msg);
     }
   },
@@ -1988,19 +1973,19 @@ router.post(
       const result = await reconcileTransactions(providerRows, dateRange);
 
       // Log reconciliation summary
-      console.log("[CSV RECONCILIATION]", {
+      logger.info({
         adminId: (req as AuthRequest).user?.id,
         filename: req.file.originalname,
         summary: result.summary,
         timestamp: new Date().toISOString(),
-      });
+      }, '[CSV RECONCILIATION]');
 
       res.json({
         message: "Reconciliation completed successfully",
         result,
       });
     } catch (error) {
-      console.error("[CSV RECONCILIATION ERROR]", error);
+      logger.error({ error: error }, '[CSV RECONCILIATION ERROR]');
 
       if (error instanceof Error) {
         throw createError(ERROR_CODES.INTERNAL_ERROR, "Reconciliation failed", {
@@ -2056,7 +2041,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("Error fetching reconciliation runs:", error);
+      logger.error({ error: error }, 'Error fetching reconciliation runs:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch reconciliation runs",
@@ -2106,7 +2091,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("Error fetching reconciliation alerts:", error);
+      logger.error({ error: error }, 'Error fetching reconciliation alerts:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch reconciliation alerts",
@@ -2165,7 +2150,7 @@ router.patch(
 
       res.json({ message: "Alert reviewed successfully" });
     } catch (error) {
-      console.error("Error reviewing reconciliation alert:", error);
+      logger.error({ error: error }, 'Error reviewing reconciliation alert:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to review alert");
     }
   },
@@ -2213,7 +2198,7 @@ router.post(
         result,
       });
     } catch (error) {
-      console.error("Error running manual reconciliation:", error);
+      logger.error({ error: error }, 'Error running manual reconciliation:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Manual reconciliation failed",
@@ -2236,7 +2221,7 @@ router.get(
       const configs = await providerReconciliationService.getProviderConfigs();
       res.json({ data: configs });
     } catch (error) {
-      console.error("Error fetching reconciliation configs:", error);
+      logger.error({ error: error }, 'Error fetching reconciliation configs:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch reconciliation configs",
@@ -2266,7 +2251,7 @@ router.get(
       try {
         providers = mobileMoneyService.getFailoverStats();
       } catch (err) {
-        console.error("Error fetching failover stats:", err);
+        logger.error({ error: err }, 'Error fetching failover stats:');
       }
 
       // Get queue stats
@@ -2278,7 +2263,7 @@ router.get(
           stats: queueStats,
         };
       } catch (err) {
-        console.error("Error fetching queue stats:", err);
+        logger.error({ error: err }, 'Error fetching queue stats:');
       }
 
       // Get Redis status
@@ -2291,7 +2276,7 @@ router.get(
           redis.status = "closed";
         }
       } catch (err) {
-        console.error("Error checking Redis status:", err);
+        logger.error({ error: err }, 'Error checking Redis status:');
         redis.status = "down";
       }
 
@@ -2310,7 +2295,7 @@ router.get(
           replicas: replicaHealth,
         };
       } catch (err) {
-        console.error("Error checking database health:", err);
+        logger.error({ error: err }, 'Error checking database health:');
       }
 
       res.json({
@@ -2322,7 +2307,7 @@ router.get(
         database,
       });
     } catch (err) {
-      console.error("Health check error:", err);
+      logger.error({ error: err }, 'Health check error:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve health data",
@@ -2346,7 +2331,7 @@ router.get(
       const stats = await getPoolStats();
       res.json({ success: true, ...stats });
     } catch (err) {
-      console.error("Error fetching replication status:", err);
+      logger.error({ error: err }, 'Error fetching replication status:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch replication status",
@@ -2402,7 +2387,7 @@ router.get(
 
       res.json({ rows, totals });
     } catch (err) {
-      console.error("[financial/pnl]", err);
+      logger.error({ error: err }, '[financial/pnl]');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch PnL data");
     }
   },
@@ -2674,7 +2659,7 @@ function renderTxResults(searchKey, data) {
 async function load() {
   const cached = localStorage.getItem(DASHBOARD_CACHE_KEY);
   if (cached) {
-    try { renderCachedDashboard(JSON.parse(cached)); } catch (error) { console.warn('Dashboard cache invalid', error); }
+    try { renderCachedDashboard(JSON.parse(cached)); } catch (error) { logger.warn({ error: error }, 'Dashboard cache invalid'); }
   }
 
   try {
@@ -2718,7 +2703,7 @@ async function load() {
         renderCachedDashboard(JSON.parse(cached));
         return;
       } catch (error) {
-        console.warn('Unable to render offline cache', error);
+        logger.warn({ error: error }, 'Unable to render offline cache');
       }
     }
     document.querySelector('.chart-box').innerHTML = '<div class="error">Failed to load data: ' + e.message + '</div>';
@@ -2731,7 +2716,7 @@ function copyRef(ref) {
      toast.classList.add('show');
      setTimeout(() => toast.classList.remove('show'), 2000);
    }).catch(err => {
-     console.error('Failed to copy:', err);
+     logger.error({ error: err }, 'Failed to copy:');
    });
  }
 
@@ -2754,7 +2739,7 @@ function copyRef(ref) {
       renderTxResults(ref, JSON.parse(cachedTx).data);
       return;
     } catch (error) {
-      console.warn('Tx cache invalid', error);
+      logger.warn({ error: error }, 'Tx cache invalid');
     }
   }
   
@@ -2770,7 +2755,7 @@ function copyRef(ref) {
         renderTxResults(ref, JSON.parse(cachedTxFallback).data);
         return;
       } catch (error) {
-        console.warn('Cached tx fallback invalid', error);
+        logger.warn({ error: error }, 'Cached tx fallback invalid');
       }
     }
     empty.textContent = 'Error: ' + e.message;
@@ -2799,7 +2784,7 @@ installBtn.addEventListener('click', async () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/api/admin/financial/dashboard/sw.js', { scope: '/api/admin/financial/dashboard/' }).catch((error) => {
-      console.warn('Service worker registration failed:', error);
+      logger.warn({ error: error }, 'Service worker registration failed:');
     });
   });
 }
@@ -3175,7 +3160,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("[compliance/docs:list]", error);
+      logger.error({ error: error }, '[compliance/docs:list]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to list compliance documents",
@@ -3191,7 +3176,7 @@ router.get(
     try {
       res.json(await complianceDocumentModel.getFacets());
     } catch (error) {
-      console.error("[compliance/docs:facets]", error);
+      logger.error({ error: error }, '[compliance/docs:facets]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch compliance document facets",
@@ -3220,7 +3205,7 @@ router.get(
       }
       res.json(document);
     } catch (error) {
-      console.error("[compliance/docs:get]", error);
+      logger.error({ error: error }, '[compliance/docs:get]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch compliance document",
@@ -3250,7 +3235,7 @@ router.post(
       );
       res.status(201).json(document);
     } catch (error) {
-      console.error("[compliance/docs:create]", error);
+      logger.error({ error: error }, '[compliance/docs:create]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to create compliance document",
@@ -3290,7 +3275,7 @@ router.patch(
       }
       res.json(document);
     } catch (error) {
-      console.error("[compliance/docs:update]", error);
+      logger.error({ error: error }, '[compliance/docs:update]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to update compliance document",
@@ -3317,7 +3302,7 @@ router.post(
       await stellarService.enableClawback();
       res.json({ message: "Clawback capability enabled on issuance account" });
     } catch (err) {
-      console.error("Error enabling clawback:", err);
+      logger.error({ error: err }, 'Error enabling clawback:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to enable clawback capability",
@@ -3416,7 +3401,7 @@ router.post(
           },
         );
       }
-      console.error("Error executing clawback:", err);
+      logger.error({ error: err }, 'Error executing clawback:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to execute clawback",
@@ -3531,7 +3516,7 @@ router.post(
         totalTimeMs: batchResult.totalTimeMs,
       });
     } catch (err) {
-      console.error("Error executing batch payment:", err);
+      logger.error({ error: err }, 'Error executing batch payment:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to execute batch payment",
@@ -3566,7 +3551,7 @@ router.delete(
       }
       res.json(document);
     } catch (error) {
-      console.error("[compliance/docs:archive]", error);
+      logger.error({ error: error }, '[compliance/docs:archive]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to archive compliance document",
@@ -3588,7 +3573,7 @@ router.get(
       const settings = await providerSettingsService.getAllSettings();
       res.json(settings);
     } catch (error) {
-      console.error("Error fetching provider settings:", error);
+      logger.error({ error: error }, 'Error fetching provider settings:');
       res.status(500).json({ message: "Failed to fetch provider settings" });
     }
   },
@@ -3614,7 +3599,7 @@ router.put(
 
       res.json({ message: "Provider settings updated successfully", settings });
     } catch (error) {
-      console.error("Error updating provider settings:", error);
+      logger.error({ error: error }, 'Error updating provider settings:');
       res.status(500).json({ message: "Failed to update provider settings" });
     }
   },
@@ -3648,7 +3633,7 @@ router.get(
         providerHealth,
       ] = await Promise.all([
         getQueueStats().catch((err) => {
-          console.error("[Dashboard] Queue stats error:", err);
+          logger.error({ error: err }, '[Dashboard]Queue stats error:');
           return {
             pending: 0,
             active: 0,
@@ -3663,14 +3648,14 @@ router.get(
             replicas,
           }))
           .catch((err) => {
-            console.error("[Dashboard] Database health error:", err);
+            logger.error({ error: err }, '[Dashboard]Database health error:');
             return { status: "unhealthy" as const, replicas: [] };
           }),
         redisClient
           .ping()
           .then(() => ({ status: "healthy" as const, responseTime: 0 }))
           .catch((err) => {
-            console.error("[Dashboard] Redis health error:", err);
+            logger.error({ error: err }, '[Dashboard]Redis health error:');
             return { status: "unhealthy" as const, responseTime: undefined };
           }),
         (async () => {
@@ -3685,7 +3670,7 @@ router.get(
             activeUsers: await (UserModel as any).countActiveUsers(24),
           };
         })().catch((err) => {
-          console.error("[Dashboard] Transaction stats error:", err);
+          logger.error({ error: err }, '[Dashboard]Transaction stats error:');
           return {
             totalCount: 0,
             successRate: 0,
@@ -3698,7 +3683,7 @@ router.get(
           try {
             return mobileMoneyService.getFailoverStats();
           } catch (err) {
-            console.error("[Dashboard] Provider health error:", err);
+            logger.error({ error: err }, '[Dashboard]Provider health error:');
             return {};
           }
         })(),
@@ -3743,7 +3728,7 @@ router.get(
         ),
       });
     } catch (error) {
-      console.error("[Dashboard] Failed to fetch stats:", error);
+      logger.error({ error: error }, '[Dashboard]Failed to fetch stats:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch dashboard stats",
@@ -3783,7 +3768,7 @@ router.get(
         responseTime,
       });
     } catch (error) {
-      console.error("[Health] Check failed:", error);
+      logger.error({ error: error }, '[Health]Check failed:');
       res.status(503).json({
         database: "unhealthy",
         redis: "unhealthy",
@@ -3816,7 +3801,7 @@ router.get(
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
-      console.error("[Queue] Stats fetch failed:", error);
+      logger.error({ error: error }, '[Queue]Stats fetch failed:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch queue stats",
@@ -3899,7 +3884,7 @@ router.get(
         generatedAt: now.toISOString(),
       });
     } catch (error) {
-      console.error("[Admin] Scope usage fetch failed:", error);
+      logger.error({ error: error }, '[Admin]Scope usage fetch failed:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch API key scope usage",
@@ -3921,7 +3906,7 @@ router.get(
       const stats = getConnectionPoolStatistics();
       res.json({ success: true, data: stats });
     } catch (error) {
-      console.error("[Admin] Pool stats fetch failed:", error);
+      logger.error({ error: error }, '[Admin]Pool stats fetch failed:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch pool statistics",
@@ -3943,7 +3928,7 @@ router.get(
       const statuses = getReplicaStatuses();
       res.json({ success: true, data: statuses });
     } catch (error) {
-      console.error("[Admin] Replica status fetch failed:", error);
+      logger.error({ error: error }, '[Admin]Replica status fetch failed:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch replica statuses",
@@ -3979,7 +3964,7 @@ router.patch(
         message: `Replica ${index} ${enabled ? "enabled" : "disabled"}`,
       });
     } catch (error) {
-      console.error("[Admin] Replica toggle failed:", error);
+      logger.error({ error: error }, '[Admin]Replica toggle failed:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to toggle replica");
     }
   },
@@ -4114,7 +4099,7 @@ router.get(
       return res.json({ success: true, ...result });
     } catch (error) {
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error fetching audit logs:", error);
+      logger.error({ error: error }, 'Error fetching audit logs:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch audit logs",
@@ -4142,7 +4127,7 @@ router.get(
         .send(renderAuditLogViewer(result.logs, result.total));
     } catch (error) {
       if ((error as { code?: string })?.code) throw error;
-      console.error("Error rendering audit log view:", error);
+      logger.error({ error: error }, 'Error rendering audit log view:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to render audit logs",

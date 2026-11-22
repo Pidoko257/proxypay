@@ -601,3 +601,23 @@ export const notificationSystemUp = new Gauge({
   help: "1 when every notification channel is healthy, 0 otherwise",
   registers: [register],
 });
+
+/**
+ * Scheduled cron job failures, labelled by job name.
+ */
+export const jobFailuresTotal = new Counter({
+  name: "job_failures_total",
+  help: "Total number of scheduled job runs that threw an error",
+  labelNames: ["job_name"],
+  registers: [register],
+});
+
+/**
+ * Background workers (e.g. NotificationWorker) that failed to start.
+ */
+export const workerStartFailuresTotal = new Counter({
+  name: "worker_start_failures_total",
+  help: "Total number of background worker startup failures",
+  labelNames: ["worker_name"],
+  registers: [register],
+});

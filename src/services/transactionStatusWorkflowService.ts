@@ -1,4 +1,5 @@
 import logger from "../utils/logger";
+import { pool } from "../config/database";
 import { TransactionStatus } from "../models/transaction";
 
 export type DetailedStatus =
@@ -84,8 +85,6 @@ export class TransactionStatusWorkflowService {
     FLAGGED_FOR_REVIEW: "High-risk signals detected; transaction placed in manual review queue.",
   };
 
-  private histories: Map<string, StatusHistoryEntry[]> = new Map();
-
   /**
    * Validate if a transition between two detailed statuses is allowed.
    */
@@ -124,14 +123,16 @@ export class TransactionStatusWorkflowService {
 
   /**
    * Transition transaction status, recording detailed history and explanations.
+   * History is persisted to `transaction_status_history` so it survives
+   * restarts and is shared across all API replicas.
    */
-  public transition(
+  public async transition(
     txId: string,
     current: DetailedStatus,
     next: DetailedStatus,
     updatedBy: string = "system",
     reason?: string
-  ): StatusHistoryEntry {
+  ): Promise<StatusHistoryEntry> {
     if (!this.isValidTransition(current, next)) {
       const msg = `Invalid state transition from ${current} to ${next} for transaction ${txId}`;
       logger.error(`[StatusWorkflow] ${msg}`);
@@ -139,18 +140,23 @@ export class TransactionStatusWorkflowService {
     }
 
     const explanation = TransactionStatusWorkflowService.EXPLANATIONS[next];
+
+    const { rows } = await pool.query<{ created_at: Date }>(
+      `INSERT INTO transaction_status_history
+         (transaction_id, from_status, to_status, reason, explanation, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING created_at`,
+      [txId, current, next, reason ?? null, explanation, updatedBy],
+    );
+
     const entry: StatusHistoryEntry = {
       fromStatus: current,
       toStatus: next,
       reason,
       explanation,
       updatedBy,
-      timestamp: new Date(),
+      timestamp: rows[0]?.created_at ? new Date(rows[0].created_at) : new Date(),
     };
-
-    const history = this.histories.get(txId) || [];
-    history.push(entry);
-    this.histories.set(txId, history);
 
     logger.info(`[StatusWorkflow] Transaction ${txId} transitioned: ${current} -> ${next} (${explanation})`);
     return entry;
@@ -159,8 +165,30 @@ export class TransactionStatusWorkflowService {
   /**
    * Get complete status history and explanation timeline for a transaction.
    */
-  public getHistory(txId: string): StatusHistoryEntry[] {
-    return [...(this.histories.get(txId) || [])];
+  public async getHistory(txId: string): Promise<StatusHistoryEntry[]> {
+    const { rows } = await pool.query<{
+      from_status: string | null;
+      to_status: string;
+      reason: string | null;
+      explanation: string;
+      updated_by: string;
+      created_at: Date;
+    }>(
+      `SELECT from_status, to_status, reason, explanation, updated_by, created_at
+         FROM transaction_status_history
+        WHERE transaction_id = $1
+        ORDER BY created_at ASC, id ASC`,
+      [txId],
+    );
+
+    return rows.map((row) => ({
+      fromStatus: (row.from_status ?? undefined) as StatusHistoryEntry["fromStatus"],
+      toStatus: row.to_status as StatusHistoryEntry["toStatus"],
+      reason: row.reason ?? undefined,
+      explanation: row.explanation,
+      updatedBy: row.updated_by,
+      timestamp: new Date(row.created_at),
+    }));
   }
 
   /**

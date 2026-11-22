@@ -1,5 +1,5 @@
 import { pool, queryRead, queryWrite } from "../config/database";
-import { encrypt, decrypt, encryptField, decryptField } from "../utils/encryption";
+import { encrypt, decrypt, encryptField, decryptFieldOrNull } from "../utils/encryption";
 
 export enum UserStatus {
   ACTIVE = "active",
@@ -132,11 +132,11 @@ export class UserModel {
       is_active: row.is_active ?? true,
       deactivated_at: row.deactivated_at ?? null,
       
-      firstName: isAuthorized ? (decryptField(row.first_name) as string ?? undefined) : row.first_name ?? undefined,
-      lastName: isAuthorized ? (decryptField(row.last_name) as string ?? undefined) : row.last_name ?? undefined,
-      address: isAuthorized ? (decryptField(row.address) as string ?? undefined) : row.address ?? undefined,
-      dateOfBirth: isAuthorized ? (decryptField(row.date_of_birth) as string ?? undefined) : row.date_of_birth ?? undefined,
-      idNumber: isAuthorized ? (decryptField(row.id_number) as string ?? undefined) : row.id_number ?? undefined,
+      firstName: isAuthorized ? (decryptFieldOrNull(row.first_name, "users.first_name") ?? undefined) : row.first_name ?? undefined,
+      lastName: isAuthorized ? (decryptFieldOrNull(row.last_name, "users.last_name") ?? undefined) : row.last_name ?? undefined,
+      address: isAuthorized ? (decryptFieldOrNull(row.address, "users.address") ?? undefined) : row.address ?? undefined,
+      dateOfBirth: isAuthorized ? (decryptFieldOrNull(row.date_of_birth, "users.date_of_birth") ?? undefined) : row.date_of_birth ?? undefined,
+      idNumber: isAuthorized ? (decryptFieldOrNull(row.id_number, "users.id_number") ?? undefined) : row.id_number ?? undefined,
     };
   }
 
@@ -207,12 +207,19 @@ export class UserModel {
     try {
       await client.query('BEGIN');
 
-      // Get current user status for audit
-      const currentUser = await this.findById(id);
-      if (!currentUser) {
+      // Read the current status on the same client, inside the transaction,
+      // and lock the row. Concurrent status changes for this user now queue
+      // behind us, so the audit entry's old_status is always the value this
+      // UPDATE actually replaced (never a stale read from a replica).
+      const currentResult = await client.query(
+        "SELECT status FROM users WHERE id = $1 FOR UPDATE",
+        [id],
+      );
+      if (currentResult.rows.length === 0) {
         await client.query('ROLLBACK');
         return null;
       }
+      const currentUser = { status: currentResult.rows[0].status as UserStatus };
 
       // Update user status
       const updateQuery = "UPDATE users SET status = $1 WHERE id = $2 RETURNING *";
@@ -285,7 +292,8 @@ export class UserModel {
         a.created_at AS "createdAt",
         a.ip_address AS "ipAddress",
         a.user_agent AS "userAgent",
-        u.phone_number AS "changedByUser"
+        u.phone_number AS "changedByUser",
+        u.display_name AS "changedByDisplayName"
       FROM user_status_audit a
       JOIN users u ON a.changed_by = u.id
       WHERE a.user_id = $1
@@ -293,7 +301,10 @@ export class UserModel {
     `;
 
     const result = await queryRead(query, [userId]);
-    return result.rows;
+    return result.rows.map(row => ({
+      ...row,
+      changedByUser: row.changedByUser ? decrypt(row.changedByUser) : null,
+    }));
   }
   async incrementTokenVersion(id: string): Promise<number> {
     const query = `

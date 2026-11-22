@@ -62,6 +62,9 @@ FRAUD_FREQUENCY_SPIKE_SCORE=15
 FRAUD_UNUSUAL_HOURS_START=23
 FRAUD_UNUSUAL_HOURS_END=5
 FRAUD_DEVICE_FINGERPRINT_WINDOW_MS=86400000
+# Enable IP geolocation mismatch heuristic (uses ip-api.com via GeolocationService;
+# set GEOLOCATION_API_KEY for the pro tier)
+FRAUD_IP_GEOLOCATION_ENABLED=false
 ```
 
 ### Database Schema
@@ -77,30 +80,30 @@ ALTER TYPE transaction_status ADD VALUE 'review';
 ### Basic Fraud Detection
 
 ```typescript
-import { fraudService, FraudTransactionInput } from './services/fraud';
+import { fraudService, FraudTransactionInput } from "./services/fraud";
 
 const transactionInput: FraudTransactionInput = {
-  id: 'txn_123',
-  userId: 'user_456',
+  id: "txn_123",
+  userId: "user_456",
   amount: 1500,
-  phoneNumber: '+1234567890',
+  phoneNumber: "+1234567890",
   timestamp: new Date(),
-  location: { lat: 40.7128, lng: -74.0060 },
-  ipAddress: '192.168.1.1',
-  userAgent: 'Mozilla/5.0...',
-  deviceFingerprint: 'abc123',
-  type: 'deposit',
-  provider: 'mtn'
+  location: { lat: 40.7128, lng: -74.006 },
+  ipAddress: "192.168.1.1",
+  userAgent: "Mozilla/5.0...",
+  deviceFingerprint: "abc123",
+  type: "deposit",
+  provider: "mtn",
 };
 
 const result = await fraudService.processTransaction(transactionInput);
 
 if (result.isFraud) {
-  console.log('Fraud detected:', {
+  console.log("Fraud detected:", {
     score: result.score,
     riskLevel: result.riskLevel,
     reasons: result.reasons,
-    action: result.recommendedAction
+    action: result.recommendedAction,
   });
 }
 ```
@@ -108,26 +111,27 @@ if (result.isFraud) {
 ### Express.js Middleware Integration
 
 ```typescript
-import { fraudDetectionMiddleware } from './middleware/fraudDetection';
+import { fraudDetectionMiddleware } from "./middleware/fraudDetection";
 
 // Apply to transaction routes
-app.post('/api/transactions', 
+app.post(
+  "/api/transactions",
   fraudDetectionMiddleware.detectFraud,
-  transactionController.create
+  transactionController.create,
 );
 
 // Check fraud results in controller
-router.post('/transactions', async (req, res) => {
+router.post("/transactions", async (req, res) => {
   const fraudResult = (req as any).fraudResult;
-  
+
   if (fraudResult?.isFraud) {
     // Handle flagged transaction
     return res.status(202).json({
-      message: 'Transaction under review',
-      fraudAnalysis: fraudResult
+      message: "Transaction under review",
+      fraudAnalysis: fraudResult,
     });
   }
-  
+
   // Normal processing
   // ...
 });
@@ -140,7 +144,7 @@ router.post('/transactions', async (req, res) => {
 const reviewQueue = fraudService.getReviewQueue();
 
 // Process a reviewed transaction
-await fraudService.setTransactionToReview('txn_123');
+await fraudService.setTransactionToReview("txn_123");
 
 // Clear review queue after processing
 fraudService.clearReviewQueue();
@@ -157,12 +161,12 @@ fraudService.clearReviewQueue();
 
 ### Risk Levels
 
-| Level | Score Range | Action | Description |
-|-------|-------------|--------|-------------|
-| Low | 0-39 | Allow | Normal transaction processing |
-| Medium | 40-59 | Allow | Monitor for patterns |
-| High | 60-79 | Review | Manual review required |
-| Critical | 80+ | Block | Transaction blocked |
+| Level    | Score Range | Action | Description                   |
+| -------- | ----------- | ------ | ----------------------------- |
+| Low      | 0-39        | Allow  | Normal transaction processing |
+| Medium   | 40-59       | Allow  | Monitor for patterns          |
+| High     | 60-79       | Review | Manual review required        |
+| Critical | 80+         | Block  | Transaction blocked           |
 
 ## API Endpoints
 
@@ -233,18 +237,20 @@ transaction_errors_total{type="fraud_detection",error_type="fraud_flagged"}
 ```typescript
 // Extend the fraud service with custom rules
 class CustomFraudService extends FraudService {
-  async detectFraud(transactionInput: FraudTransactionInput): Promise<FraudResult> {
+  async detectFraud(
+    transactionInput: FraudTransactionInput,
+  ): Promise<FraudResult> {
     const baseResult = await super.detectFraud(transactionInput);
-    
+
     // Add custom logic
     if (this.isCustomRule(transactionInput)) {
       baseResult.score += 10;
-      baseResult.reasons.push('Custom rule triggered');
+      baseResult.reasons.push("Custom rule triggered");
     }
-    
+
     return baseResult;
   }
-  
+
   private isCustomRule(input: FraudTransactionInput): boolean {
     // Custom rule implementation
     return false;
@@ -256,11 +262,11 @@ class CustomFraudService extends FraudService {
 
 ```typescript
 // Update high-risk numbers list
-await redisClient.setex('fraud:high_risk_numbers', 3600, JSON.stringify([
-  '+1234567890',
-  '+0987654321',
-  '+5555555555'
-]));
+await redisClient.setex(
+  "fraud:high_risk_numbers",
+  3600,
+  JSON.stringify(["+1234567890", "+0987654321", "+5555555555"]),
+);
 ```
 
 ## Performance Considerations
@@ -302,19 +308,19 @@ await redisClient.setex('fraud:high_risk_numbers', 3600, JSON.stringify([
 ### Unit Tests
 
 ```typescript
-import { fraudService } from './services/fraud';
+import { fraudService } from "./services/fraud";
 
-describe('Fraud Detection', () => {
-  test('should flag high-value transaction', async () => {
+describe("Fraud Detection", () => {
+  test("should flag high-value transaction", async () => {
     const result = await fraudService.detectFraud({
-      id: 'test',
+      id: "test",
       amount: 5000,
-      phoneNumber: '+1234567890',
+      phoneNumber: "+1234567890",
       timestamp: new Date(),
-      type: 'deposit',
-      provider: 'test'
+      type: "deposit",
+      provider: "test",
     });
-    
+
     expect(result.isFraud).toBe(true);
     expect(result.score).toBeGreaterThan(50);
   });
@@ -324,14 +330,14 @@ describe('Fraud Detection', () => {
 ### Integration Tests
 
 ```typescript
-describe('Fraud Detection Middleware', () => {
-  test('should block critical risk transactions', async () => {
+describe("Fraud Detection Middleware", () => {
+  test("should block critical risk transactions", async () => {
     const response = await request(app)
-      .post('/api/transactions')
+      .post("/api/transactions")
       .send(suspiciousTransaction)
       .expect(403);
-    
-    expect(response.body.error).toContain('blocked due to fraud detection');
+
+    expect(response.body.error).toContain("blocked due to fraud detection");
   });
 });
 ```
@@ -359,11 +365,11 @@ describe('Fraud Detection Middleware', () => {
 
 ```typescript
 // Enable debug logging
-process.env.DEBUG = 'fraud:*';
+process.env.DEBUG = "fraud:*";
 
 // Get detailed fraud analysis
 const result = await fraudService.detectFraud(transaction);
-console.log('Fraud analysis:', result);
+console.log("Fraud analysis:", result);
 ```
 
 ## Contributing

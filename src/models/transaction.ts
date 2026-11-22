@@ -167,11 +167,77 @@ export function validateMetadataSchema(
   return result.data as Record<string, unknown>;
 }
 
+/**
+ * Statuses after which a transaction's idempotency key is released (#619).
+ * Restored: the definition was lost in a merge while updateStatus still
+ * references it, so every successful status update threw a ReferenceError.
+ */
+const TERMINAL_IDEMPOTENCY_STATUSES = new Set<TransactionStatus>([
+  TransactionStatus.Completed,
+  TransactionStatus.Failed,
+  TransactionStatus.Cancelled,
+  TransactionStatus.Reversed,
+  TransactionStatus.ClawedBack,
+]);
+
 function phoneSearchTokens(phoneNumber: string): string[] {
   const normalized = phoneNumber.replace(/^\+/, "");
   return Array.from({ length: normalized.length }, (_, index) =>
     hashSearchValue(normalized.slice(index)),
   );
+}
+
+/** Words shorter than this are too common to be useful search terms. */
+const NOTES_MIN_TOKEN_LENGTH = 2;
+
+/**
+ * Split free text into normalized, de-duplicated words (case-insensitive,
+ * Unicode-aware). Used both when indexing notes and when parsing a query, so
+ * the two always agree.
+ */
+export function tokenizeNotes(text: string | null | undefined): string[] {
+  if (!text) return [];
+  const words = text
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length >= NOTES_MIN_TOKEN_LENGTH);
+  return Array.from(new Set(words));
+}
+
+/**
+ * Keyed blind-index digests for searching encrypted notes. The "notes:"
+ * prefix domain-separates these from other search tokens (e.g. phone).
+ */
+export function notesSearchTokens(text: string | null | undefined): string[] {
+  return tokenizeNotes(text).map((word) => hashSearchValue(`notes:${word}`));
+}
+
+/**
+ * Thrown by updateStatus when the transaction's status no longer matches the
+ * caller's expected `currentStatus`, i.e. a concurrent update won the race.
+ */
+export class TransactionStatusConflictError extends Error {
+  constructor(
+    public readonly transactionId: string,
+    public readonly expectedStatus: TransactionStatus,
+    public readonly actualStatus: TransactionStatus,
+    public readonly requestedStatus: TransactionStatus,
+  ) {
+    super(
+      `Transaction ${transactionId} status changed concurrently: expected ${expectedStatus}, found ${actualStatus} (requested ${requestedStatus})`,
+    );
+    this.name = "TransactionStatusConflictError";
+  }
+}
+
+export class InvalidNotesSearchQueryError extends Error {
+  constructor() {
+    super(
+      `Notes search query must contain at least one word of ${NOTES_MIN_TOKEN_LENGTH} or more letters or digits`,
+    );
+    this.name = "InvalidNotesSearchQueryError";
+  }
 }
 
 const TRANSACTION_SELECT_COLUMNS = `
@@ -354,9 +420,10 @@ export class TransactionModel {
         reference_number, provider_reference, type, amount, currency,
         original_amount, converted_amount, phone_number, provider,
         phone_search_tokens, stellar_address, status, tags, notes, user_id,
-        idempotency_key, idempotency_expires_at, metadata, location_metadata
+        idempotency_key, idempotency_expires_at, metadata, location_metadata,
+        notes_search_tokens
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
       ) RETURNING *`,
       [
         ref,
@@ -378,6 +445,7 @@ export class TransactionModel {
         data.idempotencyExpiresAt ?? null,
         JSON.stringify(metadata),
         data.locationMetadata ? JSON.stringify(data.locationMetadata) : null,
+        notesSearchTokens(data.notes),
       ],
     );
 
@@ -431,6 +499,15 @@ export class TransactionModel {
     return mapTransactionRow(res.rows[0]);
   }
 
+  /**
+   * Set a transaction's status.
+   *
+   * When `currentStatus` is given, the transition is validated against it and
+   * the UPDATE only applies if the row still has that status (compare-and-set
+   * in a single statement). If another worker changed the status first, a
+   * TransactionStatusConflictError is thrown instead of silently overwriting
+   * its result (last-writer-wins).
+   */
   async updateStatus(id: string, status: TransactionStatus, userId?: string, currentStatus?: TransactionStatus) {
     if (currentStatus) {
       transactionStatusWorkflowService.validateBaseTransition(id, currentStatus, status);
@@ -439,14 +516,40 @@ export class TransactionModel {
     const params: any[] = [status, id];
 
     if (userId) {
-      q += ` AND user_id=$3`;
       params.push(userId);
+      q += ` AND user_id=$${params.length}`;
+    }
+
+    if (currentStatus) {
+      params.push(currentStatus);
+      q += ` AND status=$${params.length}`;
     }
 
     q += ` RETURNING user_id, provider, reference_number, updated_at`;
 
     const res = await queryWrite(q, params);
-    if (!res.rowCount) return;
+    if (!res.rowCount) {
+      if (currentStatus) {
+        // Distinguish "not found" from "status changed underneath us". Read
+        // from the primary so replica lag can't hide the concurrent write.
+        let existsQ = `SELECT status FROM transactions WHERE id=$1`;
+        const existsParams: any[] = [id];
+        if (userId) {
+          existsQ += ` AND user_id=$2`;
+          existsParams.push(userId);
+        }
+        const existing = await queryWrite(existsQ, existsParams);
+        if (existing.rowCount) {
+          throw new TransactionStatusConflictError(
+            id,
+            currentStatus,
+            existing.rows[0].status,
+            status,
+          );
+        }
+      }
+      return;
+    }
 
     const row = res.rows[0];
 
@@ -518,20 +621,70 @@ export class TransactionModel {
     });
   }
 
+  /**
+   * Full-word, case-insensitive search over notes and admin notes.
+   *
+   * Notes are encrypted at rest, so the database cannot tokenize them. Each
+   * row instead carries keyed digests of its words (see notesSearchTokens);
+   * a row matches when its notes, or its admin notes, contain every word of
+   * the query. Results are newest first.
+   *
+   * @throws InvalidNotesSearchQueryError when the query has no searchable words
+   */
   async searchByNotes(query: string) {
+    const tokens = notesSearchTokens(query);
+    if (tokens.length === 0) {
+      throw new InvalidNotesSearchQueryError();
+    }
+
     const res = await queryRead(
       `SELECT ${TRANSACTION_SELECT_COLUMNS}
        FROM transactions
-       WHERE to_tsvector('english', COALESCE(notes,'') || ' ' || COALESCE(admin_notes,'')) 
-       @@ plainto_tsquery('english',$1)
-       ORDER BY ts_rank(
-         to_tsvector('english', COALESCE(notes,'') || ' ' || COALESCE(admin_notes,'')),
-         plainto_tsquery('english',$1)
-       ) DESC, created_at DESC`,
-      [query],
+       WHERE notes_search_tokens @> $1::text[]
+          OR admin_notes_search_tokens @> $1::text[]
+       ORDER BY created_at DESC, id DESC`,
+      [tokens],
     );
 
     return res.rows.map(mapTransactionRow);
+  }
+
+  /**
+   * Populate notes search tokens for rows written before the
+   * notes_search_tokens columns existed. Processes one keyset page per call;
+   * returns the last processed id (pass it back as `afterId`) or null when done.
+   */
+  async backfillNotesSearchTokens(
+    batchSize = 500,
+    afterId: string | null = null,
+  ): Promise<{ processed: number; lastId: string | null }> {
+    const res = await queryWrite(
+      `SELECT id, notes, admin_notes
+       FROM transactions
+       WHERE ($1::uuid IS NULL OR id > $1::uuid)
+         AND (notes IS NOT NULL OR admin_notes IS NOT NULL)
+       ORDER BY id
+       LIMIT $2`,
+      [afterId, batchSize],
+    );
+
+    for (const row of res.rows) {
+      await queryWrite(
+        `UPDATE transactions
+         SET notes_search_tokens = $1, admin_notes_search_tokens = $2
+         WHERE id = $3`,
+        [
+          notesSearchTokens(decrypt(row.notes ?? null)),
+          notesSearchTokens(decrypt(row.admin_notes ?? null)),
+          row.id,
+        ],
+      );
+    }
+
+    return {
+      processed: res.rows.length,
+      lastId: res.rows.length ? res.rows[res.rows.length - 1].id : null,
+    };
   }
 
   async getBalanceStatistics(userId: string) {
@@ -782,10 +935,10 @@ export class TransactionModel {
     const encryptedNotes = encrypt(notes);
     const result = await queryWrite(
       `UPDATE transactions
-       SET notes = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2
+       SET notes = $1, notes_search_tokens = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
        RETURNING ${TRANSACTION_SELECT_COLUMNS}`,
-      [encryptedNotes, id],
+      [encryptedNotes, notesSearchTokens(notes), id],
     );
 
     return mapTransactionRow(result.rows[0]);
@@ -802,10 +955,11 @@ export class TransactionModel {
     const encryptedAdminNotes = encrypt(adminNotes);
     const result = await queryWrite(
       `UPDATE transactions
-       SET admin_notes = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2
+       SET admin_notes = $1, admin_notes_search_tokens = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
        RETURNING ${TRANSACTION_SELECT_COLUMNS}`,
-      [encryptedAdminNotes, id],
+      [encryptedAdminNotes, notesSearchTokens(adminNotes), id],
     );
 
     return mapTransactionRow(result.rows[0]);

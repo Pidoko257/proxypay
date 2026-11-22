@@ -46,6 +46,7 @@ import { runNotificationHealthCheckJob } from "./notificationHealthCheckJob";
 import { runComplianceExpiryAlertJob } from "./complianceExpiryAlertJob";
 import { runProviderSessionRefreshJob } from "./providerSessionRefreshJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+import logger from "../utils/logger";
 
 interface JobConfig {
   name: string;
@@ -56,6 +57,7 @@ interface JobConfig {
 const JOBS: JobConfig[] = [
   {
     name: "sanction-sync",
+    critical: true,
     // Daily at 1:00 AM - syncs internal sanction list with global lists
     schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
     handler: runSanctionSyncJob,
@@ -92,6 +94,7 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "balance-monitor",
+    critical: true,
     // Every 5 minutes - monitors hot wallet balances
     schedule: process.env.BALANCE_MONITOR_CRON || "*/5 * * * *",
     handler: runBalanceMonitorJob,
@@ -104,12 +107,14 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "fee-bump",
+    critical: true,
     // Every 30 seconds - monitors and bumps fees for stuck transactions
     schedule: process.env.FEE_BUMP_CRON || "*/30 * * * * *",
     handler: runFeeBumpJob,
   },
   {
     name: "sep31-fee-bump",
+    critical: true,
     // Every 30 seconds - bumps fees for stuck SEP-31 transactions
     schedule: process.env.SEP31_FEE_BUMP_CRON || "*/30 * * * * *",
     handler: runSep31FeeBumpJob,
@@ -135,6 +140,7 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "provider-reconciliation",
+    critical: true,
     // Daily at 4:00 AM - runs automated reconciliation against provider CSV reports
     schedule: process.env.PROVIDER_RECONCILIATION_CRON || "0 4 * * *",
     handler: runDailyProviderReconciliation,
@@ -184,18 +190,21 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "reconciliation",
+    critical: true,
     // Daily at 5:00 AM
     schedule: process.env.RECONCILIATION_CRON || "0 5 * * *",
     handler: runReconciliationJob,
   },
   {
     name: "database-backup",
+    critical: true,
     // Daily at 2:00 AM
     schedule: process.env.DATABASE_BACKUP_CRON || "0 2 * * *",
     handler: runDatabaseBackupJob,
   },
   {
     name: "database-backup-verify",
+    critical: true,
     // Daily at 3:00 AM
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
@@ -242,18 +251,20 @@ const JOBS: JobConfig[] = [
 ];
 
 async function runJob(job: JobConfig): Promise<void> {
-  console.log(`[${job.name}] Starting job`);
+  const jobLogger = logger.child({ job: job.name });
+  jobLogger.info({ job: job.name }, `[${job.name}] Starting job`);
   try {
     await job.handler();
-    console.log(`[${job.name}] Completed`);
+    jobLogger.info({ job: job.name }, `[${job.name}] Completed`);
   } catch (err) {
-    console.error(`[${job.name}] Failed:`, err);
+    jobLogger.error({ err, job: job.name }, `[${job.name}] Failed`);
   }
 }
 
 export function startJobs(): void {
   // Initialize PagerDuty integration for monitoring
   const pagerDutyService = createPagerDutyService();
+  setJobFailureAlerting(pagerDutyService);
   MonitoringService.initialize(pagerDutyService);
 
   // Start the monitoring service (checks every 30 seconds)
@@ -261,19 +272,23 @@ export function startJobs(): void {
 
   for (const job of JOBS) {
     if (!cron.validate(job.schedule)) {
-      console.error(
+      logger.error(
+        { job: job.name, schedule: job.schedule },
         `[scheduler] Invalid cron expression for "${job.name}": ${job.schedule}`,
       );
       continue;
     }
     cron.schedule(job.schedule, () => runJob(job));
-    console.log(`[scheduler] "${job.name}" scheduled - ${job.schedule}`);
+    logger.info(
+      { job: job.name, schedule: job.schedule },
+      `[scheduler] "${job.name}" scheduled - ${job.schedule}`,
+    );
   }
 
   // Start the notification worker which listens for Redis pub/sub events
   // and drives user-facing notifications in real-time. This replaces any
   // DB-polling notification mechanisms.
   startNotificationWorker().catch((err) => {
-    console.warn("Failed to start NotificationWorker:", err);
+    logger.warn({ err }, "Failed to start NotificationWorker");
   });
 }

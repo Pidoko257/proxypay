@@ -20,8 +20,24 @@ export interface EncryptedPayload {
 // ---------------------------------------------------------------------------
 
 /**
+ * Returns the secret HKDF salt from configuration.
+ *
+ * The salt is deliberately read from the environment rather than hard-coded so
+ * it can be treated as a secret and rotated independently of the source code.
+ * There is no plaintext fallback: a missing salt is a fatal misconfiguration.
+ */
+function getHkdfSalt(): Buffer {
+  const salt = env.DB_ENCRYPTION_HKDF_SALT;
+  if (!salt) {
+    throw new Error("DB_ENCRYPTION_HKDF_SALT is not configured — refusing to derive encryption keys");
+  }
+  return Buffer.from(salt, "utf8");
+}
+
+/**
  * Derives a 32-byte AES key from raw key material using HKDF-SHA-256.
- * Deterministic — same inputs always produce the same key.
+ * Deterministic — same inputs (and the same DB_ENCRYPTION_HKDF_SALT) always
+ * produce the same key.
  *
  * @param keyMaterial  Raw key material (env var value or per-user secret)
  * @param info         Context label that domain-separates derived keys
@@ -29,7 +45,7 @@ export interface EncryptedPayload {
 export function deriveKey(keyMaterial: string, info = "pii-encryption"): Buffer {
   const ikm = Buffer.from(keyMaterial, "utf8");
   // HKDF extract
-  const prk = crypto.createHmac("sha256", "proxypay-hkdf-salt").update(ikm).digest();
+  const prk = crypto.createHmac("sha256", getHkdfSalt()).update(ikm).digest();
   // HKDF expand (single block — 32 bytes is exactly one SHA-256 output)
   const infoBuffer = Buffer.from(info, "utf8");
   const t = crypto.createHmac("sha256", prk)
@@ -188,10 +204,24 @@ export function encryptField(value: string | null | undefined): string | null | 
   return serializePayload(encryptAES(value, key));
 }
 
+/** Matches the serialised `iv:authTag:ciphertext` hex format produced by encryptAES. */
+const SERIALIZED_PAYLOAD_RE = new RegExp(
+  `^[0-9a-f]{${IV_LENGTH * 2}}:[0-9a-f]{${AUTH_TAG_LENGTH * 2}}:[0-9a-f]*$`,
+  "i",
+);
+
 /**
  * Decrypt a PII field with the global key.
  * Detects version prefixes dynamically to select the appropriate decryption key.
  * Returns null/undefined/empty as-is.
+ *
+ * Values that are not in an encrypted format at all (e.g. rows written before
+ * PII encryption was introduced) are returned unchanged. Anything that *is* an
+ * encrypted payload but fails to decrypt — wrong key, tampered data, corrupt
+ * ciphertext — throws. It never returns ciphertext in place of plaintext.
+ * Call sites that must tolerate bad rows should use `decryptFieldOrNull`.
+ *
+ * @throws Error when an encrypted payload cannot be decrypted.
  */
 export function decryptField(raw: string | null | undefined): string | null | undefined {
   if (raw == null || raw === "") return raw;
@@ -202,36 +232,37 @@ export function decryptField(raw: string | null | undefined): string | null | un
   // A versioned payload has format: version:iv:authTag:ciphertext (parts.length >= 4)
   if (parts.length >= 4 && keys.has(parts[0].toLowerCase())) {
     const version = parts[0].toLowerCase();
-    const keyMaterial = keys.get(version)!;
-    const key = deriveKey(keyMaterial);
-    try {
-      const payload = deserializePayload(parts.slice(1).join(":"));
-      return decryptAES(payload, key);
-    } catch (err) {
-      console.warn(
-        `[Encryption] Decryption failed for versioned payload '${version}'. Returning raw value. Error: ${
-          err instanceof Error ? err.message : err
-        }`
-      );
-      return raw;
-    }
+    const key = deriveKey(keys.get(version)!);
+    const payload = deserializePayload(parts.slice(1).join(":"));
+    return decryptAES(payload, key);
   }
+
+  // Not an encrypted payload — legacy plaintext column value, pass through.
+  if (!SERIALIZED_PAYLOAD_RE.test(raw)) return raw;
 
   // Fallback to legacy/default decryption
   const keyMaterial = keys.get("legacy") || env.DB_ENCRYPTION_KEY;
   const key = deriveKey(keyMaterial);
+  return decryptAES(deserializePayload(raw), key);
+}
+
+/**
+ * Tolerant variant of `decryptField` for read paths that must not fail as a
+ * whole because of one undecryptable value. On failure it logs a warning (never
+ * the value or key) and returns `null` — it never returns the ciphertext.
+ *
+ * @param context  Short label identifying the field, included in the warning.
+ */
+export function decryptFieldOrNull(raw: string | null | undefined, context: string): string | null | undefined {
   try {
-    return decryptAES(deserializePayload(raw), key);
+    return decryptField(raw);
   } catch (err) {
-    // Only warn if it looks like it was meant to be an encrypted payload (has colons)
-    if (raw.includes(":")) {
-      console.warn(
-        `[Encryption] Decryption failed for legacy-format payload. Returning raw value. Error: ${
-          err instanceof Error ? err.message : err
-        }`
-      );
-    }
-    return raw;
+    console.warn(
+      `[Encryption] Failed to decrypt ${context}; returning null. Error: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
   }
 }
 
@@ -270,20 +301,59 @@ export function decryptFieldForUser(raw: string | null | undefined, userId: stri
 // Deterministic mode preserved for indexed phone-number lookups.
 // ---------------------------------------------------------------------------
 
-const DETERMINISTIC_IV = Buffer.alloc(IV_LENGTH, 0);
-
 /**
- * @deprecated Use encryptField / encryptFieldForUser for new PII fields.
- * Kept for backward-compat with phone_number, email, two_factor_secret callers.
+ * Derives a synthetic IV for deterministic (searchable) encryption:
+ * HMAC-SHA-256(ivKey, plaintext) truncated to IV_LENGTH bytes.
+ *
+ * The same plaintext always yields the same IV (so equal values encrypt to
+ * equal ciphertext and can be matched with `=`), while different plaintexts
+ * get different IVs. This avoids the AES-GCM nonce reuse of a fixed IV, which
+ * lets an attacker who sees two ciphertexts recover the GHASH authentication
+ * key and XOR the plaintexts together.
+ *
+ * The IV key is domain-separated from the encryption key via HKDF `info`.
  */
-export function encrypt(text: string | null | undefined, deterministic = false): string | null | undefined {
-  if (text == null || text === "") return text;
-  const key = deriveKey(env.DB_ENCRYPTION_KEY);
-  const iv = deterministic ? DETERMINISTIC_IV : crypto.randomBytes(IV_LENGTH);
+function deriveDeterministicIv(plaintext: string, keyMaterial: string): Buffer {
+  const ivKey = deriveKey(keyMaterial, "pii-deterministic-iv");
+  return crypto.createHmac("sha256", ivKey).update(plaintext, "utf8").digest().subarray(0, IV_LENGTH);
+}
+
+function encryptWithIv(text: string, key: Buffer, iv: Buffer): string {
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
   const ciphertext = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]).toString("hex");
   const authTag = cipher.getAuthTag().toString("hex");
   return `${iv.toString("hex")}:${authTag}:${ciphertext}`;
+}
+
+/**
+ * @deprecated Use encryptField / encryptFieldForUser for new PII fields.
+ * Kept for backward-compat with phone_number, email, two_factor_secret callers.
+ *
+ * @param deterministic  When true, the IV is derived from HMAC(key, plaintext)
+ *                       so equal inputs produce equal ciphertext (searchable).
+ */
+export function encrypt(text: string | null | undefined, deterministic = false): string | null | undefined {
+  if (text == null || text === "") return text;
+  const key = deriveKey(env.DB_ENCRYPTION_KEY);
+  const iv = deterministic
+    ? deriveDeterministicIv(text, env.DB_ENCRYPTION_KEY)
+    : crypto.randomBytes(IV_LENGTH);
+  return encryptWithIv(text, key, iv);
+}
+
+/**
+ * Returns every ciphertext a deterministically-encrypted value may be stored
+ * as, for use in equality lookups (`WHERE col = ANY($1)`).
+ *
+ * The first entry is the current HMAC-derived-IV form. The second is the form
+ * written by older releases that used an all-zero IV; it is only ever compared
+ * against existing rows — never persisted — so it introduces no new nonce
+ * reuse. Drop it once stored values have been re-encrypted.
+ */
+export function deterministicLookupValues(text: string): string[] {
+  const current = encrypt(text, true) as string;
+  const legacyZeroIv = encryptWithIv(text, deriveKey(env.DB_ENCRYPTION_KEY), Buffer.alloc(IV_LENGTH, 0));
+  return [current, legacyZeroIv];
 }
 
 /**

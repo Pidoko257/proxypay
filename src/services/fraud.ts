@@ -4,6 +4,8 @@ import { TransactionModel } from '../models/transaction';
 import { UserModel } from '../models/users';
 import { FraudAlertModel, FraudRiskLevel, FraudRecommendedAction } from '../models/fraudAlert';
 import { redisClient } from '../config/redis';
+import { queryRead } from '../config/database';
+import { geolocationService } from './geolocation';
 import logger from '../utils/logger';
 import { fraudLoggingService } from './fraudLoggingService';
 import {
@@ -35,6 +37,9 @@ import {
  * Fraud Score Threshold: 50 (configurable)
  */
 
+const HIGH_RISK_NUMBERS_CACHE_KEY = 'fraud:high_risk_numbers';
+const HIGH_RISK_NUMBERS_CACHE_TTL_SECONDS = 3600;
+
 interface FraudConfig {
   maxTransactionsPerHour: number;
   maxTransactionsPerMinute: number;
@@ -60,6 +65,7 @@ interface FraudConfig {
   highValueThreshold: number;
   newAccountDays: number;
   deviceFingerprintWindowMs: number;
+  ipGeolocationEnabled: boolean;
 }
 
 const defaultConfig: FraudConfig = {
@@ -87,6 +93,7 @@ const defaultConfig: FraudConfig = {
   highValueThreshold: parseFloat(process.env.FRAUD_HIGH_VALUE_THRESHOLD || '1000'),
   newAccountDays: parseInt(process.env.FRAUD_NEW_ACCOUNT_DAYS || '7'),
   deviceFingerprintWindowMs: parseInt(process.env.FRAUD_DEVICE_FINGERPRINT_WINDOW_MS || `${24 * 60 * 60 * 1000}`),
+  ipGeolocationEnabled: process.env.FRAUD_IP_GEOLOCATION_ENABLED === 'true',
 };
 
 export interface FraudTransactionInput {
@@ -168,21 +175,27 @@ export class FraudService {
 
   private async loadHighRiskNumbers(): Promise<void> {
     try {
-      // Load from Redis cache or database
-      const cached = await redisClient.get('fraud:high_risk_numbers');
+      const cached = await redisClient.get(HIGH_RISK_NUMBERS_CACHE_KEY);
       if (cached && typeof cached === 'string') {
         const numbers = JSON.parse(cached) as string[];
         this.highRiskNumbers = new Set(numbers);
         logger.info({ count: numbers.length }, 'Loaded high-risk phone numbers from cache');
-      } else {
-        // In production, load from database or external fraud intelligence
-        const sampleNumbers = [
-          '+1234567890', '+0987654321', '+5555555555'
-        ];
-        this.highRiskNumbers = new Set(sampleNumbers);
-        await redisClient.setex('fraud:high_risk_numbers', 3600, JSON.stringify(sampleNumbers));
-        logger.warn({ count: sampleNumbers.length }, 'Using default high-risk phone numbers; configure production fraud intelligence feed');
+        return;
       }
+
+      // Cache miss: load the authoritative list from the database. An empty
+      // table yields an empty set — never fall back to placeholder numbers.
+      const result = await queryRead<{ phone_number: string }>(
+        'SELECT phone_number FROM fraud_high_risk_numbers WHERE is_active = TRUE',
+      );
+      const numbers = result.rows.map((row) => row.phone_number);
+      this.highRiskNumbers = new Set(numbers);
+      await redisClient.setex(
+        HIGH_RISK_NUMBERS_CACHE_KEY,
+        HIGH_RISK_NUMBERS_CACHE_TTL_SECONDS,
+        JSON.stringify(numbers),
+      );
+      logger.info({ count: numbers.length }, 'Loaded high-risk phone numbers from database');
     } catch (error) {
       logger.error({ err: error }, 'Failed to load high risk numbers');
     }
@@ -197,19 +210,40 @@ export class FraudService {
     }
   }
 
-  private calculateDistance(
-    locationMetadata: { country: string; city: string; },
-    currentLocation: { lat: number; lng: number }
-  ): number {
-    // For now, return a placeholder distance
-    // In production, implement proper geolocation lookup
-    return 500; // km
+  /** Great-circle distance in km between two coordinates (Haversine formula). */
+  private calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const R = 6371; // Earth radius in km
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  /** Extract coordinates from stored location metadata (GeolocationService uses `lon`). */
+  private getMetadataCoordinates(metadata: unknown): Location | null {
+    if (!metadata || typeof metadata !== 'object') return null;
+    const m = metadata as { lat?: unknown; lng?: unknown; lon?: unknown };
+    const lat = Number(m.lat);
+    const lng = Number(m.lng ?? m.lon);
+    if (m.lat == null || (m.lng == null && m.lon == null)) return null;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
   }
 
   private async getIPLocation(ipAddress: string): Promise<{ lat: number; lng: number; country: string } | null> {
-    // In production, use a geolocation service like MaxMind or IP-API
-    // For now, return null to disable this check
-    return null;
+    // Feature-flagged so the provider integration can be rolled out independently.
+    if (!this.config.ipGeolocationEnabled) return null;
+
+    try {
+      const location = await geolocationService.lookup(ipAddress);
+      if (location.status !== 'resolved') return null;
+      return { lat: location.lat, lng: location.lon, country: location.country };
+    } catch (error) {
+      logger.error({ err: error }, 'IP geolocation lookup failed');
+      return null;
+    }
   }
 
   private isLocationMismatch(
@@ -400,13 +434,19 @@ export class FraudService {
     if (transactionInput.location) {
       const lastTxnWithLocation = sortedTxns.find(t => 
         t.locationMetadata && 
-        t.locationMetadata.status === 'resolved'
+        t.locationMetadata.status === 'resolved' &&
+        this.getMetadataCoordinates(t.locationMetadata) !== null
       );
-      
-      if (lastTxnWithLocation && lastTxnWithLocation.locationMetadata) {
+      const previousCoords = lastTxnWithLocation
+        ? this.getMetadataCoordinates(lastTxnWithLocation.locationMetadata)
+        : null;
+
+      if (lastTxnWithLocation && previousCoords) {
         const distance = this.calculateDistance(
-          lastTxnWithLocation.locationMetadata,
-          transactionInput.location
+          previousCoords.lat,
+          previousCoords.lng,
+          transactionInput.location.lat,
+          transactionInput.location.lng,
         );
         const timeDiff = now.getTime() - new Date(lastTxnWithLocation.createdAt).getTime();
 
@@ -761,7 +801,9 @@ export class FraudService {
   private blendScores(heuristicScore: number, mlScore?: number): number {
     if (mlScore === undefined) return heuristicScore;
     const threshold = Math.max(this.config.fraudScoreThreshold, 1);
-    return heuristicScore + mlScore * threshold * 0.3;
+    // Fraud scores live on a 0–100 scale; without a ceiling a high heuristic
+    // score plus a confident ML score can exceed 100 and skew risk bands.
+    return Math.min(100, heuristicScore + mlScore * threshold * 0.3);
   }
 
   /**

@@ -176,3 +176,98 @@ export interface BatchResult<T> {
   succeeded: number;
   failed: number;
 }
+
+/**
+ * Reconciliation operations runbook.
+ *
+ * Support staff use this reference to interpret reconciliation alerts and to
+ * investigate discrepancies safely. It is intentionally data-only: it never
+ * mutates financial state. Corrections and replays always go through the
+ * approval workflow described below.
+ */
+export interface ReconciliationRunbook {
+  /** Human-readable title of the runbook. */
+  title: string;
+  /** Meaning of each reconciliation alert type. */
+  alerts: ReconciliationAlertDoc[];
+  /** How to retrieve provider reconciliation reports. */
+  reportRetrieval: ReportRetrievalDoc;
+  /** Safe, read-only review actions support staff may take. */
+  reviewActions: ReviewActionDoc[];
+  /** Correction approval workflow. */
+  correctionApproval: CorrectionApprovalDoc;
+  /** Replay procedure for re-running reconciliation. */
+  replayProcedure: ReplayProcedureDoc;
+  /** Escalation ownership. */
+  escalation: EscalationDoc;
+}
+
+/** Documentation for a single reconciliation alert type. */
+export interface ReconciliationAlertDoc {
+  /** Alert identifier as emitted by the reconciliation job. */
+  alertType: string;
+  /** What the alert means in plain language. */
+  meaning: string;
+  /** Typical causes support staff should consider. */
+  likelyCauses: string[];
+  /** Safe first steps to investigate. */
+  firstSteps: string[];
+}
+
+/** How to retrieve provider reconciliation reports. */
+export interface ReportRetrievalDoc {
+  /** Where the provider reconciliation dashboard lives. */
+  dashboard: string;
+  /** Steps to export / download the provider report. */
+  steps: string[];
+  /** Notes on matching report periods to local reconciliation runs. */
+  notes: string[];
+}
+
+/** A safe, read-only review action. */
+export interface ReviewActionDoc {
+  /** Short name of the action. */
+  action: string;
+  /** What the action does and why it is safe. */
+  description: string;
+  /** Explicitly forbidden manual changes during investigation. */
+  forbidden: string[];
+}
+
+/** Correction approval workflow. */
+export interface CorrectionApprovalDoc {
+  /** Who must approve a correction. */
+  approvers: string[];
+  /** Evidence required before a correction is approved. */
+  requiredEvidence: string[];
+  /** Ordered steps of the approval workflow. */
+  steps: string[];
+}
+
+/** Replay procedure for re-running reconciliation. */
+export interface ReplayProcedureDoc {
+  /** Preconditions that must hold before replaying. */
+  preconditions: string[];
+  /** Ordered replay steps. */
+  steps: string[];
+  /** How to verify the replay succeeded. */
+  verification: string[];
+}
+
+/** Escalation ownership. */
+export interface EscalationDoc {
+  /** Owner responsible for each escalation tier. */
+  owners: EscalationOwner[];
+  /** When to escalate. */
+  triggers: string[];
+}
+
+/** A single escalation tier and its owner. */
+export interface EscalationOwner {
+  /** Tier name (e.g. "L1 support", "payments on-call"). */
+  tier: string;
+  /** Team or role that owns the tier. */
+  owner: string;
+  /** Response expectation for the tier. */
+  responsibility: string;
+}

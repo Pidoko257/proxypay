@@ -52,6 +52,140 @@ interface HorizonAccountResponse {
 }
 
 /**
+ * Canonical transaction statuses. Every status change must flow through
+ * {@link TransactionStatusWorkflowService} so the allowed-transition matrix is
+ * enforced in one place.
+ */
+export type TransactionStatus =
+  | "pending"
+  | "submitted"
+  | "confirmed"
+  | "failed"
+  | "reversed";
+
+/**
+ * Explicit allowed-transition matrix. A transition not listed here is rejected.
+ */
+export const ALLOWED_TRANSACTION_TRANSITIONS: Record<
+  TransactionStatus,
+  readonly TransactionStatus[]
+> = {
+  pending: ["submitted", "failed"],
+  submitted: ["confirmed", "failed"],
+  confirmed: ["reversed"],
+  failed: [],
+  reversed: [],
+};
+
+/**
+ * Where a status change originated. Recorded on every transition for audit.
+ */
+export type TransactionStatusSource =
+  | "api"
+  | "worker"
+  | "callback"
+  | "reconciliation"
+  | "reversal";
+
+/**
+ * Actor/source metadata attached to every status change.
+ */
+export interface TransactionStatusActor {
+  source: TransactionStatusSource;
+  actorId?: string;
+  reason?: string;
+}
+
+/**
+ * Audit event emitted for each applied (non-idempotent) transition.
+ */
+export interface TransactionStatusAuditEvent {
+  transactionId: string;
+  from: TransactionStatus;
+  to: TransactionStatus;
+  source: TransactionStatusSource;
+  actorId?: string;
+  reason?: string;
+  at: string;
+}
+
+export class InvalidTransactionTransitionError extends Error {
+  readonly from: TransactionStatus;
+  readonly to: TransactionStatus;
+
+  constructor(from: TransactionStatus, to: TransactionStatus) {
+    super(`Invalid transaction status transition: ${from} -> ${to}`);
+    this.name = "InvalidTransactionTransitionError";
+    this.from = from;
+    this.to = to;
+  }
+}
+
+/**
+ * Persistence boundary used by the workflow service. Implementations may be
+ * backed by PostgreSQL; the service itself stays storage-agnostic.
+ */
+export interface TransactionStatusStore {
+  getStatus(transactionId: string): Promise<TransactionStatus | null>;
+  setStatus(transactionId: string, status: TransactionStatus): Promise<void>;
+  recordAuditEvent(event: TransactionStatusAuditEvent): Promise<void>;
+}
+
+/**
+ * Single workflow boundary for transaction status changes. Enforces the
+ * allowed-transition matrix, records actor/source metadata, emits audit events,
+ * and treats repeated identical transitions as idempotent no-ops.
+ */
+export class TransactionStatusWorkflowService {
+  constructor(private readonly store: TransactionStatusStore) {}
+
+  static isTransitionAllowed(
+    from: TransactionStatus,
+    to: TransactionStatus,
+  ): boolean {
+    return ALLOWED_TRANSACTION_TRANSITIONS[from].includes(to);
+  }
+
+  async transition(
+    transactionId: string,
+    to: TransactionStatus,
+    actor: TransactionStatusActor,
+  ): Promise<{ status: TransactionStatus; changed: boolean }> {
+    const from = await this.store.getStatus(transactionId);
+    if (from === null) {
+      throw new Error(`Transaction not found: ${transactionId}`);
+    }
+
+    // Idempotency: repeating the current status is a safe no-op.
+    if (from === to) {
+      return { status: from, changed: false };
+    }
+
+    if (!TransactionStatusWorkflowService.isTransitionAllowed(from, to)) {
+      throw new InvalidTransactionTransitionError(from, to);
+    }
+
+    await this.store.setStatus(transactionId, to);
+    await this.store.recordAuditEvent({
+      transactionId,
+      from,
+      to,
+      source: actor.source,
+      actorId: actor.actorId,
+      reason: actor.reason,
+      at: new Date().toISOString(),
+    });
+
+    logger.info(
+      { transactionId, from, to, source: actor.source, actorId: actor.actorId },
+      "Transaction status transitioned",
+    );
+
+    return { status: to, changed: true };
+  }
+}
+
+/**
  * Resource estimates captured from a Soroban simulation before submission.
  */
 export interface SorobanResourceEstimate {

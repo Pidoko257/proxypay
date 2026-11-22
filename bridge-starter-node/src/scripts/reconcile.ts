@@ -9,10 +9,50 @@
  *   npm run reconcile            (one-shot)
  *   npm run reconcile:loop       (continuous)
  *
- * When multiple replicas run this script, a per-job distributed lease
- * (PostgreSQL advisory lock) ensures only one replica executes a given
- * reconciliation pass at a time. The lease is renewed while the job runs
- * and a fencing token guards against stale lock holders.
+ * ─── Reconciliation Operations Runbook ──────────────────────────────────────
+ *
+ * This script is the entry point support staff use to investigate
+ * reconciliation discrepancies. The runbook below documents the safe
+ * operational procedure. It is intentionally read-only: this script never
+ * mutates financial state.
+ *
+ * 1. Alert meanings
+ *    - "Mismatched" (⚠️): a payout exists on both sides but status and/or
+ *      amount differ. Usually a timing lag or a partial provider update.
+ *    - "Missing local" (❌): the provider reports a payout we have no local
+ *      record of. Investigate before creating anything.
+ *    - "Missing remote" (❌): we have a local payout the provider does not
+ *      report. Often a payout that has not settled yet, or a stale record.
+ *    - "Critical alert": any missing-local/missing-remote entry, or a
+ *      mismatch on amount. These require escalation (see step 6).
+ *
+ * 2. Retrieving provider reports
+ *    - Open the provider reconciliation dashboard and export the payout
+ *      report for the affected date range (CSV/JSON).
+ *    - Run this script (`npm run reconcile`) to produce the local report and
+ *      compare the two side by side. Do not edit the exported file.
+ *
+ * 3. Safe review actions (no financial state changes)
+ *    - Read the report output and the audit trail for the affected payout IDs.
+ *    - Cross-check amounts, statuses, and timestamps between local and remote.
+ *    - Annotate findings in the incident/ticket. Never edit payout records,
+ *      balances, or ledger entries by hand.
+ *
+ * 4. Correction approval workflow
+ *    - Any correction (creating a missing record, adjusting an amount) must be
+ *      proposed in the ticket with evidence: the provider report excerpt, the
+ *      local record, and the audit-trail entries.
+ *    - A second reviewer (finance/on-call owner) must approve before any
+ *      correction is applied through the supported correction path.
+ *
+ * 5. Replay procedure
+ *    - After a correction is approved and applied, re-run `npm run reconcile`
+ *      for the same window and confirm the entry now matches.
+ *    - Record the before/after report in the ticket.
+ *
+ * 6. Escalation ownership
+ *    - Unresolved critical alerts escalate to the on-call payments engineer,
+ *      who owns the correction and replay. Support owns documentation only.
  */
 
 import { reconcile } from "../services/reconciler";

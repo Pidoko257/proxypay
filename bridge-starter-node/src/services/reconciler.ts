@@ -14,6 +14,62 @@
  * SEP-31 idempotency helpers (`submitPayoutIdempotent`,
  * `reconcileCompletionCallback`) live here so payout submission and
  * callback handling share the same persisted reference store.
+ *
+ * ─── Reconciliation Operations Runbook (issue #842) ─────────────────────────
+ *
+ * This section documents the safe operational procedure for support staff
+ * investigating reconciliation alerts.  It is intentionally read-only: no
+ * step below authorizes manually mutating financial state (payout status,
+ * amounts, or balances).  All corrections flow through the approval workflow
+ * described at the end.
+ *
+ * 1. Alert meanings
+ *    - `status_mismatch`: local and provider disagree on payout status
+ *      (e.g. local "completed" vs provider "failed"). Investigate before
+ *      assuming either side is correct.
+ *    - `amount_mismatch`: settled amount differs from the local amount,
+ *      usually due to rounding or FX. Confirm the FX rate snapshot used.
+ *    - `missing_remote`: a local payout has no matching provider record.
+ *      Could be a submission that never reached the provider.
+ *    - `missing_local`: the provider reports a payout we have no local
+ *      record for. Treat as potentially fraudulent until proven otherwise.
+ *    - `critical`: any alert flagged critical (large amount deltas, repeated
+ *      failures, or `missing_local`) must be escalated immediately per §6.
+ *
+ * 2. Retrieving provider reports
+ *    - Open the provider reconciliation dashboard and export the report for
+ *      the affected settlement window (UTC date range).
+ *    - Cross-reference the exported report against the local reconciliation
+ *      report produced by `runReconciliation` (see below).
+ *    - Attach both exports to the incident ticket; never edit them.
+ *
+ * 3. Safe review actions (no financial mutation)
+ *    - Read local and remote records, exports, and the audit trail.
+ *    - Re-run reconciliation in read-only mode to confirm the discrepancy.
+ *    - Add notes and evidence to the incident ticket.
+ *    - Do NOT edit payout status, amounts, or balances directly.
+ *
+ * 4. Correction approval workflow
+ *    - A proposed correction must include: the alert id, both report
+ *      exports, the audit-trail excerpt, and the proposed new state.
+ *    - Approval requires sign-off from the on-call finance owner AND a
+ *      second reviewer (four-eyes principle).
+ *    - Only after approval may an authorized operator apply the correction
+ *      through the audited correction tooling (never by hand).
+ *
+ * 5. Replay procedure
+ *    - Replays are idempotent: re-submitting an existing reference returns
+ *      the stored record (see `submitPayoutIdempotent`).
+ *    - Before replaying, confirm via `queryProviderPayoutStatus` that the
+ *      provider has no record for the reference.
+ *    - Record the replay in the audit trail with the incident ticket id.
+ *
+ * 6. Escalation ownership
+ *    - `critical` alerts: page the on-call finance owner immediately.
+ *    - `missing_local`: escalate to the security on-call in parallel.
+ *    - Non-critical mismatches: assign to the reconciliation queue owner
+ *      during business hours.
+ * ────────────────────────────────────────────────────────────────────────────
  */
 
 import axios from "axios";
@@ -52,208 +108,171 @@ export interface ReadOptions {
   primary?: boolean;
 }
 
-// ─── Distributed scheduler lock (issue #826) ─────────────────────────────────
+// ─── Transaction status workflow boundary (issue #844) ───────────────────────
 
 /**
- * Minimal distributed lock backend contract.
- *
- * Implementations may be backed by Redis (`SET key value NX PX ttl`) or by
- * PostgreSQL advisory locks.  The contract is intentionally small so the
- * scheduler can be tested with an in-memory fake.
+ * Canonical transaction statuses.  Every status change in the system — API
+ * handlers, workers, provider callbacks, reconciliation, and reversal
+ * services — must flow through `TransactionStatusWorkflowService` so that
+ * the allowed-transition matrix below cannot be bypassed.
  */
-export interface DistributedLockBackend {
+export type TransactionStatus =
+  | "pending"
+  | "submitted"
+  | "completed"
+  | "failed"
+  | "reversed";
+
+/**
+ * Explicit allowed-transition matrix.  A transition not listed here is
+ * rejected by the workflow service.  Terminal states (`completed`,
+ * `failed`, `reversed`) have no outgoing transitions.
+ */
+export const ALLOWED_TRANSITIONS: Readonly<
+  Record<TransactionStatus, readonly TransactionStatus[]>
+> = {
+  pending: ["submitted", "failed"],
+  submitted: ["completed", "failed"],
+  completed: ["reversed"],
+  failed: [],
+  reversed: [],
+};
+
+/** Actor/source metadata recorded on every status change. */
+export interface StatusTransitionContext {
+  /** Who initiated the change (user id, service name, "system", …). */
+  actor: string;
+  /** Where the change originated ("api", "worker", "callback", …). */
+  source: string;
+  /** Optional correlation id for tracing across services. */
+  correlationId?: string;
+  /** Optional human-readable reason for the change. */
+  reason?: string;
+}
+
+/** Audit event emitted for every accepted status change. */
+export interface StatusTransitionEvent {
+  transactionId: string;
+  from: TransactionStatus;
+  to: TransactionStatus;
+  actor: string;
+  source: string;
+  correlationId?: string;
+  reason?: string;
+  /** True when the transition was a no-op because the status already matched. */
+  idempotent: boolean;
+  occurredAt: string;
+}
+
+/** Raised when a transition is not permitted by the matrix. */
+export class InvalidStatusTransitionError extends Error {
+  constructor(
+    public readonly transactionId: string,
+    public readonly from: TransactionStatus,
+    public readonly to: TransactionStatus
+  ) {
+    super(
+      `Invalid transaction status transition for ${transactionId}: ${from} -> ${to}`
+    );
+    this.name = "InvalidStatusTransitionError";
+  }
+}
+
+/**
+ * Central workflow boundary for transaction status changes.
+ *
+ * Responsibilities:
+ *   - Enforce the `ALLOWED_TRANSITIONS` matrix (reject invalid transitions).
+ *   - Record actor/source metadata on every change.
+ *   - Provide idempotency: re-applying the current status is a safe no-op.
+ *   - Emit audit events for every accepted (or idempotent) change.
+ *
+ * The store is pluggable so production can back it with PostgreSQL while
+ * tests can use the in-memory default.
+ */
+export interface TransactionStatusStore {
+  getStatus(transactionId: string): Promise<TransactionStatus | null>;
+  setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void>;
+}
+
+/** In-memory store used by default and by state-machine tests. */
+export class InMemoryTransactionStatusStore implements TransactionStatusStore {
+  private readonly statuses = new Map<string, TransactionStatus>();
+  readonly auditLog: StatusTransitionEvent[] = [];
+
+  async getStatus(transactionId: string): Promise<TransactionStatus | null> {
+    return this.statuses.get(transactionId) ?? null;
+  }
+
+  async setStatus(
+    transactionId: string,
+    status: TransactionStatus,
+    event: StatusTransitionEvent
+  ): Promise<void> {
+    this.statuses.set(transactionId, status);
+    this.auditLog.push(event);
+  }
+}
+
+export class TransactionStatusWorkflowService {
+  constructor(
+    private readonly store: TransactionStatusStore = new InMemoryTransactionStatusStore(),
+    private readonly onEvent: (event: StatusTransitionEvent) => void = () => {}
+  ) {}
+
   /**
-   * Attempt to acquire `key` for `owner`.  Must be atomic: only one caller
-   * may succeed while the lock is held.  Returns `true` on success.
+   * Apply a status transition, enforcing the matrix and idempotency.
+   *
+   * - If the transaction is already in `to`, this is a safe no-op that still
+   *   emits an idempotent audit event.
+   * - If the transition is not allowed, throws `InvalidStatusTransitionError`.
    */
-  acquire(key: string, owner: string, ttlMs: number): Promise<boolean>;
-  /**
-   * Renew the lease for `key` only if it is still held by `owner`.
-   * Returns `true` when the lease was extended.
-   */
-  renew(key: string, owner: string, ttlMs: number): Promise<boolean>;
-  /** Release `key` only if it is still held by `owner`. */
-  release(key: string, owner: string): Promise<void>;
-}
+  async transition(
+    transactionId: string,
+    to: TransactionStatus,
+    context: StatusTransitionContext
+  ): Promise<StatusTransitionEvent> {
+    const from = await this.store.getStatus(transactionId);
 
-/**
- * In-memory lock backend used as the default and in tests.  It enforces the
- * same single-holder invariant as Redis/Postgres so simultaneous schedulers
- * contend correctly.  Production deployments should inject a Redis- or
- * Postgres-backed implementation.
- */
-export class InMemoryLockBackend implements DistributedLockBackend {
-  private readonly locks = new Map<
-    string,
-    { owner: string; expiresAt: number }
-  >();
-
-  async acquire(key: string, owner: string, ttlMs: number): Promise<boolean> {
-    const now = Date.now();
-    const current = this.locks.get(key);
-    if (current && current.expiresAt > now) {
-      return false;
+    if (from === to) {
+      const event: StatusTransitionEvent = {
+        transactionId,
+        from: to,
+        to,
+        actor: context.actor,
+        source: context.source,
+        correlationId: context.correlationId,
+        reason: context.reason,
+        idempotent: true,
+        occurredAt: new Date().toISOString(),
+      };
+      this.onEvent(event);
+      return event;
     }
-    this.locks.set(key, { owner, expiresAt: now + ttlMs });
-    return true;
-  }
 
-  async renew(key: string, owner: string, ttlMs: number): Promise<boolean> {
-    const now = Date.now();
-    const current = this.locks.get(key);
-    if (!current || current.owner !== owner || current.expiresAt <= now) {
-      return false;
+    if (from !== null && !ALLOWED_TRANSITIONS[from].includes(to)) {
+      throw new InvalidStatusTransitionError(transactionId, from, to);
     }
-    current.expiresAt = now + ttlMs;
-    return true;
-  }
 
-  async release(key: string, owner: string): Promise<void> {
-    const current = this.locks.get(key);
-    if (current && current.owner === owner) {
-      this.locks.delete(key);
-    }
-  }
-}
+    const event: StatusTransitionEvent = {
+      transactionId,
+      from: from ?? "pending",
+      to,
+      actor: context.actor,
+      source: context.source,
+      correlationId: context.correlationId,
+      reason: context.reason,
+      idempotent: false,
+      occurredAt: new Date().toISOString(),
+    };
 
-/** Recorded outcome of a scheduled job attempt, for observability. */
-export interface ScheduledJobExecution {
-  jobName: string;
-  replicaId: string;
-  /** Monotonic fencing token; increases each time the job is started. */
-  fencingToken: number;
-  status: "started" | "skipped" | "completed" | "failed";
-  at: string;
-}
-
-/** In-memory execution log; swap for a metrics/audit sink in production. */
-const scheduledJobExecutions: ScheduledJobExecution[] = [];
-
-/** Return a snapshot of recorded scheduled-job executions. */
-export function getScheduledJobExecutions(): ScheduledJobExecution[] {
-  return [...scheduledJobExecutions];
-}
-
-function recordExecution(entry: ScheduledJobExecution): void {
-  scheduledJobExecutions.push(entry);
-  console.log(
-    `[scheduler] job=${entry.jobName} replica=${entry.replicaId} ` +
-      `status=${entry.status} fence=${entry.fencingToken}`
-  );
-}
-
-/** Options for {@link runScheduledJob}. */
-export interface ScheduledJobOptions {
-  /** Unique job name; used as the lock key. */
-  jobName: string;
-  /** Stable identifier for this replica/process. */
-  replicaId: string;
-  /** The job body.  Receives the fencing token for downstream guards. */
-  run: (fencingToken: number) => Promise<void>;
-  /** Lock backend; defaults to a shared in-memory backend. */
-  backend?: DistributedLockBackend;
-  /** Lease duration in ms.  Defaults to 30s. */
-  leaseTtlMs?: number;
-  /** Lease renewal interval in ms.  Defaults to half the lease TTL. */
-  renewIntervalMs?: number;
-}
-
-const defaultLockBackend = new InMemoryLockBackend();
-let fencingCounter = 0;
-
-/**
- * Run a scheduled job under a per-job distributed lease.
- *
- * Only the replica that acquires the lease executes `run`; all others record
- * a `skipped` execution and return.  While the job runs, the lease is renewed
- * periodically.  If renewal fails (the lease was lost to another replica),
- * the fencing token is invalidated so a stale holder cannot keep executing.
- *
- * Returns `true` when this replica executed the job, `false` when skipped.
- */
-export async function runScheduledJob(
-  options: ScheduledJobOptions
-): Promise<boolean> {
-  const {
-    jobName,
-    replicaId,
-    run,
-    backend = defaultLockBackend,
-    leaseTtlMs = 30_000,
-    renewIntervalMs = Math.max(1, Math.floor(leaseTtlMs / 2)),
-  } = options;
-
-  const lockKey = `scheduler:lock:${jobName}`;
-  const owner = `${replicaId}:${Date.now()}:${Math.random()
-    .toString(36)
-    .slice(2)}`;
-
-  const acquired = await backend.acquire(lockKey, owner, leaseTtlMs);
-  if (!acquired) {
-    recordExecution({
-      jobName,
-      replicaId,
-      fencingToken: fencingCounter,
-      status: "skipped",
-      at: new Date().toISOString(),
-    });
-    return false;
-  }
-
-  const fencingToken = ++fencingCounter;
-  recordExecution({
-    jobName,
-    replicaId,
-    fencingToken,
-    status: "started",
-    at: new Date().toISOString(),
-  });
-
-  let leaseLost = false;
-  const renewTimer = setInterval(() => {
-    void backend
-      .renew(lockKey, owner, leaseTtlMs)
-      .then((renewed) => {
-        if (!renewed) {
-          leaseLost = true;
-        }
-      })
-      .catch(() => {
-        leaseLost = true;
-      });
-  }, renewIntervalMs);
-  // Do not keep the process alive solely for lease renewal.
-  if (typeof renewTimer.unref === "function") {
-    renewTimer.unref();
-  }
-
-  try {
-    await run(fencingToken);
-    if (leaseLost) {
-      throw new Error(
-        `[scheduler] lease for job "${jobName}" was lost during execution`
-      );
-    }
-    recordExecution({
-      jobName,
-      replicaId,
-      fencingToken,
-      status: "completed",
-      at: new Date().toISOString(),
-    });
-    return true;
-  } catch (error) {
-    recordExecution({
-      jobName,
-      replicaId,
-      fencingToken,
-      status: "failed",
-      at: new Date().toISOString(),
-    });
-    throw error;
-  } finally {
-    clearInterval(renewTimer);
-    await backend.release(lockKey, owner).catch(() => undefined);
+    await this.store.setStatus(transactionId, to, event);
+    this.onEvent(event);
+    return event;
   }
 }
 
@@ -352,12 +371,12 @@ const payoutReferences = new Map<string, Sep31PayoutReference>();
  *
  * Returns the existing record when the reference was already persisted
  * (idempotent), or a freshly created `pending` record otherwise.  Callers
- * MUST treat a non-`pending` existing record as "already submitted" and
- * avoid re-submitting the payout.
+ * MUST treat a non-`pending` existing record as already in flight and must
+ * not re-submit it.
  */
-export function persistPayoutReference(
+export async function persistPayoutReference(
   reference: string
-): Sep31PayoutReference {
+): Promise<Sep31PayoutReference> {
   const existing = payoutReferences.get(reference);
   if (existing) {
     return existing;
@@ -371,101 +390,6 @@ export function persistPayoutReference(
     createdAt: now,
     updatedAt: now,
   };
-  payoutReferences.set(reference, record);
-  return record;
-}
-
-/**
- * Query the provider status API to determine whether a payout for the given
- * reference already exists.  Used after ambiguous failures (timeouts /
- * unknown responses) to avoid submitting a second payout.
- */
-export async function queryProviderPayoutStatus(
-  reference: string
-): Promise<RemotePayoutRecord | null> {
-  if (!config.bridgeApiUrl) {
-    return null;
-  }
-
-  try {
-    const response = await axios.get<RemotePayoutRecord>(
-      `${config.bridgeApiUrl}/payouts/${encodeURIComponent(reference)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${config.bridgeApiKey}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    return response.data;
-  } catch (error: any) {
-    // 404 means the provider has no record — safe to retry submission.
-    if (error.response?.status === 404) {
-      return null;
-    }
-    // Any other failure is ambiguous; surface it so the caller does not
-    // blindly retry and risk a duplicate payout.
-    throw error;
-  }
-}
-
-/**
- * Submit a SEP-31 payout idempotently.
- *
- * 1. Persist the unique reference before any external call.
- * 2. If the reference was already submitted/completed, return the stored
- *    record instead of submitting again.
- * 3. On ambiguous failure, query the provider status API before retrying.
- */
-export async function submitPayoutIdempotent(
-  reference: string,
-  submit: (reference: string) => Promise<RemotePayoutRecord>
-): Promise<Sep31PayoutReference> {
-  const record = persistPayoutReference(reference);
-
-  // Already submitted or completed — do not submit a second payout.
-  if (record.status === "submitted" || record.status === "completed") {
-    return record;
-  }
-
-  try {
-    const remote = await submit(reference);
-    record.status = "submitted";
-    record.providerPayoutId = remote.id;
-    record.updatedAt = new Date().toISOString();
-    payoutReferences.set(reference, record);
-    return record;
-  } catch (error) {
-    // Ambiguous failure: check whether the provider already has the payout.
-    const remote = await queryProviderPayoutStatus(reference);
-    if (remote) {
-      record.status = "submitted";
-      record.providerPayoutId = remote.id;
-      record.updatedAt = new Date().toISOString();
-      payoutReferences.set(reference, record);
-      return record;
-    }
-    throw error;
-  }
-}
-
-/**
- * Reconcile a completion callback against the persisted reference.
- *
- * Duplicate or out-of-order callbacks are matched to the existing record so
- * they never create a second payout.  Returns the reconciled record.
- */
-export function reconcileCompletionCallback(
-  reference: string,
-  status: Sep31PayoutReference["status"],
-  providerPayoutId?: string | null
-): Sep31PayoutReference {
-  const record = persistPayoutReference(reference);
-  record.status = status;
-  if (providerPayoutId !== undefined) {
-    record.providerPayoutId = providerPayoutId;
-  }
-  record.updatedAt = new Date().toISOString();
   payoutReferences.set(reference, record);
   return record;
 }

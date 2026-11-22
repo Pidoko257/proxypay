@@ -277,24 +277,6 @@ export function optionalAuthentication(
 export async function verifyTokenStateful(token: string, binding?: string): Promise<JWTPayload> {
   // Run standard cryptographic verification
   const decoded = verifyToken(token);
-  
-  // Fast Redis check to ensure token wasn't issued before a password change
-  if (redisClient.isOpen && decoded.userId && decoded.iat) {
-    const invalidatedAtRaw = await redisClient.get(`user:${decoded.userId}:jwt_invalidated_at`);
-    const invalidatedAt = invalidatedAtRaw ? String(invalidatedAtRaw) : null;
-    if (invalidatedAt && decoded.iat <= parseInt(invalidatedAt, 10)) {
-      throw new Error("Token has been revoked due to password change");
-    }
-  }
+ 
 
-  if (redisClient.isOpen && decoded.sessionId) {
-    const sessionRaw = await redisClient.get(`jwt:session:${decoded.sessionId}`);
-    if (!sessionRaw) throw new Error("Session has been revoked or expired");
-    const session = JSON.parse(sessionRaw) as { userId: string; binding?: string };
-    if (session.userId !== decoded.userId || (binding && session.binding !== binding)) {
-      throw new Error("Session binding validation failed");
-    }
-  }
-  
-  return decoded;
-}
+/* … truncated 943 chars — edit only what you need near the top … */

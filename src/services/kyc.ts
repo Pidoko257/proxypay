@@ -133,24 +133,29 @@ const UploadDocumentSchema = z.object({
 });
 
 export class KYCService {
-  private api: AxiosInstance;
+  private api?: AxiosInstance;
   private db: Pool;
   private readonly baseURL: string;
-  private readonly apiKey: string;
 
   constructor(db: Pool) {
     this.db = db;
     this.baseURL = process.env.KYC_API_URL || 'https://api.eu.onfido.com/v3.6';
-    this.apiKey = process.env.KYC_API_KEY || (process.env.NODE_ENV === 'test' ? 'test_key' : '');
+  }
 
-    if (!this.apiKey) {
+  private getApi(): AxiosInstance {
+    if (this.api) {
+      return this.api;
+    }
+
+    const apiKey = process.env.KYC_API_KEY || (process.env.NODE_ENV === 'test' ? 'test_key' : '');
+    if (!apiKey) {
       throw new Error('KYC_API_KEY environment variable is required');
     }
 
     this.api = axios.create({
       baseURL: this.baseURL,
       headers: {
-        'Authorization': `Token token=${this.apiKey}`,
+        'Authorization': `Token token=${apiKey}`,
         'Content-Type': 'application/json',
       },
       timeout: 30000,
@@ -172,6 +177,8 @@ export class KYCService {
         return Promise.reject(error);
       }
     );
+
+    return this.api;
   }
 
   /**
@@ -181,7 +188,7 @@ export class KYCService {
     try {
       const validatedData = CreateApplicantSchema.parse(applicantData);
       
-      const response = await this.api.post('/applicants', validatedData);
+      const response = await this.getApi().post('/applicants', validatedData);
       const applicant = response.data as KYCApplicant;
 
       // Store applicant reference in database
@@ -201,7 +208,7 @@ export class KYCService {
    */
   async getApplicant(applicantId: string): Promise<KYCApplicant> {
     try {
-      const response = await this.api.get(`/applicants/${applicantId}`);
+      const response = await this.getApi().get(`/applicants/${applicantId}`);
       return response.data as KYCApplicant;
     } catch (error) {
       throw new Error(`Failed to retrieve applicant: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -226,7 +233,7 @@ export class KYCService {
         // For now, we'll just send the metadata
       };
 
-      const response = await this.api.post('/documents', documentPayload);
+      const response = await this.getApi().post('/documents', documentPayload);
       return response.data;
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -246,7 +253,7 @@ export class KYCService {
         workflow_id: workflowId || process.env.KYC_DEFAULT_WORKFLOW_ID,
       };
 
-      const response = await this.api.post('/workflow_runs', workflowData);
+      const response = await this.getApi().post('/workflow_runs', workflowData);
       return response.data as WorkflowRun;
     } catch (error) {
       throw new Error(`Failed to create workflow run: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -258,7 +265,7 @@ export class KYCService {
    */
   async generateSDKToken(applicantId: string, applicationId: string): Promise<string> {
     try {
-      const response = await this.api.post('/sdk_token', {
+      const response = await this.getApi().post('/sdk_token', {
         applicant_id: applicantId,
         application_id: applicationId,
       });
@@ -280,11 +287,11 @@ export class KYCService {
   }> {
     try {
       // Get all checks for the applicant
-      const checksResponse = await this.api.get(`/checks?applicant_id=${applicantId}`);
+      const checksResponse = await this.getApi().get(`/checks?applicant_id=${applicantId}`);
       const checks = checksResponse.data.checks as KYCCheck[];
 
       // Get all reports for the applicant
-      const reportsResponse = await this.api.get(`/reports?applicant_id=${applicantId}`);
+      const reportsResponse = await this.getApi().get(`/reports?applicant_id=${applicantId}`);
       const reports = reportsResponse.data.reports as KYCReport[];
 
       // Determine overall status and KYC level

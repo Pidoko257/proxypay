@@ -5,6 +5,7 @@ export const SYNC_QUEUE_NAME = "accounting-sync";
 
 export interface SyncJobData {
   syncId: string;
+  userId: string;
   transactionId: string;
   platform: "quickbooks" | "xero";
   payload: {

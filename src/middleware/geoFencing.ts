@@ -1,5 +1,20 @@
 import { Request, Response, NextFunction } from "express";
+import axios from "axios";
 import geoip from "geoip-lite";
+
+interface GeoLocation {
+  country: string;
+  region?: string;
+  city?: string;
+  ll?: [number, number];
+}
+
+interface MaxMindCityResponse {
+  country?: { iso_code?: string };
+  subdivisions?: Array<{ iso_code?: string }>;
+  city?: { names?: { en?: string } };
+  location?: { latitude?: number; longitude?: number };
+}
 
 // Operational regions: African countries where mobile money services are supported
 const OPERATIONAL_REGIONS = new Set([
@@ -51,16 +66,65 @@ function extractClientIp(req: Request): string | null {
   return req.ip || req.socket.remoteAddress || null;
 }
 
+async function lookupGeoLocation(
+  clientIp: string,
+): Promise<GeoLocation | null> {
+  let staticGeo: ReturnType<typeof geoip.lookup> = null;
+  try {
+    staticGeo = geoip.lookup(clientIp);
+  } catch (error) {
+    console.warn("[GEOFENCE] Static GeoIP lookup failed:", error);
+  }
+
+  if (staticGeo?.country) {
+    return {
+      country: staticGeo.country,
+      region: staticGeo.region,
+      city: staticGeo.city,
+      ll: staticGeo.ll,
+    };
+  }
+
+  const accountId = process.env.MAXMIND_ACCOUNT_ID;
+  const licenseKey = process.env.MAXMIND_LICENSE_KEY;
+  if (!accountId || !licenseKey) {
+    return null;
+  }
+
+  const response = await axios.get<MaxMindCityResponse>(
+    `https://geoip.maxmind.com/geoip/v2.1/city/${encodeURIComponent(clientIp)}`,
+    {
+      auth: { username: accountId, password: licenseKey },
+      timeout: 5000,
+    },
+  );
+  const country = response.data.country?.iso_code;
+  if (!country) {
+    return null;
+  }
+
+  const { latitude, longitude } = response.data.location ?? {};
+  return {
+    country,
+    region: response.data.subdivisions?.[0]?.iso_code,
+    city: response.data.city?.names?.en,
+    ll:
+      latitude !== undefined && longitude !== undefined
+        ? [latitude, longitude]
+        : undefined,
+  };
+}
+
 /**
  * IP Geofencing Middleware
  * Validates that transactions originate from operational regions
  * and blocks requests from sanctioned jurisdictions
  */
-export function geoFencingMiddleware(
+export async function geoFencingMiddleware(
   req: Request,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   const clientIp = extractClientIp(req);
 
   if (!clientIp) {
@@ -84,19 +148,22 @@ export function geoFencingMiddleware(
     return;
   }
 
-  const geo = geoip.lookup(clientIp);
+  let geo: GeoLocation | null;
+  try {
+    geo = await lookupGeoLocation(clientIp);
+  } catch (error) {
+    console.warn(
+      `[GEOFENCE] GeoIP lookup failed for IP: ${clientIp}; allowing request`,
+      error,
+    );
+    next();
+    return;
+  }
 
-  if (!geo || !geo.country) {
-    // Unable to determine location - fail closed in production
-    if (process.env.NODE_ENV === "production") {
-      console.warn(`[GEOFENCE] Unable to determine location for IP: ${clientIp}`);
-      res.status(403).json({
-        error: "Forbidden",
-        message: "Unable to verify geographic location",
-      });
-      return;
-    }
-    // Fail open in non-production
+  if (!geo) {
+    console.warn(
+      `[GEOFENCE] Unable to determine location for IP: ${clientIp}; allowing request`,
+    );
     next();
     return;
   }

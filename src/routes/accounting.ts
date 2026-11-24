@@ -6,6 +6,7 @@ import {
   getSyncQueueStats,
 } from "../queue/syncQueue";
 import { authenticateToken } from "../middleware/auth";
+import { requirePermission } from "../middleware/rbac";
 
 export const accountingRoutes = Router();
 
@@ -42,6 +43,7 @@ accountingRoutes.post("/sync", async (req: Request, res: Response) => {
   try {
     const job = await addSyncJob({
       syncId,
+      userId: req.jwtUser!.userId,
       transactionId,
       platform,
       payload,
@@ -67,18 +69,22 @@ accountingRoutes.post("/sync", async (req: Request, res: Response) => {
  * GET /api/accounting/sync/stats
  * Retrieves sync queue statistics
  */
-accountingRoutes.get("/sync/stats", async (_req: Request, res: Response) => {
-  try {
-    const stats = await getSyncQueueStats();
-    return res.json(stats);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return res.status(500).json({
-      error: "Failed to fetch sync queue stats",
-      message,
-    });
-  }
-});
+accountingRoutes.get(
+  "/sync/stats",
+  requirePermission("admin:system"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stats = await getSyncQueueStats();
+      return res.json(stats);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        error: "Failed to fetch sync queue stats",
+        message,
+      });
+    }
+  },
+);
 
 /**
  * GET /api/accounting/sync/:jobId
@@ -91,6 +97,10 @@ accountingRoutes.get("/sync/:jobId", async (req: Request, res: Response) => {
     const job = await getSyncJobById(jobId);
 
     if (!job) {
+      return res.status(404).json({ error: `Sync job not found: ${jobId}` });
+    }
+
+    if (job.data.userId !== req.jwtUser?.userId) {
       return res.status(404).json({ error: `Sync job not found: ${jobId}` });
     }
 

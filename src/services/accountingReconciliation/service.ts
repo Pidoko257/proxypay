@@ -10,6 +10,7 @@ import {
 } from "./model";
 import logger from "../../utils/logger";
 import axios from "axios";
+import { isRoundingError, getRoundingError, ROUNDING_TOLERANCE } from "../../utils/roundingTolerance";
 
 export class AccountingChartOfAccountsReconciliationService {
   private ledgerService: LedgerService;
@@ -277,7 +278,10 @@ export class AccountingChartOfAccountsReconciliationService {
         // Check for balance mismatch (if both have balances)
         if (externalAccount.balance !== undefined) {
           const internalBalance = internalAccount.debit_balance - internalAccount.credit_balance;
-          if (Math.abs(internalBalance - externalAccount.balance) > 0.01) {
+          const difference = internalBalance - externalAccount.balance;
+          
+          if (Math.abs(difference) > ROUNDING_TOLERANCE) {
+            // Difference exceeds tolerance - it's a real discrepancy
             discrepancies.push({
               internalAccountCode: internalAccount.account_code,
               internalAccountName: internalAccount.account_name,
@@ -289,6 +293,22 @@ export class AccountingChartOfAccountsReconciliationService {
               internalValue: internalBalance.toString(),
               externalValue: externalAccount.balance.toString(),
               reviewStatus: AccountingReviewStatus.Pending,
+            });
+          } else if (isRoundingError(externalAccount.balance, internalBalance)) {
+            // Difference is within tolerance - classify as rounding error
+            const roundingErrorAmount = getRoundingError(externalAccount.balance, internalBalance);
+            discrepancies.push({
+              internalAccountCode: internalAccount.account_code,
+              internalAccountName: internalAccount.account_name,
+              internalAccountType: internalAccount.account_type,
+              externalAccountId: externalAccount.id,
+              externalAccountName: externalAccount.name,
+              externalAccountType: externalAccount.type,
+              type: AccountingDiscrepancyType.RoundingError,
+              internalValue: internalBalance.toString(),
+              externalValue: externalAccount.balance.toString(),
+              reviewStatus: AccountingReviewStatus.Pending,
+              roundingErrorAmount: roundingErrorAmount,
             });
           }
         }
@@ -379,6 +399,7 @@ export class AccountingChartOfAccountsReconciliationService {
       total_name_mismatch: typeCounts[AccountingDiscrepancyType.AccountNameMismatch] || 0,
       total_type_mismatch: typeCounts[AccountingDiscrepancyType.AccountTypeMismatch] || 0,
       total_balance_mismatch: typeCounts[AccountingDiscrepancyType.BalanceMismatch] || 0,
+      total_rounding_errors: typeCounts[AccountingDiscrepancyType.RoundingError] || 0,
     };
 
     return { discrepancies, summary };
@@ -485,5 +506,140 @@ export class AccountingChartOfAccountsReconciliationService {
    */
   async resolveDiscrepancy(id: string, notes: string, reviewedBy: string): Promise<void> {
     await this.reconModel.resolveDiscrepancy(id, notes, reviewedBy);
+  }
+
+  /**
+   * Create automatic adjustment entries for rounding errors
+   * Generates balanced ledger entries to correct penny differences
+   * 
+   * @param discrepancy - The rounding error discrepancy to adjust
+   * @param reportId - Report ID for reference tracking
+   * @returns The created ledger entry ID, or null if no adjustment needed
+   * 
+   * @example
+   * // If internal balance is 100.00 and external is 100.01
+   * // This creates an entry that credits the internal account by 0.01
+   */
+  async createRoundingErrorAdjustment(
+    discrepancy: AccountingChartOfAccountsReconciliationDiscrepancy,
+    reportId: string
+  ): Promise<string | null> {
+    if (discrepancy.type !== AccountingDiscrepancyType.RoundingError) {
+      throw new Error("Can only create adjustments for rounding error discrepancies");
+    }
+
+    if (!discrepancy.roundingErrorAmount || discrepancy.roundingErrorAmount === 0) {
+      logger.warn(`No rounding error amount for discrepancy ${discrepancy.id}`);
+      return null;
+    }
+
+    if (!discrepancy.internalAccountCode) {
+      throw new Error("Internal account code required for rounding error adjustment");
+    }
+
+    try {
+      const referenceNumber = `ROUNDING-ADJ-${discrepancy.id}`;
+      const roundingErrorAmount = Math.abs(discrepancy.roundingErrorAmount);
+
+      // Determine debit/credit based on the sign of the rounding error
+      // If rounding error is positive (internal < external), credit the internal account
+      // If rounding error is negative (internal > external), debit the internal account
+      const isCreditAdjustment = discrepancy.roundingErrorAmount > 0;
+
+      const entries = [
+        {
+          account_code: discrepancy.internalAccountCode,
+          debit_amount: isCreditAdjustment ? 0 : roundingErrorAmount,
+          credit_amount: isCreditAdjustment ? roundingErrorAmount : 0,
+          description: `Rounding adjustment for ${discrepancy.internalAccountName}`,
+          metadata: {
+            type: "rounding_error_adjustment",
+            discrepancyId: discrepancy.id,
+            reportId: reportId,
+            externalAccountId: discrepancy.externalAccountId,
+          },
+        },
+        {
+          // Rounding variance account (typically used for materiality reconciliations)
+          account_code: "9999", // This would typically be a "Rounding Variance" account
+          debit_amount: isCreditAdjustment ? roundingErrorAmount : 0,
+          credit_amount: isCreditAdjustment ? 0 : roundingErrorAmount,
+          description: `Rounding variance adjustment - ${discrepancy.internalAccountName}`,
+          metadata: {
+            type: "rounding_variance",
+            discrepancyId: discrepancy.id,
+            reportId: reportId,
+          },
+        },
+      ];
+
+      const postedEntries = await this.ledgerService.postTransaction(
+        referenceNumber,
+        `Automatic rounding error adjustment for discrepancy ${discrepancy.id}`,
+        entries,
+        null, // transactionId
+        "SYSTEM" // postedBy
+      );
+
+      logger.info(`Created rounding adjustment entries for discrepancy ${discrepancy.id}`, {
+        referenceNumber,
+        amount: roundingErrorAmount,
+        entryCount: postedEntries.length,
+      });
+
+      return referenceNumber;
+    } catch (error) {
+      logger.error(
+        error,
+        `Failed to create rounding error adjustment for discrepancy ${discrepancy.id}`
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Batch create adjustment entries for all rounding errors in a report
+   * 
+   * @param reportId - Report ID containing the rounding errors
+   * @returns Array of created adjustment references and any errors encountered
+   */
+  async createAllRoundingErrorAdjustments(
+    reportId: string
+  ): Promise<{
+    successful: string[];
+    failed: Array<{ discrepancyId: string; error: string }>;
+  }> {
+    const discrepancies = await this.reconModel.getDiscrepanciesByReportId(reportId);
+    const roundingErrors = discrepancies.filter(
+      (d) => d.type === AccountingDiscrepancyType.RoundingError
+    );
+
+    const results = {
+      successful: [] as string[],
+      failed: [] as Array<{ discrepancyId: string; error: string }>,
+    };
+
+    for (const error of roundingErrors) {
+      try {
+        const adjustmentRef = await this.createRoundingErrorAdjustment(error, reportId);
+        if (adjustmentRef) {
+          results.successful.push(adjustmentRef);
+          // Update discrepancy to mark adjustment as created
+          await this.reconModel.updateDiscrepancyAdjustment(error.id, adjustmentRef);
+        }
+      } catch (err) {
+        results.failed.push({
+          discrepancyId: error.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+
+    logger.info(`Rounding error adjustment batch complete for report ${reportId}`, {
+      successful: results.successful.length,
+      failed: results.failed.length,
+    });
+
+    return results;
   }
 }

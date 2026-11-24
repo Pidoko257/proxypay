@@ -1,5 +1,10 @@
 import { pool, queryRead, queryWrite } from "../config/database";
 import { encrypt, decrypt } from "../utils/encryption";
+import {
+  PaginationError,
+  createPaginatedResponse,
+  decodeCursor,
+} from "../utils/pagination";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +32,7 @@ export interface Dispute {
   slaDueDate: Date | null;
   slaWarningSent: boolean;
   internalNotes: string | null;
+  lastAutoEscalatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -74,6 +80,48 @@ export interface DisputeWithNotes extends Dispute {
   notes: DisputeNote[];
 }
 
+/** Ordering supported by the paginated dispute notes endpoint. */
+export type DisputeNoteSort = "date" | "relevance";
+
+export interface DisputeNotePageOptions {
+  /** Page size. Defaults to 50, clamped to 1..100. */
+  limit?: number;
+  /** Opaque cursor returned by a previous page. */
+  cursor?: string;
+  /**
+   * `date` (default) returns newest notes first. `relevance` ranks notes
+   * written by the assigned agent first, then falls back to newest first.
+   */
+  sort?: DisputeNoteSort;
+}
+
+export interface DisputeNotePage {
+  data: DisputeNote[];
+  pagination: {
+    limit: number;
+    nextCursor: string | null;
+    prevCursor: string | null;
+    hasMore: boolean;
+    sort: DisputeNoteSort;
+  };
+}
+
+const DEFAULT_NOTE_PAGE_SIZE = 50;
+const MAX_NOTE_PAGE_SIZE = 100;
+
+/**
+ * Row shape returned by the paginated notes query — a note plus the columns
+ * used by the `relevance` ordering.
+ */
+type NotePageRow = DisputeNote & {
+  assignedTo?: string | null;
+  relevanceRank?: number;
+};
+
+/** Notes written by the assigned agent rank first under `relevance`. */
+const NOTE_RELEVANCE_RANK =
+  "CASE WHEN d.assigned_to IS NOT NULL AND n.author = d.assigned_to THEN 1 ELSE 0 END";
+
 export interface DisputeReportRow {
   status: DisputeStatus;
   count: string;
@@ -103,6 +151,11 @@ export interface ReportFilter {
   assignedTo?: string;
 }
 
+export interface AgentWorkload {
+  agentName: string;
+  activeDisputeCount: number;
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -126,14 +179,15 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"`,
       [
-        input.transactionId, 
-        input.reason, 
+        input.transactionId,
+        input.reason,
         input.reportedBy ?? null,
-        input.priority ?? 'medium',
-        input.category ?? null
+        input.priority ?? "medium",
+        input.category ?? null,
       ],
     );
     const row = result.rows[0];
@@ -160,6 +214,7 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"
        FROM disputes
@@ -191,6 +246,7 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"
        FROM disputes
@@ -227,8 +283,102 @@ export class DisputeModel {
     };
   }
 
+  /**
+   * Fetch one page of a dispute's notes using cursor pagination.
+   *
+   * Large disputes can collect thousands of notes, so the page is bounded in
+   * SQL and never materialises the whole thread in memory (issue #622).
+   *
+   * @throws {PaginationError} when the supplied cursor is malformed.
+   */
+  async findNotesPage(
+    disputeId: string,
+    options: DisputeNotePageOptions = {},
+  ): Promise<DisputeNotePage> {
+    const sort: DisputeNoteSort =
+      options.sort === "relevance" ? "relevance" : "date";
+    const limit = Math.min(
+      Math.max(options.limit ?? DEFAULT_NOTE_PAGE_SIZE, 1),
+      MAX_NOTE_PAGE_SIZE,
+    );
+
+    const params: unknown[] = [disputeId];
+    let cursorClause = "";
+
+    if (options.cursor) {
+      const { t, id } = decodeCursor(options.cursor);
+
+      if (sort === "relevance") {
+        const [rawRank, timestamp] = t.split("|");
+        if (!timestamp) {
+          throw new PaginationError("Invalid cursor");
+        }
+        params.push(rawRank === "1" ? 1 : 0, timestamp, id);
+        cursorClause = `AND (${NOTE_RELEVANCE_RANK}, n.created_at, n.id) < ($${params.length - 2}, $${params.length - 1}, $${params.length})`;
+      } else {
+        params.push(t, id);
+        cursorClause = `AND (n.created_at, n.id) < ($${params.length - 1}, $${params.length})`;
+      }
+    }
+
+    params.push(limit + 1);
+
+    const relevanceSelect =
+      sort === "relevance" ? `${NOTE_RELEVANCE_RANK} AS "relevanceRank",` : "";
+    const orderBy =
+      sort === "relevance"
+        ? `"relevanceRank" DESC, n.created_at DESC, n.id DESC`
+        : `n.created_at DESC, n.id DESC`;
+
+    const result = await queryRead<Record<string, unknown>>(
+      `SELECT
+         n.id,
+         n.dispute_id  AS "disputeId",
+         n.author,
+         n.note,
+         n.created_at  AS "createdAt",
+         ${relevanceSelect}
+         d.assigned_to AS "assignedTo"
+       FROM dispute_notes n
+       JOIN disputes d ON d.id = n.dispute_id
+       WHERE n.dispute_id = $1
+         ${cursorClause}
+       ORDER BY ${orderBy}
+       LIMIT $${params.length}`,
+      params,
+    );
+
+    const rows: NotePageRow[] = result.rows.map((row) => ({
+      ...(row as unknown as NotePageRow),
+      note: decrypt(String(row.note ?? "")) || "",
+    }));
+
+    const page = createPaginatedResponse<NotePageRow>({
+      rows,
+      limit,
+      getSortValue: (row) =>
+        sort === "relevance"
+          ? `${row.relevanceRank ?? 0}|${new Date(row.createdAt).toISOString()}`
+          : row.createdAt,
+      getId: (row) => row.id,
+    });
+
+    return {
+      data: page.data.map((row) => ({
+        id: row.id,
+        disputeId: row.disputeId,
+        author: row.author,
+        note: row.note,
+        createdAt: row.createdAt,
+      })),
+      pagination: { ...page.pagination, sort },
+    };
+  }
+
   /** Find a dispute with all details (notes, evidence, timeline). */
-  async findByIdWithDetails(disputeId: string): Promise<DisputeWithDetails | null> {
+  async findByIdWithDetails(
+    disputeId: string,
+  ): Promise<DisputeWithDetails | null> {
     const dispute = await this.findByIdWithNotes(disputeId);
     if (!dispute) return null;
 
@@ -294,6 +444,7 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"
        FROM disputes
@@ -343,12 +494,12 @@ export class DisputeModel {
     }
 
     if (setParts.length === 0) {
-      throw new Error('No fields to update');
+      throw new Error("No fields to update");
     }
 
     const result = await queryWrite<Dispute>(
       `UPDATE disputes
-       SET ${setParts.join(', ')}
+       SET ${setParts.join(", ")}
        WHERE id = $1
        RETURNING
          id,
@@ -363,6 +514,7 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"`,
       params,
@@ -394,6 +546,7 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"`,
       [disputeId, agentName],
@@ -431,7 +584,16 @@ export class DisputeModel {
          uploaded_by   AS "uploadedBy",
          description,
          created_at    AS "createdAt"`,
-      [disputeId, fileName, fileType, fileSize, s3Key, s3Url, uploadedBy, description ?? null],
+      [
+        disputeId,
+        fileName,
+        fileType,
+        fileSize,
+        s3Key,
+        s3Url,
+        uploadedBy,
+        description ?? null,
+      ],
     );
     return result.rows[0];
   }
@@ -474,6 +636,7 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"
        FROM disputes
@@ -509,6 +672,7 @@ export class DisputeModel {
          sla_due_date    AS "slaDueDate",
          sla_warning_sent AS "slaWarningSent",
          internal_notes  AS "internalNotes",
+         last_auto_escalated_at AS "lastAutoEscalatedAt",
          created_at      AS "createdAt",
          updated_at      AS "updatedAt"
        FROM disputes
@@ -517,6 +681,43 @@ export class DisputeModel {
          AND sla_due_date < NOW()`,
     );
     return result.rows;
+  }
+
+  /** Add a timeline event to a dispute. */
+  async addTimelineEvent(
+    disputeId: string,
+    eventType: string,
+    actor: string,
+    description?: string,
+    oldStatus?: string,
+    newStatus?: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<DisputeTimelineEvent> {
+    const result = await queryWrite<DisputeTimelineEvent>(
+      `INSERT INTO dispute_timeline
+         (dispute_id, event_type, actor, description, old_status, new_status, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING
+         id,
+         dispute_id  AS "disputeId",
+         event_type  AS "eventType",
+         old_status  AS "oldStatus",
+         new_status  AS "newStatus",
+         actor,
+         description,
+         metadata,
+         created_at  AS "createdAt"`,
+      [
+        disputeId,
+        eventType,
+        actor,
+        description ?? null,
+        oldStatus ?? null,
+        newStatus ?? null,
+        metadata ? JSON.stringify(metadata) : null,
+      ],
+    );
+    return result.rows[0];
   }
 
   /** Add a note/comment to a dispute. */
@@ -584,5 +785,161 @@ export class DisputeModel {
     );
 
     return result.rows;
+  }
+
+  // ---------------------------------------------------------------------------
+  // #413 Evidence Organisation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Update the category field on a single evidence item.
+   * Returns null if the evidence item does not belong to the dispute.
+   */
+  async updateEvidenceCategory(
+    evidenceId: string,
+    disputeId: string,
+    category: string,
+  ): Promise<DisputeEvidence | null> {
+    const result = await queryWrite<DisputeEvidence>(
+      `UPDATE dispute_evidence
+          SET category   = $3,
+              updated_at = NOW()
+        WHERE id         = $1
+          AND dispute_id = $2
+        RETURNING
+          id,
+          dispute_id    AS "disputeId",
+          file_name     AS "fileName",
+          file_type     AS "fileType",
+          file_size     AS "fileSize",
+          s3_key        AS "s3Key",
+          s3_url        AS "s3Url",
+          uploaded_by   AS "uploadedBy",
+          description,
+          category,
+          created_at    AS "createdAt"`,
+      [evidenceId, disputeId, category],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * Update the display_order of multiple evidence items in a single transaction.
+   * Returns the number of rows updated.
+   */
+  async reorderEvidence(
+    disputeId: string,
+    order: Array<{ id: string; position: number }>,
+  ): Promise<number> {
+    let updated = 0;
+    for (const item of order) {
+      const result = await queryWrite(
+        `UPDATE dispute_evidence
+            SET display_order = $3,
+                updated_at    = NOW()
+          WHERE id            = $1
+            AND dispute_id    = $2`,
+        [item.id, disputeId, item.position],
+      );
+      updated += result.rowCount ?? 0;
+    }
+    return updated;
+  }
+
+  /**
+   * Search evidence by keyword (file name, description) and optional category.
+   */
+  async searchEvidence(
+    disputeId: string,
+    query: string,
+    category?: string,
+  ): Promise<DisputeEvidence[]> {
+    const conditions: string[] = ["dispute_id = $1"];
+    const params: unknown[] = [disputeId];
+    let p = 2;
+
+    if (query) {
+      conditions.push(`(file_name ILIKE $${p} OR description ILIKE $${p})`);
+      params.push(`%${query}%`);
+      p++;
+    }
+
+    if (category) {
+      conditions.push(`category = $${p++}`);
+      params.push(category);
+    }
+
+    const where = conditions.join(" AND ");
+
+    const result = await queryRead<DisputeEvidence>(
+      `SELECT
+         id,
+         dispute_id    AS "disputeId",
+         file_name     AS "fileName",
+         file_type     AS "fileType",
+         file_size     AS "fileSize",
+         s3_key        AS "s3Key",
+         s3_url        AS "s3Url",
+         uploaded_by   AS "uploadedBy",
+         description,
+         category,
+         created_at    AS "createdAt"
+       FROM dispute_evidence
+       WHERE ${where}
+       ORDER BY COALESCE(display_order, 0) ASC, created_at ASC`,
+      params,
+    );
+    return result.rows;
+  }
+
+  /**
+   * Return active dispute counts per agent, ordered by workload ascending.
+   * Only disputes in 'open' or 'investigating' status are counted.
+   */
+  async getAgentWorkload(): Promise<AgentWorkload[]> {
+    const result = await queryRead<{ agentName: string; activeDisputeCount: string }>(
+      `SELECT assigned_to AS "agentName", COUNT(*) AS "activeDisputeCount"
+       FROM disputes
+       WHERE assigned_to IS NOT NULL
+         AND status IN ('open', 'investigating')
+       GROUP BY assigned_to
+       ORDER BY "activeDisputeCount" ASC`,
+    );
+    return result.rows.map(row => ({
+      agentName: row.agentName,
+      activeDisputeCount: parseInt(row.activeDisputeCount, 10),
+    }));
+  }
+
+  /**
+   * Find the agent with the fewest active disputes from a given list.
+   * Returns null if none of the provided agents have any workload data
+   * and the workload table is empty.
+   *
+   * @param availableAgents  List of agent identifiers to consider.
+   */
+  async findLeastLoadedAgent(availableAgents: string[]): Promise<string | null> {
+    if (availableAgents.length === 0) return null;
+
+    const workloads = await this.getAgentWorkload();
+
+    // Build a map of agentName → activeDisputeCount for quick lookup
+    const workloadMap = new Map<string, number>(
+      workloads.map(w => [w.agentName, w.activeDisputeCount]),
+    );
+
+    // Assign 0 to agents not yet in the workload table
+    let leastLoaded: string | null = null;
+    let lowestCount = Infinity;
+
+    for (const agent of availableAgents) {
+      const count = workloadMap.get(agent) ?? 0;
+      if (count < lowestCount) {
+        lowestCount = count;
+        leastLoaded = agent;
+      }
+    }
+
+    return leastLoaded;
   }
 }

@@ -31,9 +31,14 @@ import {
   DisputeStatus,
   DisputePriority,
   ReportFilter,
+  DisputeNotePage,
+  DisputeNotePageOptions,
 } from "../models/dispute";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
+import { DisputeTimelineService } from "./disputeTimeline";
 import logger from "../utils/logger";
+import { notificationRouter } from "./notificationRouter";
+import { TransactionReversalService } from "./transactionReversalService";
 
 // ---------------------------------------------------------------------------
 // Allowed status transitions
@@ -74,9 +79,6 @@ interface NotificationPayload {
 }
 
 async function sendNotification(payload: NotificationPayload): Promise<void> {
-  // Import notification router service for proper multi-channel delivery
-  const { notificationRouter } = await import("./notificationRouter.js");
-  
   try {
     // Use notification router to send via email, SMS, webhook as configured
     await notificationRouter.sendDisputeNotification({
@@ -87,7 +89,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
       message: payload.message,
       metadata: payload.metadata,
     });
-    
+
     logger.info(
       {
         event: payload.event,
@@ -95,7 +97,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
         transactionId: payload.transactionId,
         status: payload.status,
       },
-      'Dispute notification sent'
+      "Dispute notification sent",
     );
   } catch (error) {
     logger.error(
@@ -104,7 +106,7 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
         disputeId: payload.disputeId,
         event: payload.event,
       },
-      'Failed to send dispute notification'
+      "Failed to send dispute notification",
     );
   }
 }
@@ -116,6 +118,9 @@ async function sendNotification(payload: NotificationPayload): Promise<void> {
 export class DisputeService {
   private disputeModel = new DisputeModel();
   private transactionModel = new TransactionModel();
+  private reversalService = new TransactionReversalService(
+    this.transactionModel,
+  );
 
   /**
    * Open a new dispute for a transaction.
@@ -172,6 +177,19 @@ export class DisputeService {
       TransactionStatus.Dispute,
     );
 
+    // Record opening event on the timeline
+    await this.timelineService.addEvent(
+      dispute.id,
+      "opened",
+      reportedBy ?? "system",
+      `Dispute opened for transaction ${transactionId}`,
+      undefined,
+      "open",
+      { reason, priority: dispute.priority, category },
+    ).catch((err) =>
+      logger.error({ err, disputeId: dispute.id }, "Failed to add opened timeline event"),
+    );
+
     sendNotification({
       event: "dispute.opened",
       disputeId: dispute.id,
@@ -193,6 +211,24 @@ export class DisputeService {
       throw new Error(`Dispute ${disputeId} not found`);
     }
     return dispute;
+  }
+
+  /**
+   * Fetch one page of a dispute's notes (cursor paginated).
+   *
+   * Kept separate from {@link getDispute} so large note threads are paged
+   * instead of being loaded in full (issue #622).
+   */
+  async getNotesPage(
+    disputeId: string,
+    options: DisputeNotePageOptions = {},
+  ): Promise<DisputeNotePage> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+
+    return this.disputeModel.findNotesPage(disputeId, options);
   }
 
   /**
@@ -247,6 +283,21 @@ export class DisputeService {
       assignedTo,
     });
 
+    // Record status change on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      "status_changed",
+      assignedTo ?? "system",
+      resolution
+        ? `Status changed to "${newStatus}": ${resolution}`
+        : `Status changed to "${newStatus}"`,
+      dispute.status,
+      newStatus,
+      { resolution, assignedTo },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add status_changed timeline event"),
+    );
+
     sendNotification({
       event: `dispute.${newStatus}`,
       disputeId: updated.id,
@@ -284,11 +335,16 @@ export class DisputeService {
 
     const nextDisputeStatus: DisputeStatus =
       action === "reverse" ? "reversed" : "upheld";
-    const nextTransactionStatus =
-      action === "reverse"
-        ? TransactionStatus.Reversed
-        : TransactionStatus.Completed;
     const trimmedResolution = resolution.trim();
+
+    if (action === "reverse") {
+      await this.reversalService.reverse(
+        dispute.transactionId,
+        trimmedResolution,
+        adminId,
+        { allowCompleted: true },
+      );
+    }
 
     const updated = await this.disputeModel.update(disputeId, {
       status: nextDisputeStatus,
@@ -296,15 +352,35 @@ export class DisputeService {
       assignedTo: adminId,
     });
 
-    await this.transactionModel.updateStatus(
-      dispute.transactionId,
-      nextTransactionStatus,
-    );
+    const nextTransactionStatus =
+      action === "reverse"
+        ? TransactionStatus.Reversed
+        : TransactionStatus.Completed;
+
+    if (action === "uphold") {
+      await this.transactionModel.updateStatus(
+        dispute.transactionId,
+        nextTransactionStatus,
+      );
+    }
 
     await this.disputeModel.addNote(
       disputeId,
       adminId ?? "admin",
       `Admin ${action === "reverse" ? "reversed" : "upheld"} payment: ${trimmedResolution}`,
+    );
+
+    // Record resolution on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      action === "reverse" ? "reversed" : "upheld",
+      adminId ?? "admin",
+      `Payment ${action === "reverse" ? "reversed" : "upheld"}: ${trimmedResolution}`,
+      dispute.status,
+      nextDisputeStatus,
+      { action, transactionStatus: nextTransactionStatus, adminId },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add resolution timeline event"),
     );
 
     sendNotification({
@@ -444,7 +520,10 @@ export class DisputeService {
         await this.disputeModel.markSlaWarningSent(dispute.id);
         warningsSent++;
       } catch (error) {
-        console.error(`Failed to send SLA warning for dispute ${dispute.id}:`, error);
+        console.error(
+          `Failed to send SLA warning for dispute ${dispute.id}:`,
+          error,
+        );
       }
     }
 
@@ -485,6 +564,19 @@ export class DisputeService {
         assignedTo: agentName,
       });
     }
+
+    // Record assignment on the timeline
+    await this.timelineService.addEvent(
+      disputeId,
+      "assigned",
+      agentName,
+      `Dispute assigned to ${agentName}`,
+      dispute.status !== updated.status ? dispute.status : undefined,
+      dispute.status !== updated.status ? updated.status : undefined,
+      { agentName },
+    ).catch((err) =>
+      logger.error({ err, disputeId }, "Failed to add assigned timeline event"),
+    );
 
     sendNotification({
       event: "dispute.assigned",
@@ -565,5 +657,138 @@ export class DisputeService {
       summary: rows,
       totals,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // #413 Evidence Organization Methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Update the category of a specific evidence item.
+   */
+  async updateEvidenceCategory(
+    disputeId: string,
+    evidenceId: string,
+    category: string,
+  ): Promise<DisputeEvidence | null> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return this.disputeModel.updateEvidenceCategory(
+      evidenceId,
+      disputeId,
+      category,
+    );
+  }
+
+  /**
+   * Reorder evidence items (drag-and-drop support).
+   * @param disputeId  UUID of the dispute.
+   * @param order      Array of { id, position } objects.
+   */
+  async reorderEvidence(
+    disputeId: string,
+    order: Array<{ id: string; position: number }>,
+  ): Promise<number> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return this.disputeModel.reorderEvidence(disputeId, order);
+  }
+
+  /**
+   * Search evidence by keyword and/or category.
+   */
+  async searchEvidence(
+    disputeId: string,
+    query: string,
+    category?: string,
+  ): Promise<DisputeEvidence[]> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return this.disputeModel.searchEvidence(disputeId, query, category);
+  }
+
+  /**
+   * Get the timeline of events for a dispute (status changes, evidence adds, notes).
+   */
+  async getTimeline(disputeId: string) {
+    const dispute = await this.disputeModel.findByIdWithDetails(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    return dispute.timeline;
+  }
+
+  /**
+   * Get evidence grouped by category.
+   */
+  async getEvidenceByCategory(
+    disputeId: string,
+  ): Promise<Record<string, DisputeEvidence[]>> {
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+    const allEvidence = await this.disputeModel.getEvidence(disputeId);
+
+    const grouped: Record<string, DisputeEvidence[]> = {};
+    for (const ev of allEvidence) {
+      const cat = (ev as any).category ?? "other";
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(ev);
+    }
+    return grouped;
+  }
+
+  // ---------------------------------------------------------------------------
+  // #636 Dispute Workload Balancing
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Automatically assign a dispute to the agent with the lowest active
+   * dispute workload from a provided list of available agents.
+   *
+   * Falls back to the first agent in the list when no workload data exists
+   * (e.g., all agents are new or have no open disputes).
+   *
+   * @param disputeId        UUID of the dispute to assign.
+   * @param availableAgents  Non-empty list of candidate agent identifiers.
+   */
+  async autoAssignToLeastLoadedAgent(
+    disputeId: string,
+    availableAgents: string[],
+  ): Promise<Dispute> {
+    if (availableAgents.length === 0) {
+      throw new Error('availableAgents must not be empty');
+    }
+
+    const dispute = await this.disputeModel.findById(disputeId);
+    if (!dispute) {
+      throw new Error(`Dispute ${disputeId} not found`);
+    }
+
+    if (TERMINAL_STATUSES.includes(dispute.status)) {
+      throw new Error(`Cannot assign a ${dispute.status} dispute`);
+    }
+
+    const bestAgent = await this.disputeModel.findLeastLoadedAgent(availableAgents);
+
+    // Fallback: no workload data at all — use first agent in the list
+    const agentToAssign = bestAgent ?? availableAgents[0];
+
+    return this.assignToAgent(disputeId, agentToAssign);
+  }
+
+  /**
+   * Return current workload metrics for all agents with active disputes.
+   * Useful for monitoring dashboards and operational tooling.
+   */
+  async getWorkloadMetrics(): Promise<AgentWorkload[]> {
+    return this.disputeModel.getAgentWorkload();
   }
 }

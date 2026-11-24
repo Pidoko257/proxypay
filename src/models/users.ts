@@ -1,35 +1,106 @@
 import { pool, queryRead, queryWrite } from "../config/database";
-import { encrypt, decrypt, encryptField, decryptField } from "../utils/encryption";
+import { encrypt, decrypt, encryptField, decryptFieldOrNull } from "../utils/encryption";
 
+export enum UserStatus {
+  ACTIVE = "active",
+  FROZEN = "frozen",
+  SUSPENDED = "suspended",
+  DEACTIVATED = "deactivated",
+}
+
+export enum UserRole {
+  USER = "user",
+  ADMIN = "admin",
+  SUPER_ADMIN = "super-admin",
+  COMPLIANCE_OFFICER = "compliance_officer",
+  DEVELOPER = "developer",
+}
+
+export enum KycLevel {
+  NONE = "none",
+  BASIC = "basic",
+  ENHANCED = "enhanced",
+  FULL = "full",
+}
+
+/**
+ * Comprehensive User model type.
+ * Maps to the `users` database table.
+ */
 export interface User {
+  /** Unique user identifier (UUID) */
   id: string;
+  /** Encrypted phone number (E.164 format before encryption) */
   phoneNumber: string;
-  kycLevel: string;
+  /** KYC verification level */
+  kycLevel: KycLevel | string;
+  /** Preferred language code (e.g. "en", "fr") */
   preferredLanguage?: string;
+  /** Encrypted email address */
   email?: string;
+  /** User-chosen display name */
   displayName?: string | null;
+  /** Merchant Category Code for the user's business */
   mcc?: string | null;
+  /** Encrypted TOTP secret for 2FA */
   two_factor_secret?: string | null;
+  /** Array of one-time backup codes for 2FA recovery */
   backup_codes?: string[] | null;
-  status: 'active' | 'frozen' | 'suspended';
+  /** Account status */
+  status: UserStatus | string;
+  /** Token version for JWT invalidation on password/2FA changes */
   tokenVersion?: number;
+  /** Account creation timestamp */
   createdAt: Date;
+  /** Last profile update timestamp */
   updatedAt: Date;
+  /** Whether the user has opted out of SMS communications */
   smsOptOut?: boolean;
+  /** Whether 2FA is mandatory for withdrawal operations */
   mandatory2FAWithdrawals?: boolean;
+  /** Number of days to delay settlement payouts */
   settlementDelayDays?: number;
-  // TODO: The `User` type and database table needs to
-  // be update with these fields:  is_active: boolean,   deactivated_at:Date`
-  
-  // New sensitive fields
+  /** Whether the account is active (false = soft-deactivated) */
+  is_active?: boolean;
+  /** Timestamp when the account was soft-deactivated */
+  deactivated_at?: Date | null;
+  /** Encrypted first name (sensitive, only returned to authorized roles) */
   firstName?: string;
+  /** Encrypted last name (sensitive, only returned to authorized roles) */
   lastName?: string;
+  /** Encrypted physical address (sensitive) */
   address?: string;
+  /** Encrypted date of birth (sensitive) */
   dateOfBirth?: string;
+  /** Encrypted national ID number (sensitive) */
   idNumber?: string;
 }
 
 export class UserModel {
+  async list(limit = 50, offset = 0): Promise<{ users: Array<Pick<User, "id" | "kycLevel" | "status" | "createdAt" | "updatedAt">>; total: number }> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
+    const safeOffset = Math.max(Math.trunc(offset), 0);
+    const result = await queryRead(
+      `SELECT id, kyc_level, status, created_at, updated_at,
+              COUNT(*) OVER() AS total_count
+       FROM users
+       ORDER BY created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [safeLimit, safeOffset],
+    );
+
+    return {
+      users: result.rows.map((row) => ({
+        id: row.id,
+        kycLevel: row.kyc_level,
+        status: row.status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      })),
+      total: result.rows.length > 0 ? Number(result.rows[0].total_count) : 0,
+    };
+  }
+
   async findById(id: string, requester?: { id: string; role: string }): Promise<User | null> {
     const result = await queryRead("SELECT * FROM users WHERE id = $1", [id]);
     if (result.rows.length === 0) return null;
@@ -37,7 +108,7 @@ export class UserModel {
     const row = result.rows[0];
     const AUTHORIZED_ROLES = ["admin", "super-admin", "compliance_officer"];
     const isAuthorized = requester && (
-      AUTHORIZED_ROLES.includes(requester.role) || 
+      AUTHORIZED_ROLES.includes(requester.role) ||
       requester.id === id
     );
 
@@ -52,16 +123,20 @@ export class UserModel {
       backup_codes: row.backup_codes ?? null,
       status: row.status,
       tokenVersion: row.token_version ?? 0,
+      isActive: row.is_active ?? true,
+      deactivatedAt: row.deactivated_at ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       smsOptOut: row.sms_opt_out ?? false,
       mandatory2FAWithdrawals: row.mandatory_2fa_withdrawals ?? false,
+      is_active: row.is_active ?? true,
+      deactivated_at: row.deactivated_at ?? null,
       
-      firstName: isAuthorized ? (decryptField(row.first_name) as string ?? undefined) : row.first_name ?? undefined,
-      lastName: isAuthorized ? (decryptField(row.last_name) as string ?? undefined) : row.last_name ?? undefined,
-      address: isAuthorized ? (decryptField(row.address) as string ?? undefined) : row.address ?? undefined,
-      dateOfBirth: isAuthorized ? (decryptField(row.date_of_birth) as string ?? undefined) : row.date_of_birth ?? undefined,
-      idNumber: isAuthorized ? (decryptField(row.id_number) as string ?? undefined) : row.id_number ?? undefined,
+      firstName: isAuthorized ? (decryptFieldOrNull(row.first_name, "users.first_name") ?? undefined) : row.first_name ?? undefined,
+      lastName: isAuthorized ? (decryptFieldOrNull(row.last_name, "users.last_name") ?? undefined) : row.last_name ?? undefined,
+      address: isAuthorized ? (decryptFieldOrNull(row.address, "users.address") ?? undefined) : row.address ?? undefined,
+      dateOfBirth: isAuthorized ? (decryptFieldOrNull(row.date_of_birth, "users.date_of_birth") ?? undefined) : row.date_of_birth ?? undefined,
+      idNumber: isAuthorized ? (decryptFieldOrNull(row.id_number, "users.id_number") ?? undefined) : row.id_number ?? undefined,
     };
   }
 
@@ -121,44 +196,51 @@ export class UserModel {
 
   async updateStatus(
     id: string,
-    status: 'active' | 'frozen' | 'suspended',
+    status: UserStatus,
     changedBy: string,
     reason?: string,
     ipAddress?: string,
     userAgent?: string
   ): Promise<User | null> {
     const client = await pool.connect();
-    
+
     try {
       await client.query('BEGIN');
-      
-      // Get current user status for audit
-      const currentUser = await this.findById(id);
-      if (!currentUser) {
+
+      // Read the current status on the same client, inside the transaction,
+      // and lock the row. Concurrent status changes for this user now queue
+      // behind us, so the audit entry's old_status is always the value this
+      // UPDATE actually replaced (never a stale read from a replica).
+      const currentResult = await client.query(
+        "SELECT status FROM users WHERE id = $1 FOR UPDATE",
+        [id],
+      );
+      if (currentResult.rows.length === 0) {
         await client.query('ROLLBACK');
         return null;
       }
-      
+      const currentUser = { status: currentResult.rows[0].status as UserStatus };
+
       // Update user status
       const updateQuery = "UPDATE users SET status = $1 WHERE id = $2 RETURNING *";
       const result = await client.query(updateQuery, [status, id]);
-      
+
       if (result.rows.length === 0) {
         await client.query('ROLLBACK');
         return null;
       }
-      
+
       // Log audit entry
       const auditQuery = `
         INSERT INTO user_status_audit (
           user_id, action, old_status, new_status, reason, changed_by, ip_address, user_agent
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       `;
-      
-      const action = status === 'frozen' ? 'FREEZE' : 
-                     status === 'suspended' ? 'SUSPEND' : 
-                     currentUser.status === 'frozen' ? 'UNFREEZE' : 'UNSUSPEND';
-      
+
+      const action = status === UserStatus.FROZEN ? 'FREEZE' :
+                     status === UserStatus.SUSPENDED ? 'SUSPEND' :
+                     currentUser.status === UserStatus.FROZEN ? 'UNFREEZE' : 'UNSUSPEND';
+
       await client.query(auditQuery, [
         id,
         action,
@@ -169,9 +251,9 @@ export class UserModel {
         ipAddress,
         userAgent
       ]);
-      
+
       await client.query('COMMIT');
-      
+
       // Return updated user
       const row = result.rows[0];
       return {
@@ -184,6 +266,8 @@ export class UserModel {
         two_factor_secret: decrypt(row.two_factor_secret) ?? null,
         backup_codes: row.backup_codes ?? null,
         status: row.status,
+        isActive: row.is_active ?? true,
+        deactivatedAt: row.deactivated_at ?? null,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         smsOptOut: row.sms_opt_out ?? false,
@@ -199,7 +283,7 @@ export class UserModel {
 
   async getAuditHistory(userId: string): Promise<any[]> {
     const query = `
-      SELECT 
+      SELECT
         a.id,
         a.action,
         a.old_status AS "oldStatus",
@@ -208,7 +292,8 @@ export class UserModel {
         a.created_at AS "createdAt",
         a.ip_address AS "ipAddress",
         a.user_agent AS "userAgent",
-        u.phone_number AS "changedByUser"
+        u.phone_number AS "changedByUser",
+        u.display_name AS "changedByDisplayName"
       FROM user_status_audit a
       JOIN users u ON a.changed_by = u.id
       WHERE a.user_id = $1
@@ -216,17 +301,45 @@ export class UserModel {
     `;
 
     const result = await queryRead(query, [userId]);
-    return result.rows;
+    return result.rows.map(row => ({
+      ...row,
+      changedByUser: row.changedByUser ? decrypt(row.changedByUser) : null,
+    }));
   }
   async incrementTokenVersion(id: string): Promise<number> {
     const query = `
-      UPDATE users 
+      UPDATE users
       SET token_version = COALESCE(token_version, 0) + 1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $1 
+      WHERE id = $1
       RETURNING token_version
     `;
     const result = await queryWrite(query, [id]);
     return result.rows[0]?.token_version || 0;
+  }
+
+  /**
+   * Returns the stored admin dashboard configuration for a user.
+   * `undefined` means the user does not exist; `null` means no config saved.
+   */
+  async getDashboardConfig(id: string): Promise<unknown | null | undefined> {
+    const result = await queryRead(
+      "SELECT dashboard_config FROM users WHERE id = $1",
+      [id],
+    );
+    if (result.rows.length === 0) return undefined;
+    return result.rows[0].dashboard_config ?? null;
+  }
+
+  /**
+   * Persists the admin dashboard configuration for a user.
+   * Returns false when the user does not exist.
+   */
+  async updateDashboardConfig(id: string, config: unknown): Promise<boolean> {
+    const result = await queryWrite(
+      "UPDATE users SET dashboard_config = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+      [JSON.stringify(config), id],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async updateMandatory2FAWithdrawals(id: string, enabled: boolean): Promise<void> {
@@ -234,5 +347,34 @@ export class UserModel {
       "UPDATE users SET mandatory_2fa_withdrawals = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
       [enabled, id]
     );
+  }
+
+  async deactivate(id: string, deactivatedBy?: string): Promise<void> {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE users
+         SET is_active = false,
+             deactivated_at = CURRENT_TIMESTAMP,
+             status = 'suspended',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [id],
+      );
+      if (deactivatedBy) {
+        await client.query(
+          `INSERT INTO user_status_audit (user_id, action, new_status, changed_by)
+           VALUES ($1, 'DEACTIVATE', 'suspended', $2)`,
+          [id, deactivatedBy],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

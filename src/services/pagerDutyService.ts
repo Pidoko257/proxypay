@@ -310,6 +310,45 @@ export class PagerDutyService {
   }
 
   /**
+   * Trigger a generic alert (not tied to provider error rates), e.g. a
+   * failed scheduled job or a background worker that failed to start.
+   * No-op when PagerDuty is disabled.
+   */
+  async triggerAlert(alert: {
+    summary: string;
+    dedupKey: string;
+    severity?: PagerDutyEvent["payload"]["severity"];
+    source?: string;
+    details?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.sendEvent({
+      routing_key: this.config.integrationKey,
+      event_action: "trigger",
+      dedup_key: `${this.config.dedupKey}-${alert.dedupKey}`,
+      payload: {
+        summary: alert.summary,
+        timestamp: new Date().toISOString(),
+        severity: alert.severity ?? "critical",
+        source: alert.source ?? "proxypay-api",
+        custom_details: {
+          ...alert.details,
+          environment: process.env.NODE_ENV || "development",
+        },
+      },
+    });
+  }
+
+  async sendEvent(event: PagerDutyEvent): Promise<void> {
+    if (!this.config.enabled) return;
+
+    try {
+      await this.client.post("", event);
+    } catch (error) {
+      console.error("Failed to send PagerDuty event:", error);
+    }
+  }
+
+  /**
    * Generate a deduplication key for PagerDuty
    * Ensures that multiple events for the same provider are treated as the same incident
    */

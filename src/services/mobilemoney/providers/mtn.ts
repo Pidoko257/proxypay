@@ -61,6 +61,29 @@ export class MTNProvider {
     return token;
   }
 
+  /**
+   * Probes whether the configured credentials are still accepted by MTN by
+   * requesting a fresh access token. Used by the provider token watchdog to
+   * detect revoked/expired API credentials before they interrupt service.
+   */
+  async checkAuth(): Promise<{
+    success: boolean;
+    invalidCredentials?: boolean;
+    error?: unknown;
+  }> {
+    try {
+      const token = await this.getAccessToken();
+      return { success: Boolean(token) };
+    } catch (error: any) {
+      const status = error?.response?.status;
+      return {
+        success: false,
+        invalidCredentials: status === 401 || status === 403,
+        error,
+      };
+    }
+  }
+
   async getOperationalBalance() {
     try {
       const token = await this.getAccessToken();
@@ -158,7 +181,93 @@ export class MTNProvider {
   async sendPayout(phoneNumber: string, amount: string, requestId?: string) {
     const log = requestId ? logger.child({ requestId }) : logger;
     log.info(maskPII({ phoneNumber, amount }), "MTN: Sending payout");
-    return { success: true };
+    const startTime = Date.now();
+
+    try {
+      const token = await this.getAccessToken();
+      const payoutReference = `PAYOUT-${randomUUID()}`;
+
+      // MTN disbursement single payout API endpoint
+      const response = await axios.post(
+        `${this.baseUrl}/disbursement/v1_0/transfer`,
+        {
+          amount,
+          currency: "XAF",
+          externalId: payoutReference,
+          payee: {
+            partyIdType: "MSISDN",
+            partyId: phoneNumber,
+          },
+          payerMessage: "Payout transfer",
+          payeeNote: "Transfer",
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Ocp-Apim-Subscription-Key": this.subscriptionKey,
+            "X-Target-Environment": this.environment,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+
+      const duration = Date.now() - startTime;
+      const status = String(response.data?.status ?? "").toUpperCase();
+
+      // Map provider statuses to success/failure
+      // MTN disbursement responses include: PENDING, ACCEPTED, FAILED, etc.
+      // We only consider SUCCESSFUL or ACCEPTED as success
+      const success =
+        status === "SUCCESSFUL" ||
+        status === "ACCEPTED" ||
+        status === "PENDING";
+
+      if (success) {
+        log.info(
+          maskPII({
+            duration,
+            status,
+            payoutReference,
+            transactionId: response.data?.financialTransactionId,
+          }),
+          "MTN: Payout sent successfully",
+        );
+      } else {
+        log.warn(
+          maskPII({
+            duration,
+            status,
+            error: response.data?.errorReason || response.data?.message,
+            payoutReference,
+          }),
+          "MTN: Payout request returned non-success status",
+        );
+      }
+
+      return {
+        success,
+        data: {
+          status,
+          transactionId: response.data?.financialTransactionId,
+          providerReference: payoutReference,
+        },
+      };
+    } catch (error: any) {
+      const duration = Date.now() - startTime;
+      log.error(
+        maskPII({
+          duration,
+          error: error.message,
+          response: error.response?.data,
+        }),
+        "MTN: Payout request failed",
+      );
+
+      return {
+        success: false,
+        error,
+      };
+    }
   }
 
   /**

@@ -2,7 +2,7 @@ import { pool } from "../config/database";
 import { redisClient } from "../config/redis";
 import axios from "axios";
 import { v4 as uuidv4 } from "uuid";
-import { encryptField, decryptField, decrypt } from "../utils/encryption";
+import { encryptField, decryptField, decryptFieldOrNull, decrypt } from "../utils/encryption";
 import {
   addAccountingTokenRefreshJob,
   removeAccountingTokenRefreshJob,
@@ -83,6 +83,25 @@ export interface XeroTenant {
   tenantId: string;
   tenantName?: string;
   tenantType?: string;
+}
+
+/**
+ * Decrypts a stored OAuth token. If the stored value cannot be decrypted the
+ * connection is unusable, so we log it and return an empty token: the provider
+ * will reject the next call (prompting re-authorisation) rather than us sending
+ * ciphertext as a bearer token or failing every connection in a listing.
+ */
+function decryptConnectionToken(raw: string, connectionId: string, column: string): string {
+  try {
+    return decryptField(raw) ?? "";
+  } catch (err) {
+    logger.error(
+      `[AccountingService] Failed to decrypt ${column} for connection ${connectionId}; re-authorisation required: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return "";
+  }
 }
 
 export class AccountingService {
@@ -724,8 +743,8 @@ export class AccountingService {
       realmId: row.realm_id,
       tenantId: row.tenant_id,
       tenantName: row.tenant_name,
-      accessToken: decryptField(row.access_token) || row.access_token,
-      refreshToken: decryptField(row.refresh_token) || row.refresh_token,
+      accessToken: decryptConnectionToken(row.access_token, row.id, "access_token"),
+      refreshToken: decryptConnectionToken(row.refresh_token, row.id, "refresh_token"),
       expiresAt: new Date(row.expires_at),
       isActive: row.is_active,
       createdAt: new Date(row.created_at),
@@ -745,8 +764,8 @@ export class AccountingService {
       realmId: row.realm_id,
       tenantId: row.tenant_id,
       tenantName: row.tenant_name,
-      accessToken: decryptField(row.access_token) || row.access_token,
-      refreshToken: decryptField(row.refresh_token) || row.refresh_token,
+      accessToken: decryptConnectionToken(row.access_token, row.id, "access_token"),
+      refreshToken: decryptConnectionToken(row.refresh_token, row.id, "refresh_token"),
       expiresAt: new Date(row.expires_at),
       isActive: row.is_active,
       createdAt: new Date(row.created_at),
@@ -765,8 +784,8 @@ export class AccountingService {
       realmId: row.realm_id,
       tenantId: row.tenant_id,
       tenantName: row.tenant_name,
-      accessToken: decryptField(row.access_token) || row.access_token,
-      refreshToken: decryptField(row.refresh_token) || row.refresh_token,
+      accessToken: decryptConnectionToken(row.access_token, row.id, "access_token"),
+      refreshToken: decryptConnectionToken(row.refresh_token, row.id, "refresh_token"),
       expiresAt: new Date(row.expires_at),
       isActive: row.is_active,
       createdAt: new Date(row.created_at),
@@ -842,8 +861,8 @@ export class AccountingService {
       if (userRes.rows.length === 0) return;
       const row = userRes.rows[0];
       const email = decrypt(row.email) as string | null | undefined;
-      const firstName = decryptField(row.first_name) as string | null | undefined;
-      const lastName = decryptField(row.last_name) as string | null | undefined;
+      const firstName = decryptFieldOrNull(row.first_name, "users.first_name");
+      const lastName = decryptFieldOrNull(row.last_name, "users.last_name");
 
       if (!email) {
         logger.info(`[AccountingService] Skipping contact sync for user ${userId}: no email`);

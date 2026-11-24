@@ -10,6 +10,10 @@ jest.mock("bullmq", () => ({
     getJobs: jest.fn().mockResolvedValue([]),
     close: jest.fn().mockResolvedValue(undefined),
   })),
+  QueueEvents: jest.fn().mockImplementation(() => ({
+    on: jest.fn(),
+    close: jest.fn().mockResolvedValue(undefined),
+  })),
   Worker: jest.fn().mockImplementation(() => ({
     on: jest.fn(),
     close: jest.fn().mockResolvedValue(undefined),
@@ -42,6 +46,7 @@ jest.mock("node-cron", () => ({
 
 import { pool, queryRead, queryWrite } from "../../config/database";
 import cron from "node-cron";
+import logger from "../../utils/logger";
 
 const mockQuery = pool.query as jest.Mock;
 const mockQueryRead = queryRead as jest.Mock;
@@ -56,6 +61,9 @@ beforeEach(() => {
   jest.spyOn(console, "info").mockImplementation(() => {});
   jest.spyOn(console, "warn").mockImplementation(() => {});
   jest.spyOn(console, "error").mockImplementation(() => {});
+  jest.spyOn(logger, "info").mockImplementation((() => {}) as any);
+  jest.spyOn(logger, "warn").mockImplementation((() => {}) as any);
+  jest.spyOn(logger, "error").mockImplementation((() => {}) as any);
 });
 
 afterEach(() => {
@@ -66,11 +74,12 @@ afterEach(() => {
 describe("runCleanupJob", () => {
   it("deletes old transactions and logs count", async () => {
     mockQuery
-      .mockResolvedValueOnce({ rowCount: 3 });
+      .mockResolvedValueOnce({ rowCount: 3 })
+      .mockResolvedValueOnce({ rowCount: 0 });
     mockQueryWrite.mockResolvedValueOnce({ rows: [{ released: 4 }] });
     await runCleanupJob();
     expect(mockQueryWrite).toHaveBeenCalledTimes(1);
-    expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(mockQuery).toHaveBeenCalledTimes(2);
     expect(console.log).toHaveBeenCalledWith(
       expect.stringContaining("Deleted 3"),
     );
@@ -82,7 +91,10 @@ describe("runCleanupJob", () => {
       .mockResolvedValueOnce({ rowCount: 0 });
     mockQueryWrite.mockResolvedValueOnce({ rows: [{ released: 0 }] });
     await runCleanupJob();
-    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining("30 days"));
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("INTERVAL '1 day'"),
+      [30],
+    );
     delete process.env.LOG_RETENTION_DAYS;
   });
 });
@@ -113,6 +125,27 @@ describe("runReportJob", () => {
       expect.stringContaining("deposit"),
     );
   });
+
+  it("stores a daily report snapshot for the previous day", async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const reportDate = yesterday.toISOString().split("T")[0];
+
+    mockQuery
+      .mockResolvedValueOnce({
+        rows: [{ type: "transfer", status: "pending", count: 2, total_amount: "250" }],
+      })
+      .mockResolvedValueOnce({ rows: [{ total_user_fees: "500" }] })
+      .mockResolvedValueOnce({ rows: [{ total_provider_fees: "100" }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await runReportJob();
+
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO daily_pnl_snapshots"),
+      [reportDate, 500, 100, 400],
+    );
+  });
 });
 
 // --- statusCheckJob ---
@@ -141,7 +174,8 @@ describe("runStatusCheckJob", () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
     await runStatusCheckJob();
     expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining("30 minutes"),
+      expect.stringContaining("INTERVAL '1 minute'"),
+      [30],
     );
     delete process.env.STUCK_TRANSACTION_MINUTES;
   });
@@ -184,14 +218,15 @@ describe("startJobs", () => {
   it("schedules all valid jobs", () => {
     (cron.validate as jest.Mock).mockReturnValue(true);
     startJobs();
-    expect(cron.schedule).toHaveBeenCalledTimes(18);
+    expect(cron.schedule).toHaveBeenCalledTimes(23);
   });
 
   it("skips jobs with invalid cron expressions", () => {
     (cron.validate as jest.Mock).mockReturnValue(false);
     startJobs();
     expect(cron.schedule).not.toHaveBeenCalled();
-    expect(console.error).toHaveBeenCalledWith(
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ job: expect.any(String), schedule: expect.any(String) }),
       expect.stringContaining("Invalid cron expression"),
     );
   });

@@ -19,6 +19,9 @@ import {
   validateVersionMiddleware,
   VersionedRequest,
 } from "./middleware/apiVersion";
+import { deprecationMiddleware } from "./middleware/deprecation";
+import { seedDeprecations } from "./middleware/deprecationSeed";
+import { adminDeprecationRoutes } from "./routes/admin/deprecations";
 import {
   bulkRoutesV1,
   disputeRoutesV1,
@@ -38,6 +41,9 @@ import { reportsRoutes } from "./routes/reports";
 import feesRoutes from "./routes/fees";
 import { createKYCRoutes } from "./routes/kycRoutes";
 import { adminRoutes } from "./routes/admin";
+import invoiceRoutes from "./routes/invoices";
+import webhookCircuitBreakerRoutes from "./routes/webhookCircuitBreaker";
+import providerCircuitBreakerRoutes from "./routes/providerCircuitBreakerRoutes";
 import kycTierUpgradeRoutes from "./routes/kycTierUpgradeRoutes";
 import { userRoutes } from "./routes/users";
 import { createError, errorHandler } from "./middleware/errorHandler";
@@ -48,14 +54,17 @@ import {
   createRedisStore,
   SESSION_TTL_SECONDS,
 } from "./config/redis";
+import { rateLimitMiddleware } from "./middleware/rateLimitRedis";
+import rateLimitDefaultMiddleware from "./middleware/rateLimit";
 import { createOAuthRouter } from "./auth/oauth";
-import { pool } from "./config/database";
+import { getReplicationStatus, pool } from "./config/database";
 import {
   globalTimeout,
   haltOnTimedout,
   timeoutErrorHandler,
 } from "./middleware/timeout";
-import { requireAuth } from "./middleware/auth";
+import { requireAuth, verifyTokenStateful } from "./middleware/auth";
+import { isAccountActive } from "./middleware/checkAccountStatus";
 import { responseTime } from "./middleware/responseTime";
 import { requestId } from "./middleware/requestId";
 import { idempotency } from "./middleware/idempotency";
@@ -65,11 +74,29 @@ import { i18nMiddleware } from "./utils/i18n";
 import { metricsMiddleware } from "./middleware/metrics";
 import { validateStellarNetwork, logStellarNetwork } from "./config/stellar";
 import { sessionAnomalyLogger } from "./services/logger";
-import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
+import {
+  HealthCheckResponse,
+  ReadinessCheckResponse,
+  ProviderHealthSummary,
+  DetailedHealthCheckResponse,
+  DetailedReadinessCheckResponse,
+  DetailedLBHealthCheckResponse,
+} from "./types/api";
+import {
+  checkMobileMoneyHealth,
+  ProviderName,
+} from "./services/mobilemoney/providers/healthCheck";
+import {
+  getDetailedComponentHealth,
+  determineOverallStatus,
+} from "./services/componentHealthService";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
+import airtelCallbacksRouter from "./routes/airtelCallbacks";
+import orangeCallbacksRouter from "./routes/orangeCallbacks";
+import analyticsRouter from "./routes/analytics";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
 import sep38Router from "./stellar/sep38";
@@ -79,6 +106,7 @@ import { sep30Routes } from "./routes/sep30";
 import { createAdminSep10Router } from "./stellar/adminSep10";
 import tomlRouter from "./routes/toml";
 import feeStrategiesRouter from "./routes/feeStrategies";
+import feeRoutingRouter from "./routes/feeRouting";
 import crossChainRouter from "./routes/crossChain";
 import stellarRouter from "./routes/stellar";
 import reconciliationRoutes from "./routes/reconciliation";
@@ -86,12 +114,31 @@ import accountingReconciliationRoutes from "./routes/accountingReconciliation";
 import exchangeRateBufferRoutes from "./routes/exchangeRateBuffers";
 import adminAssetRoutes from "./routes/admin/assets";
 import settingsRoutes from "./routes/settings";
+import { requestLogger } from "./middleware/logger";
 import { statementsRoutes } from "./routes/statements";
+import subscriptionsRoutes from "./routes/subscriptions";
 import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
+import providerHealthRouter from "./routes/providerHealthRoutes";
+import kycWebhookRouter from "./routes/kycWebhookRoutes";
+import twoFactorRouter from "./routes/twoFactorRoutes";
+import { transactionMetadataRouter } from "./routes/transactionMetadataRoutes";
+import transactionFilterRouter from "./routes/transactionFilters";
+import notificationHealthRouter from "./routes/notificationHealth";
+import complianceTrainingRouter from "./routes/complianceTraining";
+import healthProvidersRouter from "./routes/healthProviders";
+import adminReplicasRouter from "./routes/adminReplicas";
+import connectionDashboardRouter from "./routes/connectionDashboard";
+import maintenanceRoutes from "./routes/maintenanceRoutes";
 import { transactionStreamRoutes } from "./routes/stream";
-import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
+import { batchOperationRoutes } from "./routes/batchOperations";
+import providerThrottleAdminRouter from "./routes/providerThrottleAdmin";
+import {
+  startHeartbeatService,
+  stopHeartbeatService,
+} from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { slidingWindowRateLimit } from "./middleware/slidingWindowRateLimit";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -99,6 +146,7 @@ import { WebSocketManager } from "./websocket";
 import { layeredCache } from "./services/layeredCache";
 import { ERROR_CODES } from "./constants/errorCodes";
 import { startApolloServer } from "./graphql/server";
+import { RequestTracker } from "./utils/requestTracker";
 
 dotenv.config();
 
@@ -110,6 +158,8 @@ validateStellarNetwork();
 logStellarNetwork();
 
 const app = express();
+// The application is reachable only through its single trusted load-balancer hop.
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 const SHUTDOWN_TIMEOUT_MS = parseInt(
   process.env.SHUTDOWN_TIMEOUT_MS || "30000",
@@ -118,15 +168,32 @@ const SHUTDOWN_TIMEOUT_MS = parseInt(
 let server: Server | null = null;
 let isShuttingDown = false;
 let shutdownInProgress = false;
-let activeRequests = 0;
+const requestTracker = new RequestTracker();
+
+// Track every accepted request before parsing or application middleware runs so
+// shutdown cannot close dependencies while a request is still being handled.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (isShuttingDown) {
+    res.setHeader("Connection", "close");
+    throw createError(ERROR_CODES.SERVICE_UNAVAILABLE, "Service Unavailable", {
+      error: "Service Unavailable",
+      message: "Server is shutting down. Please retry shortly.",
+    });
+  }
+
+  const releaseRequest = requestTracker.start();
+  res.once("finish", releaseRequest);
+  res.once("close", releaseRequest);
+  next();
+});
 
 if (process.env.SENTRY_DSN) {
   Sentry.setupExpressErrorHandler(app);
 }
 
-// import rateLimitMiddleware from "./middleware/rateLimit"; // TODO: Commented out because the module has no default export and I don't know each middleware was .
-
 app.use(sentryBreadcrumbMiddleware);
+
+app.use(rateLimitMiddleware);
 
 app.use(metricsMiddleware);
 app.use(helmet());
@@ -173,38 +240,13 @@ app.use(
     extended: true,
   }),
 );
-// app.use(rateLimitMiddleware);
+app.use(rateLimitDefaultMiddleware);
 app.use(responseTime);
 app.use(requestId);
+app.use(requestLogger);
 app.use(readReplicaRoutingMiddleware);
 app.use(i18nMiddleware);
 app.use(dbConnectionLeakDetector);
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-  if (isShuttingDown) {
-    res.setHeader("Connection", "close");
-    throw createError(ERROR_CODES.SERVICE_UNAVAILABLE, "Service Unavailable", {
-      error: "Service Unavailable",
-      message: "Server is shutting down. Please retry shortly.",
-    });
-  }
-
-  activeRequests += 1;
-  let completed = false;
-
-  const onRequestFinished = () => {
-    if (completed) {
-      return;
-    }
-    completed = true;
-    activeRequests = Math.max(0, activeRequests - 1);
-  };
-
-  res.on("finish", onRequestFinished);
-  res.on("close", onRequestFinished);
-
-  next();
-});
 
 const sessionSecret =
   process.env.SESSION_SECRET || "default-secret-change-in-production";
@@ -225,11 +267,126 @@ app.use(
 );
 app.use(sessionAnomalyLogger);
 
-app.get("/health", (_req: Request, res: Response) => {
+/**
+ * Get aggregated provider health summary
+ */
+async function getProviderHealthSummary(): Promise<ProviderHealthSummary> {
+  try {
+    const healthResult = await checkMobileMoneyHealth();
+    const providers = healthResult.providers;
+    const providerNames = Object.keys(providers) as ProviderName[];
+
+    const providerStatus: Record<string, "up" | "down" | "unknown"> = {};
+    let healthyCount = 0;
+
+    for (const name of providerNames) {
+      const status = providers[name]?.status ?? "unknown";
+      providerStatus[name] = status;
+      if (status === "up") healthyCount++;
+    }
+
+    const totalCount = providerNames.length;
+    let overall: "healthy" | "degraded" | "down";
+
+    if (healthyCount === totalCount) {
+      overall = "healthy";
+    } else if (healthyCount > 0) {
+      overall = "degraded";
+    } else {
+      overall = "down";
+    }
+
+    return {
+      overall,
+      providers: providerStatus,
+      healthyCount,
+      totalCount,
+    };
+  } catch (err) {
+    console.error("Provider health check failed", err);
+    return {
+      overall: "unknown",
+      providers: {},
+      healthyCount: 0,
+      totalCount: 0,
+    };
+  }
+}
+
+app.get("/health", async (_req: Request, res: Response) => {
+  const startDb = Date.now();
+  let dbStatus: "ok" | "down" = "down";
+  let dbError: string | undefined;
+  try {
+    await pool.query("SELECT 1");
+    dbStatus = "ok";
+  } catch (err: any) {
+    dbError = err.message || "Database check failed";
+  }
+  const dbResponseTimeMs = Date.now() - startDb;
+
+  const startRedis = Date.now();
+  let redisStatus: "ok" | "closed" | "down" = "down";
+  let redisError: string | undefined;
+  try {
+    if (redisClient?.isOpen) {
+      await redisClient.ping();
+      redisStatus = "ok";
+    } else {
+      redisStatus = "closed";
+    }
+  } catch (err: any) {
+    redisError = err.message || "Redis ping failed";
+  }
+  const redisResponseTimeMs = Date.now() - startRedis;
+
+  const startProvider = Date.now();
+  let providerHealth: ProviderHealthSummary;
+  try {
+    providerHealth = await getProviderHealthSummary();
+  } catch {
+    providerHealth = {
+      overall: "down",
+      providers: {},
+      healthyCount: 0,
+      totalCount: 0,
+    };
+  }
+  const providerResponseTimeMs = Date.now() - startProvider;
+
+  const isDegraded =
+    dbStatus !== "ok" ||
+    redisStatus !== "ok" ||
+    providerHealth.overall !== "healthy";
+  const overallStatus: "ok" | "degraded" | "down" =
+    dbStatus === "down" && redisStatus === "down"
+      ? "down"
+      : isDegraded
+        ? "degraded"
+        : "ok";
+
   const body: HealthCheckResponse = {
-    status: "ok",
+    status: overallStatus,
     timestamp: new Date().toISOString(),
     gitHash: process.env.BUILD_HASH,
+    providers: providerHealth,
+    components: {
+      database: {
+        status: dbStatus,
+        responseTimeMs: dbResponseTimeMs,
+        error: dbError,
+      },
+      redis: {
+        status: redisStatus,
+        responseTimeMs: redisResponseTimeMs,
+        error: redisError,
+      },
+      providers: {
+        status: providerHealth.overall === "healthy" ? "ok" : providerHealth.overall,
+        responseTimeMs: providerResponseTimeMs,
+        details: providerHealth,
+      },
+    },
   };
   res.json(body);
 });
@@ -247,32 +404,113 @@ app.get("/ready", async (_req: Request, res: Response) => {
   }
 
   try {
-    await pool.query("SELECT 1");
-    checks.database = "ok";
-  } catch (err) {
-    console.error("Database check failed", err);
-    allReady = false;
-  }
+    const components = await getDetailedComponentHealth();
+    const overallStatus = determineOverallStatus(components);
 
+    const body: DetailedHealthCheckResponse = {
+      status: overallStatus === "down" ? "error" : overallStatus === "degraded" ? "degraded" : "ok",
+      timestamp: new Date().toISOString(),
+      gitHash: process.env.BUILD_HASH,
+      components: {
+        database: components.database,
+        redis: components.redis,
+        providers: components.providers,
+      },
+      overallStatus,
+    };
+    res.status(body.status === "error" ? 503 : 200).json(body);
+  } catch (err) {
+    console.error("Health check failed", err);
+    res.status(503).json({
+      status: "error",
+      timestamp: new Date().toISOString(),
+      overallStatus: "down",
+      components: {
+        database: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Health check failed",
+        },
+        redis: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Health check failed",
+        },
+        providers: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Health check failed",
+        },
+      },
+    });
+  }
+});
+
+app.get("/ready", async (_req: Request, res: Response) => {
   try {
-    if (redisClient?.isOpen) {
-      await redisClient.ping();
-      checks.redis = "ok";
-    } else {
-      checks.redis = "closed";
-      allReady = false;
-    }
-  } catch (err) {
-    console.error("Redis check failed", err);
-    allReady = false;
-  }
+    const components = await getDetailedComponentHealth();
+    
+    const checks: Record<string, string> = {
+      database: components.database.status,
+      redis: components.redis.status,
+      replication: components.replication?.status || "unknown",
+      shutdown: isShuttingDown ? "in-progress" : "idle",
+    };
 
-  const body: ReadinessCheckResponse = {
-    status: allReady ? "ready" : "not ready",
-    checks,
-    timestamp: new Date().toISOString(),
-  };
-  res.status(allReady ? 200 : 503).json(body);
+    if (components.replication?.drMode) {
+      checks.dr_mode = components.replication.drMode;
+    }
+
+    // Critical components must be healthy for readiness
+    const isCriticalHealthy =
+      components.database.status !== "down" &&
+      components.redis.status !== "down" &&
+      !isShuttingDown;
+
+    const body: DetailedReadinessCheckResponse = {
+      status: isCriticalHealthy ? "ready" : "not ready",
+      timestamp: new Date().toISOString(),
+      checks,
+      components: {
+        database: components.database,
+        redis: components.redis,
+        replication: components.replication,
+      },
+    };
+    res.status(isCriticalHealthy ? 200 : 503).json(body);
+  } catch (err) {
+    console.error("Readiness check failed", err);
+    res.status(503).json({
+      status: "not ready",
+      timestamp: new Date().toISOString(),
+      checks: {
+        database: "error",
+        redis: "error",
+        shutdown: "unknown",
+      },
+      components: {
+        database: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Readiness check failed",
+        },
+        redis: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Readiness check failed",
+        },
+      },
+    });
+  }
+});
+
+app.get("/admin/dashboard", (_req: Request, res: Response) => {
+  res.sendFile(path.join(process.cwd(), "public", "admin-dashboard.html"));
 });
 
 // Load Balancer Health Check
@@ -283,56 +521,77 @@ app.get("/health/lb", async (req: Request, res: Response) => {
   const now = Date.now();
   if (lbHealthCache && now - lbHealthCache.timestamp < LB_HEALTH_CACHE_TTL) {
     res
-      .status(lbHealthCache.data.status === "ok" ? 200 : 503)
+      .status(lbHealthCache.data.overallStatus === "healthy" ? 200 : 503)
       .json(lbHealthCache.data);
     return;
   }
 
-  const checks: Record<string, string> = {
-    database: "down",
-    redis: "down",
-    memory: "ok",
-  };
-  let healthy = true;
-
-  if (isShuttingDown) {
-    healthy = false;
-  }
-
   try {
-    await pool.query("SELECT 1");
-    checks.database = "ok";
+    const components = await getDetailedComponentHealth();
+    const overallStatus = determineOverallStatus(components);
+
+    // Critical for LB: database and redis must not be down
+    const isLBHealthy = components.database.status !== "down" && 
+                        components.redis.status !== "down" && 
+                        !isShuttingDown;
+
+    const body: DetailedLBHealthCheckResponse = {
+      status: isLBHealthy ? "ok" : "error",
+      timestamp: new Date().toISOString(),
+      components: {
+        database: components.database,
+        redis: components.redis,
+        memory: components.memory!,
+        providers: {
+          status: components.providers.status,
+          responseTime: components.providers.responseTime,
+          lastChecked: components.providers.lastChecked,
+          error: components.providers.error,
+          overall: components.providers.status,
+          providers: components.providers.providers,
+        },
+      },
+      overallStatus,
+    };
+
+    lbHealthCache = { data: body, timestamp: now };
+    res.status(isLBHealthy ? 200 : 503).json(body);
   } catch (err) {
-    healthy = false;
+    console.error("Load balancer health check failed", err);
+    const errorResponse: DetailedLBHealthCheckResponse = {
+      status: "error",
+      timestamp: new Date().toISOString(),
+      components: {
+        database: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Health check failed",
+        },
+        redis: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Health check failed",
+        },
+        memory: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Health check failed",
+        },
+        providers: {
+          status: "down",
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: "Health check failed",
+        },
+      },
+      overallStatus: "down",
+    };
+    lbHealthCache = { data: errorResponse, timestamp: now };
+    res.status(503).json(errorResponse);
   }
-
-  try {
-    if (redisClient?.isOpen) {
-      await redisClient.ping();
-      checks.redis = "ok";
-    } else {
-      checks.redis = "closed";
-      healthy = false;
-    }
-  } catch (err) {
-    healthy = false;
-  }
-
-  const memUsage = process.memoryUsage();
-  if (memUsage.heapUsed > 1024 * 1024 * 1024) {
-    // 1GB limit
-    checks.memory = "high";
-    healthy = false;
-  }
-
-  const responseData = {
-    status: healthy ? "ok" : "error",
-    checks,
-    timestamp: new Date().toISOString(),
-  };
-
-  lbHealthCache = { data: responseData, timestamp: now };
-  res.status(healthy ? 200 : 503).json(responseData);
 });
 
 app.use(globalTimeout);
@@ -340,8 +599,15 @@ app.use(haltOnTimedout);
 
 app.use(apiVersionMiddleware);
 app.use(validateVersionMiddleware);
+// #393 – Add Deprecation / Sunset / Link headers to registered legacy endpoints
+app.use(deprecationMiddleware);
 app.use("/oauth", createOAuthRouter());
-app.use("/api/auth", authRoutes);
+
+// #480 – Advanced transaction filtering (saved filter templates, filter AST).
+// Mounted *before* the version-negotiated transaction router on purpose: that
+// router serves GET /:id, which would otherwise capture
+// GET /api/transactions/filters and answer "transaction not found".
+app.use("/api/transactions/filters", transactionFilterRouter);
 
 // Replay retried mutations instead of processing them twice (Idempotency-Key)
 app.use("/api/v1/transactions", idempotency());
@@ -355,6 +621,7 @@ app.use("/api/v1/disputes", disputeRoutesV1);
 app.use("/api/v1/stats", statsRoutesV1);
 app.use("/api/v1/vaults", vaultRoutesV1);
 app.use("/api/v1/compliance/travel-rule", travelRuleRoutes);
+app.use("/api/compliance", complianceVersionsRouter);
 app.use("/api/v2/transactions", transactionRoutesV2);
 app.use("/api/stream", transactionStreamRoutes);
 
@@ -386,27 +653,73 @@ app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/mtn", mtnCallbacksRouter);
+app.use("/api/airtel", airtelCallbacksRouter);
+app.use("/api/orange", orangeCallbacksRouter);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
+// Split payments
+app.use("/api/split-payments", splitPaymentRulesRouter);
+app.use("/api/transactions", splitPaymentTransactionRouter);
 app.use("/api/fee-strategies", feeStrategiesRouter);
+app.use("/api/fee-routing", feeRoutingRouter);
 app.use("/api/cross-chain", crossChainRouter);
 app.use("/api/stellar", stellarRouter);
 app.use("/api/reconciliation", reconciliationRoutes);
 app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/preferences", settingsRoutes);
 app.use("/api/statements", statementsRoutes);
+app.use("/api/subscriptions", subscriptionsRoutes);
+app.use("/api/invoices", invoiceRoutes);
 app.use("/", paymentLinkRoutes);
 
 // GDPR
 app.use("/api/gdpr", privacyRoutes);
 app.use("/api/developer", developerDashboardRoutes);
 app.use("/api/admin", requireAuth, adminRoutes);
+// #573 – webhook circuit breaker state and manual reset. The router applies
+// requireAuth and requireAdmin itself, since it is also useful on its own.
+app.use("/api/admin/webhooks", webhookCircuitBreakerRoutes);
+// Provider circuit breaker state and manual reset endpoints (#678)
+app.use("/api/v1/admin/circuit-breaker", providerCircuitBreakerRoutes);
+app.use("/api/admin/circuit-breaker", providerCircuitBreakerRoutes);
 app.use("/api/admin/providers/status", requireAuth, providerStatusRouter);
+// #405 – Provider Health Dashboard
+app.use("/api/admin/providers/health", requireAuth, providerHealthRouter);
+// #393 – Deprecation timeline & usage monitoring
+app.use("/api/admin/deprecations", requireAuth, adminDeprecationRoutes);
 app.use("/api/admin/kyc-upgrades", requireAuth, kycTierUpgradeRoutes);
+app.use("/api/admin/analytics", requireAuth, analyticsRouter);
 app.use("/api/admin/auth", createAdminSep10Router());
+// #402 – KYC Webhook Callbacks
+app.use("/api/kyc/webhooks", kycWebhookRouter);
+// #403 – Transaction Metadata Search
+app.use("/api/transactions/metadata", transactionMetadataRouter);
+// #479 – real-time notification system status
+app.use("/api/notifications", notificationHealthRouter);
+// #481 – compliance training dashboard, assignments and certifications
+app.use("/api/compliance/training", complianceTrainingRouter);
+// #404 – Fraud Detection Logging
+app.use("/api/fraud", fraudRoutes);
+// #404 – 2FA Multi-method
+app.use("/api/auth/2fa", twoFactorRouter);
+// #392 – Batch Import Status Tracking
+app.use("/api/batch-operations", batchOperationRoutes);
+// #625 – Provider Throttle Dead-Letter Queue admin API
+app.use("/api/admin/provider-throttle", providerThrottleAdminRouter);
+// #358 – Provider Health Aggregation
+app.use("/api/health", healthProvidersRouter);
+// #356 – Read Replica Health Admin
+app.use("/api/admin/replicas", requireAuth, adminReplicasRouter);
+// #355 – Connection Pool Dashboard
+app.use("/api/admin/connections", requireAuth, connectionDashboardRouter);
+// #482/#484/#483/#485 – Automatic database optimization, provider contract
+// version management, transaction reversal audit and ML fraud detection
+app.use("/api/admin/maintenance", requireAuth, maintenanceRoutes);
+app.use("/api/receipt-templates", receiptTemplateRoutes);
 app.use("/sep10", createSep10Router());
 app.use("/sep31", sep31Router);
 app.use("/sep24", sep24Router);
@@ -450,20 +763,114 @@ if (process.env.SENTRY_DSN) {
 app.use(timeoutErrorHandler);
 app.use(errorHandler);
 
-function waitForActiveRequests(timeoutMs: number): Promise<void> {
-  if (activeRequests === 0) {
-    return Promise.resolve();
+export interface ShutdownDependencies {
+  server?: { close: (cb: (err?: any) => void) => void; closeAllConnections?: () => void } | null;
+  wsManager?: { close: () => Promise<void> } | null;
+  requestTracker?: { activeCount: number; waitForZero: (timeoutMs: number) => Promise<void> };
+  stopWorkers?: () => Promise<void>;
+  shutdownQueue?: () => Promise<void>;
+  stopHeartbeat?: () => void;
+  closeDbPool?: () => Promise<void>;
+  disconnectRedis?: () => Promise<void>;
+  graphqlCleanup?: { dispose: () => Promise<void> } | null;
+}
+
+export async function executeGracefulShutdown(
+  deps: ShutdownDependencies,
+  timeoutMs: number = SHUTDOWN_TIMEOUT_MS,
+  stepTimeoutMs: number = 5000
+): Promise<{ success: boolean; closedSteps: string[]; errors: Array<{ step: string; error: string }> }> {
+  const closedSteps: string[] = [];
+  const errors: Array<{ step: string; error: string }> = [];
+
+  const runBoundedStep = async (stepName: string, fn: () => Promise<void> | void): Promise<void> => {
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      console.log(`[Shutdown] Starting: ${stepName}`);
+      await Promise.race([
+        Promise.resolve(fn()),
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Timeout after ${stepTimeoutMs}ms`)), stepTimeoutMs);
+        }),
+      ]);
+      closedSteps.push(stepName);
+      console.log(`[Shutdown] Completed: ${stepName}`);
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      errors.push({ step: stepName, error: errMsg });
+      console.warn(`[Shutdown] Step '${stepName}' failed or timed out: ${errMsg}`);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  // Step 1: Stop HTTP server from accepting new requests
+  if (deps.server) {
+    await runBoundedStep("stop_http_listener", () => {
+      return new Promise<void>((resolve) => {
+        deps.server!.close((error) => {
+          if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+            console.error("[Shutdown] HTTP listener close error:", error);
+          }
+          resolve();
+        });
+      });
+    });
   }
 
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    const interval = setInterval(() => {
-      if (activeRequests === 0 || Date.now() - startedAt >= timeoutMs) {
-        clearInterval(interval);
-        resolve();
+  // Step 2: Drain in-flight active HTTP requests
+  if (deps.requestTracker) {
+    await runBoundedStep("drain_active_requests", async () => {
+      const active = deps.requestTracker!.activeCount;
+      if (active > 0) {
+        console.log(`[Shutdown] Waiting for ${active} active request(s) to finish (timeout ${timeoutMs}ms)`);
       }
-    }, 100);
-  });
+      await deps.requestTracker!.waitForZero(timeoutMs);
+      if (deps.requestTracker!.activeCount > 0) {
+        console.warn(`[Shutdown] Timed out waiting for active requests. Remaining: ${deps.requestTracker!.activeCount}`);
+        deps.server?.closeAllConnections?.();
+      }
+    });
+  }
+
+  // Step 3: Stop background workers
+  if (deps.stopWorkers) {
+    await runBoundedStep("stop_background_workers", deps.stopWorkers);
+  }
+
+  // Step 4: Drain and stop background queue resources
+  if (deps.shutdownQueue) {
+    await runBoundedStep("stop_queues", deps.shutdownQueue);
+  }
+
+  // Step 5: Stop heartbeat and monitoring services
+  if (deps.stopHeartbeat) {
+    await runBoundedStep("stop_heartbeat", deps.stopHeartbeat);
+  }
+
+  // Step 6: Close WebSocket and GraphQL connection managers
+  if (deps.wsManager) {
+    await runBoundedStep("close_websocket_manager", async () => {
+      await deps.wsManager!.close();
+    });
+  }
+  if (deps.graphqlCleanup) {
+    await runBoundedStep("close_graphql_cleanup", async () => {
+      await deps.graphqlCleanup!.dispose();
+    });
+  }
+
+  // Step 7: Close Redis client connections
+  if (deps.disconnectRedis) {
+    await runBoundedStep("disconnect_redis", deps.disconnectRedis);
+  }
+
+  // Step 8: Close PostgreSQL connection pool
+  if (deps.closeDbPool) {
+    await runBoundedStep("close_db_pool", deps.closeDbPool);
+  }
+
+  return { success: errors.length === 0, closedSteps, errors };
 }
 
 async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
@@ -477,58 +884,47 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
   console.log(`[Shutdown] Received ${signal}. Starting graceful shutdown...`);
 
   try {
-    if (server) {
-      console.log(
-        "[Shutdown] Stopping HTTP server from accepting new requests",
-      );
-      await new Promise<void>((resolve, reject) => {
-        server?.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
-      console.log("[Shutdown] HTTP listener closed");
-    }
+    const { stopNotificationWorker } = await import("./workers/notificationWorker.js").catch(() => ({
+      stopNotificationWorker: async () => {},
+    }));
+    const { shutdownQueue } = await import("./queue/index.js").catch(() => ({
+      shutdownQueue: async () => {},
+    }));
 
-    const pendingAtStart = activeRequests;
-    if (pendingAtStart > 0) {
-      console.log(
-        `[Shutdown] Waiting for ${pendingAtStart} active request(s) to finish (timeout ${SHUTDOWN_TIMEOUT_MS}ms)`,
-      );
-    }
+    const result = await executeGracefulShutdown(
+      {
+        server,
+        wsManager,
+        requestTracker,
+        stopWorkers: async () => {
+          await stopNotificationWorker();
+        },
+        shutdownQueue,
+        stopHeartbeat: () => {
+          stopHeartbeatService();
+        },
+        closeDbPool: async () => {
+          await pool.end();
+        },
+        disconnectRedis: async () => {
+          await disconnectRedis();
+        },
+        graphqlCleanup: graphqlServerCleanup,
+      },
+      SHUTDOWN_TIMEOUT_MS,
+      5000
+    );
 
-    await waitForActiveRequests(SHUTDOWN_TIMEOUT_MS);
+    wsManager = null;
+    graphqlServerCleanup = null;
 
-    if (activeRequests > 0) {
-      console.warn(
-        `[Shutdown] Timed out waiting for active requests. Remaining: ${activeRequests}`,
-      );
+    if (result.success) {
+      console.log("[Shutdown] Graceful shutdown completed cleanly");
+      process.exit(0);
     } else {
-      console.log("[Shutdown] All active requests finished");
+      console.warn(`[Shutdown] Graceful shutdown finished with ${result.errors.length} warning(s)`);
+      process.exit(0);
     }
-
-    console.log("[Shutdown] Draining queue resources");
-    const { shutdownQueue } = await import("./queue/index.js");
-    await shutdownQueue();
-    console.log("[Shutdown] Queue resources closed");
-
-    console.log("[Shutdown] Stopping heartbeat service");
-    stopHeartbeatService();
-    console.log("[Shutdown] Heartbeat service stopped");
-
-    console.log("[Shutdown] Closing PostgreSQL pool");
-    await pool.end();
-    console.log("[Shutdown] PostgreSQL pool closed");
-
-    console.log("[Shutdown] Closing Redis client");
-    await disconnectRedis();
-    console.log("[Shutdown] Redis client closed");
-
-    console.log("[Shutdown] Graceful shutdown complete");
-    process.exit(0);
   } catch (error) {
     console.error("[Shutdown] Shutdown sequence failed", error);
     process.exit(1);
@@ -544,15 +940,27 @@ process.once("SIGINT", () => {
 });
 
 export let wsManager: WebSocketManager | null = null;
+let graphqlServerCleanup: ServerCleanup | null = null;
 
 async function initializeRuntime(): Promise<void> {
   if (process.env.NODE_ENV === "test") {
     return;
   }
 
+  // #393 – Populate the deprecation registry with legacy endpoint notices.
+  seedDeprecations();
+
   // Initialize background jobs and monitoring
   const { startJobs } = await import("./jobs/scheduler.js");
   startJobs();
+
+  // #356 – Start replica health monitoring loop
+  const { startReplicaHealthMonitoring } = await import("./middleware/readReplicaRouting.js");
+  startReplicaHealthMonitoring();
+
+  // #355 – Start long-running transaction monitor
+  const { startLongRunningTransactionMonitor } = await import("./middleware/transactionLeakDetector.js");
+  startLongRunningTransactionMonitor();
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
@@ -582,7 +990,8 @@ async function initializeRuntime(): Promise<void> {
     await layeredCache.init();
     console.log("Layered cache (L1/L2) initialized");
 
-    const { providerSettingsService } = await import("./services/providerSettingsService.js");
+    const { providerSettingsService } =
+      await import("./services/providerSettingsService.js");
     await providerSettingsService.getAllSettings();
     console.log("Provider settings cache initialized");
 
@@ -590,9 +999,11 @@ async function initializeRuntime(): Promise<void> {
       startProviderBalanceAlertWorker,
       scheduleProviderBalanceAlertJob,
       startAccountingTokenRefreshWorker,
+      startSarGenerationWorker,
     } = await import("./queue/index.js");
     startProviderBalanceAlertWorker();
     startAccountingTokenRefreshWorker();
+    startSarGenerationWorker();
     await scheduleProviderBalanceAlertJob();
     console.log("Provider balance alert queue initialized");
   } catch (err) {
@@ -622,11 +1033,21 @@ async function initializeRuntime(): Promise<void> {
       console.log(`HTTP/1.1 server running on http://localhost:${PORT}`);
     });
 
-    wsManager = new WebSocketManager(server);
+    wsManager = new WebSocketManager(server, {
+      // Issue #814: revalidate credentials and account status at handshake
+      // time (stateful Redis check + frozen/suspended/deactivated rejection).
+      verifyConnection: async (token) => {
+        const claims = await verifyTokenStateful(token);
+        if (claims.userId && !(await isAccountActive(claims.userId))) {
+          throw new Error("Account is not active");
+        }
+        return claims;
+      },
+    });
     console.log("WebSocket server attached");
 
     // Start Apollo Server with APQ enabled (must run after HTTP server is created)
-    await startApolloServer(app, server);
+    graphqlServerCleanup = await startApolloServer(app, server);
     console.log("Apollo GraphQL server started at /graphql");
   }
 }

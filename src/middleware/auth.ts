@@ -1,12 +1,13 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyOAuthAccessToken } from "../auth/oauth";
-import { verifyToken, JWTPayload } from "../auth/jwt";
+import { verifyToken, createSessionBinding, JWTPayload } from "../auth/jwt";
 import { ADMIN_API_KEY } from "../config/env";
 import { redisClient } from "../config/redis";
 import { getAdminSep10Service } from "../stellar/adminSep10";
 import { evaluateGeoLoginAccess } from "../auth/geo";
 import { queryRead } from "../config/database";
 import { ScopeGroup } from "../auth/apikeys";
+import { checkAccountStatus } from "./checkAccountStatus";
 
 type RequestUser = {
   id: string;
@@ -171,9 +172,83 @@ export const requireAuth = async (
 };
 
 /**
+ * Middleware to require an administrative role.
+ * Must run after `requireAuth` (or `authenticateToken`) has populated `req.user`.
+ * Allows users whose role is `admin` or `superadmin`.
+ */
+export const requireAdmin = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  const role = (req as AuthRequest).user?.role ?? req.userRole;
+
+  if (!role) {
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Authentication required",
+    });
+  }
+
+  if (role !== "admin" && role !== "superadmin") {
+    return res.status(403).json({
+      error: "Forbidden",
+      message: "Administrative privileges required",
+    });
+  }
+
+  return next();
+};
+
+/**
+ * Middleware to require a specific permission.
+ * Must run after `requireAuth` (or `authenticateToken`) has populated `req.user`.
+ *
+ * Resolution order:
+ *  1. Explicit `req.userPermissions` (set by upstream middleware).
+ *  2. API key permission bitmask (`req.apiKeyPermissions`) — FULL_ACCESS bypasses.
+ *  3. Role-based fallback: `admin`/`superadmin` are granted all permissions.
+ */
+export const requirePermission = (permission: string) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const role = (req as AuthRequest).user?.role ?? req.userRole;
+
+    if (!role) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Authentication required",
+      });
+    }
+
+    if (role === "admin" || role === "superadmin") {
+      return next();
+    }
+
+    const explicit = req.userPermissions;
+    if (Array.isArray(explicit) && explicit.includes(permission)) {
+      return next();
+    }
+
+    const apiKeyPermissions = (req as any).apiKeyPermissions;
+    if (
+      typeof apiKeyPermissions === "number" &&
+      (apiKeyPermissions & ScopeGroup.FULL_ACCESS) === ScopeGroup.FULL_ACCESS
+    ) {
+      return next();
+    }
+
+    return res.status(403).json({
+      error: "Forbidden",
+      message: `Missing required permission: ${permission}`,
+    });
+  };
+};
+
+/**
  * JWT Authentication middleware that verifies JWT tokens
  * and attaches user information to the request object
  * Includes IP geofencing validation for operational regions
+ * and account status enforcement
  */
 export async function authenticateToken(
   req: Request,
@@ -192,7 +267,10 @@ export async function authenticateToken(
   }
 
   try {
-    const decoded = verifyToken(token);
+    const decoded = await verifyTokenStateful(
+      token,
+      createSessionBinding(req.header("X-Device-ID"), req.get("user-agent")),
+    );
     if (rejectMutationDuringImpersonation(req, res, decoded)) {
       return;
     }
@@ -208,7 +286,9 @@ export async function authenticateToken(
     }
 
     req.jwtUser = decoded;
-    next();
+    
+    // Check account status (frozen/suspended) before allowing request
+    await checkAccountStatus(req, res, next);
   } catch (error) {
     if (error instanceof Error) {
       if (error.message === "Token has expired") {
@@ -243,10 +323,7 @@ export async function authenticateToken(
 export function optionalAuthentication(
   req: Request,
   res: Response,
-  next: NextFunction,
-): void {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
+  next
 
   if (!token) {
     next();
@@ -267,18 +344,9 @@ export function optionalAuthentication(
   next();
 }
 
-export async function verifyTokenStateful(token: string): Promise<JWTPayload> {
+export async function verifyTokenStateful(token: string, binding?: string): Promise<JWTPayload> {
   // Run standard cryptographic verification
   const decoded = verifyToken(token);
-  
-  // Fast Redis check to ensure token wasn't issued before a password change
-  if (redisClient.isOpen && decoded.userId && decoded.iat) {
-    const invalidatedAtRaw = await redisClient.get(`user:${decoded.userId}:jwt_invalidated_at`);
-    const invalidatedAt = invalidatedAtRaw ? String(invalidatedAtRaw) : null;
-    if (invalidatedAt && decoded.iat <= parseInt(invalidatedAt, 10)) {
-      throw new Error("Token has been revoked due to password change");
-    }
-  }
-  
-  return decoded;
-}
+ 
+
+/* … truncated 943 chars — edit only what you need near the top … */

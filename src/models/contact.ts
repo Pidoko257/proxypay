@@ -1,4 +1,9 @@
 import { pool, queryRead, queryWrite } from "../config/database";
+import {
+  CursorPayload,
+  buildCursorWhere,
+  createCursor,
+} from "../utils/pagination";
 
 export type DestinationType = "phone" | "stellar";
 
@@ -54,16 +59,56 @@ export class ContactModel {
     return mapRow(result.rows[0]);
   }
 
-  async listByUser(userId: string): Promise<UserContact[]> {
-    const result = await queryRead(
-      `SELECT id, user_id, destination_type, destination_value, nickname, created_at, updated_at
-       FROM user_contacts
-       WHERE user_id = $1
-       ORDER BY created_at DESC`,
-      [userId],
-    );
+  /**
+   * List a user's contacts, newest first, with keyset (cursor) pagination.
+   *
+   * Ordering is stable: `ORDER BY created_at DESC, id DESC` with the cursor
+   * predicate `(created_at, id) < (cursor.t, cursor.id)` so rows with equal
+   * timestamps are never skipped or duplicated across pages.
+   */
+  async listByUser(
+    userId: string,
+    options?: { limit?: number; cursor?: CursorPayload; search?: string },
+  ): Promise<{ contacts: UserContact[]; nextCursor?: string }> {
+    const limit = Math.min(Math.max(options?.limit ?? 50, 1), 100);
+    const cursor = options?.cursor;
+    const search = options?.search?.trim();
 
-    return result.rows.map(mapRow);
+    let query = `SELECT id, user_id, destination_type, destination_value, nickname, created_at, updated_at
+        FROM user_contacts
+        WHERE user_id = $1`;
+    const params: unknown[] = [userId];
+
+    if (search) {
+      query += ` AND (nickname ILIKE $${params.length + 1} OR destination_value ILIKE $${params.length + 2})`;
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    if (cursor) {
+      const { clause, params: cursorParams } = buildCursorWhere(cursor, {
+        column: "created_at",
+        idColumn: "id",
+        order: "desc",
+        direction: "forward",
+        paramOffset: params.length + 1,
+      });
+      query += ` AND ${clause}`;
+      params.push(...cursorParams);
+    }
+
+    // Fetch one extra row — the overflow row signals there is a next page.
+    query += ` ORDER BY created_at DESC, id DESC LIMIT $${params.length + 1}`;
+    params.push(limit + 1);
+
+    const result = await queryRead(query, params);
+    const rows = result.rows.map(mapRow);
+    const hasMore = rows.length > limit;
+    const contacts = hasMore ? rows.slice(0, limit) : rows;
+
+    const last = contacts[contacts.length - 1];
+    const nextCursor =
+      hasMore && last ? createCursor(last.createdAt, last.id) : undefined;
+    return { contacts, nextCursor };
   }
 
   async findByIdForUser(

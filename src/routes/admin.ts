@@ -9,8 +9,13 @@ import {
   DashboardConfig,
   validateDashboardConfig,
   DASHBOARD_CONFIG_VALIDATION_ERRORS,
+  reorderWidgets,
+  toggleWidgetVisibility,
+  setWidgetRefreshRate,
 } from "../utils/dashboardConfig";
 import { auditInterceptor } from "../middleware/auditInterceptor";
+import { authenticateToken } from "../middleware/auth";
+import { requirePermission } from "../middleware/rbac";
 import {
   rateLimitExport,
   rateLimitListQueries,
@@ -19,10 +24,16 @@ import {
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { getQueueStats } from "../queue/transactionQueue";
 import { redisClient } from "../config/redis";
-import { checkReplicaHealth, pool } from "../config/database";
+import {
+  checkReplicaHealth,
+  pool,
+  getConnectionPoolStatistics,
+  setReplicaEnabled,
+  getReplicaStatuses,
+} from "../config/database";
 import { UserModel } from "../models/users";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
-import { StellarService } from "../services/stellar/stellarService";
+import { StellarService, ClawbackDestinationError } from "../services/stellar/stellarService";
 import { ledgerService } from "../services/ledgerService";
 import highThroughputService from "../services/stellar/highThroughputService";
 import multer from "multer";
@@ -49,6 +60,8 @@ import { providerSettingsService } from "../services/providerSettingsService";
 import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { logBulkAdminAudit, searchAuditLogs } from "../utils/log-audit-event";
+import logger from '../utils/logger';
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -116,12 +129,54 @@ const normalizeBulkIds = (value: unknown): string[] => {
 
 const MAX_BULK_IDS = 100;
 
-/**
- * Mock services (replace with real DB/services)
- */
-const users: User[] = [];
 const transactionModel = new TransactionModel();
 const complianceDocumentModel = new ComplianceDocumentModel();
+
+const DEFAULT_DASHBOARD_CONFIG: DashboardConfig = {
+  layout: "grid",
+  widgets: [],
+} as DashboardConfig;
+
+/**
+ * Wraps an async handler so rejected promises reach the Express error
+ * handler (Express 4 does not do this automatically).
+ */
+const asyncRoute =
+  (handler: (req: Request, res: Response) => Promise<unknown>) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    handler(req, res).catch(next);
+  };
+
+const userNotFound = () =>
+  createError(ERROR_CODES.NOT_FOUND, "User not found", {
+    message: "User not found",
+  });
+
+/** Loads a user's dashboard config from the database (404 if user missing). */
+const loadDashboardConfig = async (userId: string): Promise<DashboardConfig> => {
+  const stored = await new UserModel().getDashboardConfig(userId);
+  if (stored === undefined) throw userNotFound();
+  return (stored as DashboardConfig | null) ?? DEFAULT_DASHBOARD_CONFIG;
+};
+
+/** Persists a user's dashboard config to the database (404 if user missing). */
+const saveDashboardConfig = async (
+  userId: string,
+  config: DashboardConfig,
+): Promise<void> => {
+  const updated = await new UserModel().updateDashboardConfig(userId, config);
+  if (!updated) throw userNotFound();
+};
+
+const requireActorId = (req: Request): string => {
+  const userId = (req as AuthRequest).user?.id;
+  if (!userId) {
+    throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+      message: "Authentication required",
+    });
+  }
+  return userId;
+};
 
 const isAdminRole = (role?: string) =>
   role === "admin" || role === "super-admin";
@@ -150,17 +205,17 @@ const logImpersonationAuditEvent = (
   req: Request,
   details: Record<string, unknown>,
 ) => {
-  console.log("[ADMIN IMPERSONATION]", {
+  logger.info({
     event,
     ...buildAuditContext(req),
     ...details,
-  });
+  }, '[ADMIN IMPERSONATION]');
 };
 
 /**
  * Middleware: Require Admin Role
  */
-const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
+export const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   // Assume req.user is set by auth middleware
   const user = (req as AuthRequest).user;
 
@@ -191,18 +246,64 @@ const requireSuperAdmin = (req: Request, res: Response, next: NextFunction) => {
 /**
  * Middleware: Admin Logger
  */
-const logAdminAction = (action: string) => {
+export const logAdminAction = (action: string) => {
   return (req: Request, res: Response, next: NextFunction) => {
-    console.log(`[ADMIN ACTION] ${action}`, {
+    logger.info({
       adminId: (req as AuthRequest).user?.id,
       method: req.method,
       path: req.originalUrl,
       body: req.body,
       timestamp: new Date().toISOString(),
-    });
+    }, '[ADMIN ACTION]');
     next();
   };
 };
+
+/**
+ * Persist a bulk admin operation to the `audit_logs` table (issue #620).
+ *
+ * `logAdminAction` only writes to stdout, so bulk operations previously left no
+ * durable, queryable record of which records were touched or what changed. The
+ * write is fire-and-forget: auditing must never fail the operation itself.
+ *
+ * @param req          Request the operation is running in (supplies actor, IP
+ *                     and User-Agent).
+ * @param action       Action identifier, e.g. `BULK_FREEZE_USERS`.
+ * @param resource     Resource type the action applied to (`user`/`transaction`).
+ * @param resourceIds  IDs the operation was applied to.
+ * @param changes      Structured description of the change.
+ * @param reason       Operator-supplied justification, when required.
+ */
+const recordBulkAudit = (
+  req: Request,
+  action: string,
+  resource: string,
+  resourceIds: string[],
+  changes: Record<string, unknown> = {},
+  reason?: string,
+): void => {
+  const actor = (req as AuthRequest).user;
+
+  void logBulkAdminAudit({
+    adminId: actor?.id ?? "unknown_admin",
+    action,
+    resource,
+    resourceIds,
+    changes: { ...changes, actorRole: actor?.role ?? null },
+    reason,
+    ipAddress: req.ip ?? null,
+    userAgent: req.get("user-agent") ?? null,
+  });
+};
+
+/** Split a bulk action result set into the ids that succeeded / failed. */
+const splitBulkResults = <T extends { status: "success" | "failed" }>(
+  results: T[],
+  getId: (result: T) => string,
+) => ({
+  succeededIds: results.filter((r) => r.status === "success").map(getId),
+  failedIds: results.filter((r) => r.status === "failed").map(getId),
+});
 
 /**
  * Helper: Pagination
@@ -247,7 +348,7 @@ router.get(
         sla_threshold_hours: 24,
       });
     } catch (err) {
-      console.error("Error fetching transaction resolution metrics:", err);
+      logger.error({ error: err }, 'Error fetching transaction resolution metrics:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve transaction resolution metrics",
@@ -348,6 +449,9 @@ router.post(
           }
 
           results.push({ userId, status: "success" });
+
+          // Terminate the user's open WS/subscription sessions (issue #814)
+          await revokeUserSessionsOnStatusChange(userId, "frozen");
         } catch (error) {
           results.push({
             userId,
@@ -356,6 +460,25 @@ router.post(
           });
         }
       }
+
+      const { succeededIds, failedIds } = splitBulkResults(
+        results,
+        (r) => r.userId,
+      );
+
+      recordBulkAudit(
+        req,
+        "BULK_FREEZE_USERS",
+        "user",
+        succeededIds,
+        {
+          status: "frozen",
+          reason: reason.trim(),
+          requestedIds: userIds,
+          failedIds,
+        },
+        reason.trim(),
+      );
 
       const succeeded = results.filter((r) => r.status === "success").length;
       const failed = results.length - succeeded;
@@ -370,7 +493,9 @@ router.post(
         results,
       });
     } catch (error) {
-      console.error("Error bulk freezing users:", error);
+      // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error bulk freezing users:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -474,6 +599,25 @@ router.post(
         }
       }
 
+      const { succeededIds, failedIds } = splitBulkResults(
+        results,
+        (r) => r.userId,
+      );
+
+      recordBulkAudit(
+        req,
+        "BULK_UNFREEZE_USERS",
+        "user",
+        succeededIds,
+        {
+          status: "active",
+          reason: reason.trim(),
+          requestedIds: userIds,
+          failedIds,
+        },
+        reason.trim(),
+      );
+
       const succeeded = results.filter((r) => r.status === "success").length;
       const failed = results.length - succeeded;
 
@@ -487,7 +631,9 @@ router.post(
         results,
       });
     } catch (error) {
-      console.error("Error bulk unfreezing users:", error);
+      // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error bulk unfreezing users:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -512,7 +658,7 @@ router.get(
         sla_threshold_hours: 24,
       });
     } catch (err) {
-      console.error("Error fetching dispute resolution metrics:", err);
+      logger.error({ error: err }, 'Error fetching dispute resolution metrics:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve dispute resolution metrics",
@@ -536,13 +682,18 @@ router.get(
   requireAdmin,
   rateLimitListQueries,
   logAdminAction("LIST_USERS"),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const page = Number(req.query.page) || 1;
     const limit = Number(req.query.limit) || 10;
 
-    const result = paginate(users, page, limit);
-
-    res.json(result);
+    const result = await new UserModel().list(limit, (page - 1) * limit);
+    res.json({
+      data: result.users,
+      total: result.total,
+      page,
+      limit,
+      totalPages: Math.ceil(result.total / limit),
+    });
   },
 );
 // GET /api/admin/users/:id
@@ -550,8 +701,8 @@ router.get(
   "/users/:id",
   requireAdmin,
   logAdminAction("GET_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  async (req: Request, res: Response) => {
+    const user = await new UserModel().findById(req.params.id);
 
     if (!user) {
       throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
@@ -567,9 +718,9 @@ router.post(
   "/users/:id/impersonation-token",
   requireAdmin,
   requireSuperAdmin,
-  (req: Request, res: Response) => {
+  asyncRoute(async (req: Request, res: Response) => {
     const actor = (req as AuthRequest).user;
-    const targetUser = users.find((u) => u.id === req.params.id);
+    const targetUser = await new UserModel().findById(req.params.id);
     const reason =
       typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
 
@@ -664,7 +815,7 @@ router.post(
       },
       guidance: READ_ONLY_IMPERSONATION_MESSAGE,
     });
-  },
+  }),
 );
 
 // POST /api/admin/users/bulk/unlock
@@ -703,10 +854,11 @@ router.post(
       }
 
       const results: BulkActionResult[] = [];
+      const userModel = new UserModel();
 
       for (const userId of userIds) {
         try {
-          const user = users.find((u) => u.id === userId);
+          const user = await userModel.findById(userId);
           if (!user) {
             results.push({
               userId,
@@ -716,7 +868,7 @@ router.post(
             continue;
           }
 
-          user.locked = false;
+          await adminUnlock(user.phoneNumber, adminUser.id);
           results.push({ userId, status: "success" });
         } catch (error) {
           results.push({
@@ -726,6 +878,17 @@ router.post(
           });
         }
       }
+
+      const { succeededIds, failedIds } = splitBulkResults(
+        results,
+        (r) => r.userId,
+      );
+
+      recordBulkAudit(req, "BULK_UNLOCK_USERS", "user", succeededIds, {
+        locked: false,
+        requestedIds: userIds,
+        failedIds,
+      });
 
       const succeeded = results.filter((r) => r.status === "success").length;
       const failed = results.length - succeeded;
@@ -740,7 +903,9 @@ router.post(
         results,
       });
     } catch (error) {
-      console.error("Error bulk unlocking users:", error);
+      // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error bulk unlocking users:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -751,19 +916,25 @@ router.put(
   "/users/:id",
   requireAdmin,
   logAdminAction("UPDATE_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  asyncRoute(async (req: Request, res: Response) => {
+    const userModel = new UserModel();
+    const existing = await userModel.findById(req.params.id);
 
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
+    if (!existing) throw userNotFound();
+
+    // Only explicitly supported fields may be changed; arbitrary body keys
+    // are ignored to prevent mass assignment (role, status, etc.).
+    const { email, displayName } = req.body ?? {};
+    if (typeof email === "string" && email.trim()) {
+      await userModel.updateEmail(existing.id, email.trim());
+    }
+    if (typeof displayName === "string" || displayName === null) {
+      await userModel.updateDisplayName(existing.id, displayName);
     }
 
-    Object.assign(user, req.body);
-
+    const user = await userModel.findById(existing.id);
     res.json({ message: "User updated", user });
-  },
+  }),
 );
 
 // POST /api/admin/users/:id/unlock
@@ -771,19 +942,15 @@ router.post(
   "/users/:id/unlock",
   requireAdmin,
   logAdminAction("UNLOCK_USER"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
+  asyncRoute(async (req: Request, res: Response) => {
+    const user = await new UserModel().findById(req.params.id);
 
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
+    if (!user) throw userNotFound();
 
-    user.locked = false;
+    await adminUnlock(user.phoneNumber, (req as AuthRequest).user?.id);
 
     res.json({ message: "User account unlocked" });
-  },
+  }),
 );
 
 // POST /api/admin/users/:id/freeze
@@ -855,12 +1022,12 @@ router.post(
         );
       }
 
-      console.log(`[ADMIN] User account frozen: ${userId}`, {
+      logger.info({
         adminId: adminUser.id,
         targetUserId: userId,
         reason: reason.trim(),
         timestamp: new Date().toISOString(),
-      });
+      }, '[ADMIN]');
 
       res.json({
         message: "User account frozen successfully",
@@ -870,7 +1037,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error("Error freezing user account:", error);
+      logger.error({ error: error }, 'Error freezing user account:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -941,12 +1108,12 @@ router.post(
         );
       }
 
-      console.log(`[ADMIN] User account unfrozen: ${userId}`, {
+      logger.info({
         adminId: adminUser.id,
         targetUserId: userId,
         reason: reason.trim(),
         timestamp: new Date().toISOString(),
-      });
+      }, '[ADMIN]');
 
       res.json({
         message: "User account unfrozen successfully",
@@ -956,7 +1123,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error("Error unfreezing user account:", error);
+      logger.error({ error: error }, 'Error unfreezing user account:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -988,7 +1155,7 @@ router.get(
         history: auditHistory,
       });
     } catch (error) {
-      console.error("Error fetching user status history:", error);
+      logger.error({ error: error }, 'Error fetching user status history:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1005,25 +1172,14 @@ router.get(
   "/users/:id/dashboard-config",
   requireAdmin,
   logAdminAction("GET_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
-
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
-
-    const config = user.dashboard_config || {
-      layout: "grid",
-      widgets: [],
-    };
+  asyncRoute(async (req: Request, res: Response) => {
+    const config = await loadDashboardConfig(req.params.id);
 
     res.json({
-      userId: user.id,
+      userId: req.params.id,
       config,
     });
-  },
+  }),
 );
 
 // PUT /api/admin/users/:id/dashboard-config
@@ -1031,15 +1187,7 @@ router.put(
   "/users/:id/dashboard-config",
   requireAdmin,
   logAdminAction("UPDATE_DASHBOARD_CONFIG"),
-  (req: Request, res: Response) => {
-    const user = users.find((u) => u.id === req.params.id);
-
-    if (!user) {
-      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
-        message: "User not found",
-      });
-    }
-
+  asyncRoute(async (req: Request, res: Response) => {
     const { config } = req.body;
 
     // Validate the dashboard config against the JSON schema
@@ -1055,14 +1203,132 @@ router.put(
     }
 
     // Save the configuration
-    user.dashboard_config = config;
+    await saveDashboardConfig(req.params.id, config);
 
     res.json({
       message: "Dashboard configuration saved",
-      userId: user.id,
-      config: user.dashboard_config,
+      userId: req.params.id,
+      config,
     });
-  },
+  }),
+);
+
+// GET /api/admin/dashboard/config — get current user's dashboard config
+router.get(
+  "/dashboard/config",
+  requireAdmin,
+  logAdminAction("GET_MY_DASHBOARD_CONFIG"),
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
+    const config = await loadDashboardConfig(userId);
+    res.json({ userId, config });
+  }),
+);
+
+// PUT /api/admin/dashboard/config — replace entire dashboard config
+router.put(
+  "/dashboard/config",
+  requireAdmin,
+  logAdminAction("PUT_MY_DASHBOARD_CONFIG"),
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
+    const { config } = req.body;
+
+    if (!validateDashboardConfig(config)) {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "Invalid dashboard configuration",
+        {
+          message: "Invalid dashboard configuration",
+          errors: DASHBOARD_CONFIG_VALIDATION_ERRORS,
+        },
+      );
+    }
+
+    await saveDashboardConfig(userId, config);
+
+    res.json({ message: "Dashboard configuration saved", userId, config });
+  }),
+);
+
+// PATCH /api/admin/dashboard/widgets/reorder — reorder widgets
+router.patch(
+  "/dashboard/widgets/reorder",
+  requireAdmin,
+  logAdminAction("REORDER_DASHBOARD_WIDGETS"),
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
+    const { fromIndex, toIndex } = req.body;
+
+    if (typeof fromIndex !== "number" || typeof toIndex !== "number") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "fromIndex and toIndex must be numbers",
+        { message: "fromIndex and toIndex must be numbers" },
+      );
+    }
+
+    const current = await loadDashboardConfig(userId);
+
+    const config = reorderWidgets(current, fromIndex, toIndex);
+    await saveDashboardConfig(userId, config);
+    res.json({
+      message: "Widgets reordered",
+      userId,
+      config,
+    });
+  }),
+);
+
+// PATCH /api/admin/dashboard/widgets/:widgetId/visibility — toggle visibility
+router.patch(
+  "/dashboard/widgets/:widgetId/visibility",
+  requireAdmin,
+  logAdminAction("TOGGLE_WIDGET_VISIBILITY"),
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
+    const { widgetId } = req.params;
+
+    const current = await loadDashboardConfig(userId);
+
+    const config = toggleWidgetVisibility(current, widgetId);
+    await saveDashboardConfig(userId, config);
+    res.json({
+      message: "Widget visibility toggled",
+      userId,
+      config,
+    });
+  }),
+);
+
+// PATCH /api/admin/dashboard/widgets/:widgetId/refresh-rate — set refresh rate
+router.patch(
+  "/dashboard/widgets/:widgetId/refresh-rate",
+  requireAdmin,
+  logAdminAction("SET_WIDGET_REFRESH_RATE"),
+  asyncRoute(async (req: Request, res: Response) => {
+    const userId = requireActorId(req);
+    const { widgetId } = req.params;
+    const { refreshRateSecs } = req.body;
+
+    if (typeof refreshRateSecs !== "number") {
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "refreshRateSecs must be a number",
+        { message: "refreshRateSecs must be a number" },
+      );
+    }
+
+    const current = await loadDashboardConfig(userId);
+
+    const config = setWidgetRefreshRate(current, widgetId, refreshRateSecs);
+    await saveDashboardConfig(userId, config);
+    res.json({
+      message: "Widget refresh rate updated",
+      userId,
+      config,
+    });
+  }),
 );
 
 // provider balance route
@@ -1119,7 +1385,7 @@ router.get(
         },
       });
     } catch (err) {
-      console.error("Error listing transactions for admin:", err);
+      logger.error({ error: err }, 'Error listing transactions for admin:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to list transactions",
@@ -1162,7 +1428,7 @@ router.put(
       const updatedTx = await transactionModel.findById(req.params.id);
       res.json({ message: "Transaction updated", transaction: updatedTx });
     } catch (err) {
-      console.error("Error updating transaction:", err);
+      logger.error({ error: err }, 'Error updating transaction:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to update transaction",
@@ -1259,6 +1525,23 @@ router.patch(
         }
       }
 
+      const { succeededIds, failedIds } = splitBulkResults(
+        results,
+        (r) => r.transactionId,
+      );
+
+      recordBulkAudit(
+        req,
+        "BULK_UPDATE_TRANSACTION_ADMIN_NOTES",
+        "transaction",
+        succeededIds,
+        {
+          adminNotes: adminNotes,
+          requestedIds: transactionIds,
+          failedIds,
+        },
+      );
+
       const succeeded = results.filter((r) => r.status === "success").length;
       const failed = results.length - succeeded;
 
@@ -1268,7 +1551,9 @@ router.patch(
         results,
       });
     } catch (error) {
-      console.error("Error bulk updating transaction admin notes:", error);
+      // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error bulk updating transaction admin notes:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1350,6 +1635,23 @@ router.patch(
         }
       }
 
+      const { succeededIds, failedIds } = splitBulkResults(
+        results,
+        (r) => r.transactionId,
+      );
+
+      recordBulkAudit(
+        req,
+        "BULK_UPDATE_TRANSACTION_STATUS",
+        "transaction",
+        succeededIds,
+        {
+          status,
+          requestedIds: transactionIds,
+          failedIds,
+        },
+      );
+
       const succeeded = results.filter((r) => r.status === "success").length;
       const failed = results.length - succeeded;
 
@@ -1359,7 +1661,9 @@ router.patch(
         results,
       });
     } catch (error) {
-      console.error("Error bulk updating transaction status:", error);
+      // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error bulk updating transaction status:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1460,6 +1764,22 @@ router.post(
         }
       }
 
+      const { succeededIds, failedIds } = splitBulkResults(
+        results,
+        (r) => r.transactionId,
+      );
+
+      recordBulkAudit(
+        req,
+        "BULK_REFUND_TRANSACTIONS",
+        "transaction",
+        succeededIds,
+        {
+          requestedIds: transactionIds,
+          failedIds,
+        },
+      );
+
       const succeeded = results.filter((r) => r.status === "success").length;
       const failed = results.length - succeeded;
 
@@ -1469,7 +1789,9 @@ router.post(
         results,
       });
     } catch (error) {
-      console.error("Error bulk refunding transactions:", error);
+      // Preserve validation errors (e.g. unknown/empty ids) instead of masking them as 500s.
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error bulk refunding transactions:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
@@ -1488,11 +1810,21 @@ router.get(
   requireAdmin,
   logAdminAction("VIEW_DLQ"),
   async (req: Request, res: Response) => {
-    const { queueName, failureReason, from, to } = req.query as Record<string, string | undefined>;
+    const { queueName, failureReason, from, to } = req.query as Record<
+      string,
+      string | undefined
+    >;
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const offset = parseInt(req.query.offset as string) || 0;
 
-    const { items, total } = await queryDLQ({ queueName, failureReason, from, to, limit, offset });
+    const { items, total } = await queryDLQ({
+      queueName,
+      failureReason,
+      from,
+      to,
+      limit,
+      offset,
+    });
     res.json({ success: true, total, limit, offset, items });
   },
 );
@@ -1532,7 +1864,7 @@ router.get(
       const transfers = await getLiquidityTransfers(limit, offset);
       res.json({ transfers });
     } catch (err) {
-      console.error("[liquidity] Failed to list transfers:", err);
+      logger.error({ error: err }, '[liquidity]Failed to list transfers:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve liquidity transfers",
@@ -1594,7 +1926,7 @@ router.post(
       res.status(201).json({ message: "Transfer initiated", ...result });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Transfer failed";
-      console.error("[liquidity] Manual transfer error:", err);
+      logger.error({ error: err }, '[liquidity]Manual transfer error:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, msg);
     }
   },
@@ -1641,19 +1973,19 @@ router.post(
       const result = await reconcileTransactions(providerRows, dateRange);
 
       // Log reconciliation summary
-      console.log("[CSV RECONCILIATION]", {
+      logger.info({
         adminId: (req as AuthRequest).user?.id,
         filename: req.file.originalname,
         summary: result.summary,
         timestamp: new Date().toISOString(),
-      });
+      }, '[CSV RECONCILIATION]');
 
       res.json({
         message: "Reconciliation completed successfully",
         result,
       });
     } catch (error) {
-      console.error("[CSV RECONCILIATION ERROR]", error);
+      logger.error({ error: error }, '[CSV RECONCILIATION ERROR]');
 
       if (error instanceof Error) {
         throw createError(ERROR_CODES.INTERNAL_ERROR, "Reconciliation failed", {
@@ -1709,7 +2041,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("Error fetching reconciliation runs:", error);
+      logger.error({ error: error }, 'Error fetching reconciliation runs:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch reconciliation runs",
@@ -1759,7 +2091,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("Error fetching reconciliation alerts:", error);
+      logger.error({ error: error }, 'Error fetching reconciliation alerts:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch reconciliation alerts",
@@ -1818,7 +2150,7 @@ router.patch(
 
       res.json({ message: "Alert reviewed successfully" });
     } catch (error) {
-      console.error("Error reviewing reconciliation alert:", error);
+      logger.error({ error: error }, 'Error reviewing reconciliation alert:');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to review alert");
     }
   },
@@ -1866,7 +2198,7 @@ router.post(
         result,
       });
     } catch (error) {
-      console.error("Error running manual reconciliation:", error);
+      logger.error({ error: error }, 'Error running manual reconciliation:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Manual reconciliation failed",
@@ -1889,7 +2221,7 @@ router.get(
       const configs = await providerReconciliationService.getProviderConfigs();
       res.json({ data: configs });
     } catch (error) {
-      console.error("Error fetching reconciliation configs:", error);
+      logger.error({ error: error }, 'Error fetching reconciliation configs:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch reconciliation configs",
@@ -1919,7 +2251,7 @@ router.get(
       try {
         providers = mobileMoneyService.getFailoverStats();
       } catch (err) {
-        console.error("Error fetching failover stats:", err);
+        logger.error({ error: err }, 'Error fetching failover stats:');
       }
 
       // Get queue stats
@@ -1931,7 +2263,7 @@ router.get(
           stats: queueStats,
         };
       } catch (err) {
-        console.error("Error fetching queue stats:", err);
+        logger.error({ error: err }, 'Error fetching queue stats:');
       }
 
       // Get Redis status
@@ -1944,7 +2276,7 @@ router.get(
           redis.status = "closed";
         }
       } catch (err) {
-        console.error("Error checking Redis status:", err);
+        logger.error({ error: err }, 'Error checking Redis status:');
         redis.status = "down";
       }
 
@@ -1963,7 +2295,7 @@ router.get(
           replicas: replicaHealth,
         };
       } catch (err) {
-        console.error("Error checking database health:", err);
+        logger.error({ error: err }, 'Error checking database health:');
       }
 
       res.json({
@@ -1975,7 +2307,7 @@ router.get(
         database,
       });
     } catch (err) {
-      console.error("Health check error:", err);
+      logger.error({ error: err }, 'Health check error:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to retrieve health data",
@@ -1983,6 +2315,28 @@ router.get(
           status: "error",
           message: "Failed to retrieve health data",
           timestamp: new Date().toISOString(),
+        },
+      );
+    }
+  },
+);
+
+// GET /api/admin/database/replication — cross-region replication status
+router.get(
+  "/database/replication",
+  requireAdmin,
+  logAdminAction("GET_DATABASE_REPLICATION"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stats = await getPoolStats();
+      res.json({ success: true, ...stats });
+    } catch (err) {
+      logger.error({ error: err }, 'Error fetching replication status:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch replication status",
+        {
+          message: err instanceof Error ? err.message : "Unknown error",
         },
       );
     }
@@ -2033,9 +2387,99 @@ router.get(
 
       res.json({ rows, totals });
     } catch (err) {
-      console.error("[financial/pnl]", err);
+      logger.error({ error: err }, '[financial/pnl]');
       throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch PnL data");
     }
+  },
+);
+
+router.get(
+  "/financial/dashboard/manifest.json",
+  requireAdmin,
+  (_req: Request, res: Response) => {
+    res.json({
+      name: "ProxyPay Financial Dashboard",
+      short_name: "ProxyPay",
+      description:
+        "Mobile-friendly financial dashboard with offline cached transaction insights.",
+      start_url: "/api/admin/financial/dashboard",
+      display: "standalone",
+      background_color: "#020817",
+      theme_color: "#0f172a",
+      orientation: "portrait-primary",
+      scope: "/api/admin/financial/dashboard/",
+      icons: [
+        {
+          src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Crect width='128' height='128' rx='24' fill='%230f172a'/%3E%3Cpath d='M26 90h76V38H68l-10 10H26v42zm18-28h40v8H44v-8zm0 18h26v8H44v-8z' fill='%2360a5fa'/%3E%3C/svg%3E",
+          sizes: "128x128",
+          type: "image/svg+xml",
+          purpose: "any maskable",
+        },
+      ],
+    });
+  },
+);
+
+router.get(
+  "/financial/dashboard/sw.js",
+  requireAdmin,
+  (_req: Request, res: Response) => {
+    res.type("application/javascript");
+    res.send(`const CACHE_NAME = 'proxypay-financial-dashboard-v1';
+const APP_SHELL = [
+  '/api/admin/financial/dashboard',
+  '/api/admin/financial/dashboard/manifest.json',
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()),
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(
+      keys
+        .filter((key) => key !== CACHE_NAME)
+        .map((key) => caches.delete(key)),
+    )).then(() => self.clients.claim()),
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
+
+  const url = new URL(event.request.url);
+  const isDashboard = url.pathname === '/api/admin/financial/dashboard';
+  const isPnl = url.pathname === '/api/admin/financial/pnl';
+  const isTransactions = url.pathname === '/api/admin/transactions';
+
+  if (isDashboard || isPnl || isTransactions) {
+    event.respondWith(
+      caches.open(CACHE_NAME).then(async (cache) => {
+        try {
+          const networkResponse = await fetch(event.request);
+          if (networkResponse.ok) {
+            cache.put(event.request, networkResponse.clone());
+          }
+          return networkResponse;
+        } catch (error) {
+          const cachedResponse = await cache.match(event.request);
+          if (cachedResponse) return cachedResponse;
+          return cache.match('/api/admin/financial/dashboard');
+        }
+      }),
+    );
+    return;
+  }
+
+  if (url.origin === self.location.origin) {
+    event.respondWith(
+      caches.match(event.request).then((cached) => cached || fetch(event.request)),
+    );
+  }
+});`);
   },
 );
 
@@ -2049,71 +2493,180 @@ router.get(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Financial Dashboard</title>
+<link rel="manifest" href="/api/admin/financial/dashboard/manifest.json">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px}
-  h1{font-size:1.4rem;font-weight:600;margin-bottom:20px;color:#f8fafc}
-  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:28px}
-  .card{background:#1e293b;border-radius:10px;padding:20px}
-  .card .label{font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
-  .card .value{font-size:1.6rem;font-weight:700}
+  body{font-family:system-ui,sans-serif;background:#020817;color:#e2e8f0;padding:24px}
+  .app-shell{max-width:1100px;margin:0 auto;padding-bottom:64px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+  h1{font-size:clamp(1.3rem,2vw,1.8rem);font-weight:700;color:#f8fafc}
+  .install-button{background:#2563eb;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-weight:600;cursor:pointer;display:none}
+  .install-button.visible{display:inline-flex}
+  .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:28px}
+  .card{background:#111827;border-radius:12px;padding:18px;border:1px solid rgba(148,163,184,.15);box-shadow:0 10px 30px rgba(15,23,42,.18)}
+  .card .label{font-size:.72rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+  .card .value{font-size:clamp(1.2rem,2vw,1.8rem);font-weight:700}
   .green{color:#34d399}.red{color:#f87171}.blue{color:#60a5fa}
-  .chart-box{background:#1e293b;border-radius:10px;padding:20px}
-  .chart-box h2{font-size:.9rem;color:#94a3b8;margin-bottom:16px;font-weight:500}
+  .chart-box{background:#111827;border-radius:12px;padding:20px;border:1px solid rgba(148,163,184,.15)}
+  .chart-box h2{font-size:.9rem;color:#94a3b8;margin-bottom:16px;font-weight:600}
   #status{font-size:.75rem;color:#64748b;margin-top:14px;text-align:right}
-  .error{color:#f87171;padding:20px;background:#1e293b;border-radius:10px}
-  .copy-icon{cursor:pointer;color:#60a5fa;opacity:0.6;transition:opacity .2s}
+  .error{color:#f87171;padding:20px;background:#111827;border-radius:10px;border:1px solid rgba(248,113,113,.28)}
+  .copy-icon{cursor:pointer;color:#60a5fa;opacity:0.7;transition:opacity .2s}
   .copy-icon:hover{opacity:1}
-  .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#34d399;color:#0f172a;padding:10px 20px;border-radius:6px;font-weight:600;font-size:.85rem;z-index:1000;opacity:0;transition:opacity .3s}
+  .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#34d399;color:#0f172a;padding:10px 20px;border-radius:6px;font-weight:700;font-size:.85rem;z-index:1000;opacity:0;transition:opacity .3s}
   .toast.show{opacity:1}
+  input,button{font:inherit}
+  @media (max-width:768px){
+    body{padding:16px 12px 40px}
+    .cards{grid-template-columns:1fr}
+    .topbar{align-items:flex-start}
+    .chart-box{padding:14px}
+    .card{padding:16px}
+  }
  </style>
 </head>
 <body>
-<h1>Financial Health — Last 30 Days</h1>
-<div class="cards">
-  <div class="card"><div class="label">Fees Collected</div><div class="value green" id="totalFees">—</div></div>
-  <div class="card"><div class="label">Provider Costs</div><div class="value red" id="totalCosts">—</div></div>
-  <div class="card"><div class="label">Net Profit</div><div class="value blue" id="totalProfit">—</div></div>
-</div>
-<div class="chart-box">
-  <h2>Daily Breakdown</h2>
-  <canvas id="chart" height="90"></canvas>
-</div>
-<div class="chart-box" style="margin-top: 24px;">
-  <h2>Transaction Search</h2>
-  <div style="display:flex;gap:8px;margin-bottom:16px;">
-    <input type="text" id="txSearch" placeholder="Enter Transaction Reference..." style="flex:1;background:#0f172a;border:1px solid #334155;color:#f8fafc;padding:8px 12px;border-radius:6px;">
-    <button onclick="searchTx()" style="background:#3b82f6;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:600;">Search</button>
+<div class="app-shell">
+  <div class="topbar">
+    <h1>Financial Health — Last 30 Days</h1>
+    <button id="installBtn" class="install-button" aria-label="Install dashboard">Install App</button>
   </div>
-  <div id="txResults" style="font-size:0.85rem;">
-    <table style="width:100%;border-collapse:collapse;display:none;margin-top:10px;" id="txTable">
-      <thead>
-        <tr style="text-align:left;color:#94a3b8;border-bottom:1px solid #334155;">
-          <th style="padding:8px 4px;">Reference</th>
-          <th style="padding:8px 4px;">Type</th>
-          <th style="padding:8px 4px;">Amount</th>
-          <th style="padding:8px 4px;">Status</th>
-          <th style="padding:8px 4px;">Date</th>
-        </tr>
-      </thead>
-      <tbody id="txBody"></tbody>
-    </table>
-    <div id="txEmpty" style="color:#64748b;text-align:center;padding:20px;">Enter a reference number to search</div>
+  <div class="cards">
+    <div class="card"><div class="label">Fees Collected</div><div class="value green" id="totalFees">—</div></div>
+    <div class="card"><div class="label">Provider Costs</div><div class="value red" id="totalCosts">—</div></div>
+    <div class="card"><div class="label">Net Profit</div><div class="value blue" id="totalProfit">—</div></div>
   </div>
+  <div class="chart-box">
+    <h2>Daily Breakdown</h2>
+    <canvas id="chart" height="90"></canvas>
+  </div>
+  <div class="chart-box" style="margin-top: 24px;">
+    <h2>Transaction Search</h2>
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      <input type="text" id="txSearch" placeholder="Enter Transaction Reference..." style="flex:1;min-width:180px;background:#020817;border:1px solid #334155;color:#f8fafc;padding:10px 12px;border-radius:8px;">
+      <button onclick="searchTx()" style="background:#3b82f6;color:white;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-weight:600;">Search</button>
+    </div>
+    <div id="txResults" style="font-size:0.85rem;">
+      <table style="width:100%;border-collapse:collapse;display:none;margin-top:10px;" id="txTable">
+        <thead>
+          <tr style="text-align:left;color:#94a3b8;border-bottom:1px solid #334155;">
+            <th style="padding:8px 4px;">Reference</th>
+            <th style="padding:8px 4px;">Type</th>
+            <th style="padding:8px 4px;">Amount</th>
+            <th style="padding:8px 4px;">Status</th>
+            <th style="padding:8px 4px;">Date</th>
+          </tr>
+        </thead>
+        <tbody id="txBody"></tbody>
+      </table>
+      <div id="txEmpty" style="color:#64748b;text-align:center;padding:20px;">Enter a reference number to search</div>
+    </div>
+  </div>
+  <div id="toast" class="toast">Copied!</div>
+  <div id="status"></div>
 </div>
- <div id="toast" class="toast">Copied!</div>
- <div id="status"></div>
 <script>
 const fmt = (n) => '$' + n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const DASHBOARD_CACHE_KEY = 'proxypay-financial-dashboard-cache-v1';
+const TX_CACHE_PREFIX = 'proxypay-financial-tx-cache-v1:';
+let deferredPrompt = null;
+
+function renderCachedDashboard(cache) {
+  if (!cache || !cache.totals || !Array.isArray(cache.rows)) return;
+  const { totals, rows } = cache;
+  document.getElementById('totalFees').textContent = fmt(totals.feesCollected);
+  document.getElementById('totalCosts').textContent = fmt(totals.providerCosts);
+  document.getElementById('totalProfit').textContent = fmt(totals.netProfit);
+  document.getElementById('totalProfit').className = 'value ' + (totals.netProfit >= 0 ? 'green' : 'red');
+
+  if (window.Chart) {
+    const labels = rows.map(r => r.date);
+    new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {label:'Fees Collected', data: rows.map(r=>r.feesCollected), backgroundColor:'rgba(52,211,153,.7)', borderRadius:3},
+          {label:'Provider Costs', data: rows.map(r=>r.providerCosts), backgroundColor:'rgba(248,113,113,.7)', borderRadius:3},
+          {label:'Net Profit', data: rows.map(r=>r.netProfit), type:'line', borderColor:'#60a5fa', backgroundColor:'rgba(96,165,250,.15)', tension:.3, fill:true, pointRadius:3},
+        ]
+      },
+      options: {
+        responsive:true,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{labels:{color:'#94a3b8',font:{size:12}}}},
+        scales:{
+          x:{ticks:{color:'#64748b',maxRotation:45},grid:{color:'rgba(255,255,255,.05)'}},
+          y:{ticks:{color:'#64748b',callback:v=>'\$'+v.toLocaleString()},grid:{color:'rgba(255,255,255,.05)'}}
+        }
+      }
+    });
+  }
+
+  document.getElementById('status').textContent = 'Offline cached data • ' + new Date(cache.cachedAt).toLocaleTimeString();
+}
+
+function saveDashboardCache(data) {
+  localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({ ...data, cachedAt: Date.now() }));
+}
+
+function renderTxResults(searchKey, data) {
+  const table = document.getElementById('txTable');
+  const body = document.getElementById('txBody');
+  const empty = document.getElementById('txEmpty');
+
+  if (!data || data.length === 0) {
+    empty.textContent = 'No transaction found with reference: ' + searchKey;
+    return;
+  }
+
+  localStorage.setItem(TX_CACHE_PREFIX + searchKey.toLowerCase(), JSON.stringify({ data, cachedAt: Date.now() }));
+
+  body.innerHTML = '';
+  data.forEach(tx => {
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid #1e293b';
+    const statusBg = tx.status === 'completed' ? 'rgba(52,211,153,.2)' :
+                     tx.status === 'pending' ? 'rgba(250,204,21,.2)' :
+                     tx.status === 'failed' ? 'rgba(248,113,113,.2)' : 'rgba(148,163,184,.2)';
+    const statusColor = tx.status === 'completed' ? '#34d399' :
+                       tx.status === 'pending' ? '#fbbf24' :
+                       tx.status === 'failed' ? '#f87171' : '#94a3b8';
+
+    tr.innerHTML = \`
+      <td style="padding:12px 4px;font-family:monospace;color:#60a5fa">
+        <span class="ref-text">\${tx.referenceNumber}</span>
+        <span class="copy-icon" title="Copy reference" onclick="copyRef('\${tx.referenceNumber}')" style="margin-left:8px">📋</span>
+      </td>
+      <td style="padding:12px 4px;text-transform:capitalize;">\${tx.type}</td>
+      <td style="padding:12px 4px;font-weight:600;">\${tx.amount}</td>
+      <td style="padding:12px 4px;"><span style="padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:600;background:\${statusBg};color:\${statusColor}">\${tx.status.toUpperCase()}</span></td>
+      <td style="padding:12px 4px;color:#64748b">\${new Date(tx.createdAt).toLocaleDateString()}</td>
+    \`;
+    body.appendChild(tr);
+  });
+
+  table.style.display = 'table';
+  empty.style.display = 'none';
+}
 
 async function load() {
+  const cached = localStorage.getItem(DASHBOARD_CACHE_KEY);
+  if (cached) {
+    try { renderCachedDashboard(JSON.parse(cached)); } catch (error) { logger.warn({ error: error }, 'Dashboard cache invalid'); }
+  }
+
   try {
     const r = await fetch('/api/admin/financial/pnl', {credentials:'include'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const {rows, totals} = await r.json();
+    saveDashboardCache({ rows, totals });
 
     document.getElementById('totalFees').textContent = fmt(totals.feesCollected);
     document.getElementById('totalCosts').textContent = fmt(totals.providerCosts);
@@ -2144,6 +2697,15 @@ async function load() {
 
     document.getElementById('status').textContent = 'Updated ' + new Date().toLocaleTimeString();
   } catch(e) {
+    const cached = localStorage.getItem(DASHBOARD_CACHE_KEY);
+    if (cached) {
+      try {
+        renderCachedDashboard(JSON.parse(cached));
+        return;
+      } catch (error) {
+        logger.warn({ error: error }, 'Unable to render offline cache');
+      }
+    }
     document.querySelector('.chart-box').innerHTML = '<div class="error">Failed to load data: ' + e.message + '</div>';
   }
 }
@@ -2154,7 +2716,7 @@ function copyRef(ref) {
      toast.classList.add('show');
      setTimeout(() => toast.classList.remove('show'), 2000);
    }).catch(err => {
-     console.error('Failed to copy:', err);
+     logger.error({ error: err }, 'Failed to copy:');
    });
  }
 
@@ -2169,49 +2731,63 @@ function copyRef(ref) {
   empty.textContent = 'Searching...';
   empty.style.display = 'block';
   table.style.display = 'none';
+
+  const cachedKey = TX_CACHE_PREFIX + ref.toLowerCase();
+  const cachedTx = localStorage.getItem(cachedKey);
+  if (cachedTx) {
+    try {
+      renderTxResults(ref, JSON.parse(cachedTx).data);
+      return;
+    } catch (error) {
+      logger.warn({ error: error }, 'Tx cache invalid');
+    }
+  }
   
   try {
     const r = await fetch('/api/admin/transactions?reference=' + encodeURIComponent(ref), {credentials:'include'});
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const {data} = await r.json();
-    
-    if (!data || data.length === 0) {
-      empty.textContent = 'No transaction found with reference: ' + ref;
-      return;
-    }
-    
-    body.innerHTML = '';
-    data.forEach(tx => {
-      const tr = document.createElement('tr');
-      tr.style.borderBottom = '1px solid #1e293b';
-      const statusBg = tx.status === 'completed' ? 'rgba(52,211,153,.2)' : 
-                       tx.status === 'pending' ? 'rgba(250,204,21,.2)' : 
-                       tx.status === 'failed' ? 'rgba(248,113,113,.2)' : 'rgba(148,163,184,.2)';
-      const statusColor = tx.status === 'completed' ? '#34d399' : 
-                         tx.status === 'pending' ? '#fbbf24' : 
-                         tx.status === 'failed' ? '#f87171' : '#94a3b8';
-      
-       tr.innerHTML = \`
-         <td style="padding:12px 4px;font-family:monospace;color:#60a5fa">
-           <span class="ref-text">\${tx.referenceNumber}</span>
-           <span class="copy-icon" title="Copy reference" onclick="copyRef('\${tx.referenceNumber}')" style="margin-left:8px">📋</span>
-         </td>
-         <td style="padding:12px 4px;text-transform:capitalize;">\${tx.type}</td>
-         <td style="padding:12px 4px;font-weight:600;">\${tx.amount}</td>
-         <td style="padding:12px 4px;"><span style="padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:600;background:\${statusBg};color:\${statusColor}">\${tx.status.toUpperCase()}</span></td>
-         <td style="padding:12px 4px;color:#64748b">\${new Date(tx.createdAt).toLocaleDateString()}</td>
-       \`;
-      body.appendChild(tr);
-    });
-    
-    table.style.display = 'table';
-    empty.style.display = 'none';
+    renderTxResults(ref, data || []);
   } catch (e) {
+    const cachedTxFallback = localStorage.getItem(cachedKey);
+    if (cachedTxFallback) {
+      try {
+        renderTxResults(ref, JSON.parse(cachedTxFallback).data);
+        return;
+      } catch (error) {
+        logger.warn({ error: error }, 'Cached tx fallback invalid');
+      }
+    }
     empty.textContent = 'Error: ' + e.message;
   }
 }
 
 document.getElementById('txSearch').onkeydown = (e) => { if(e.key === 'Enter') searchTx(); };
+
+const installBtn = document.getElementById('installBtn');
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  deferredPrompt = event;
+  installBtn.classList.add('visible');
+});
+
+installBtn.addEventListener('click', async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  const { outcome } = await deferredPrompt.userChoice;
+  if (outcome === 'accepted') {
+    installBtn.classList.remove('visible');
+  }
+  deferredPrompt = null;
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/api/admin/financial/dashboard/sw.js', { scope: '/api/admin/financial/dashboard/' }).catch((error) => {
+      logger.warn({ error: error }, 'Service worker registration failed:');
+    });
+  });
+}
 
 load();
 setInterval(load, 60000);
@@ -2321,16 +2897,20 @@ const validateComplianceCreate = (
   body: Record<string, unknown>,
 ): ValidationResult<ComplianceDocumentCreateInput> => {
   const title = normalizeString(body.title, "title", true);
-  if (!title.ok) return title as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!title.ok)
+    return title as ValidationResult<ComplianceDocumentCreateInput>;
 
   const docBody = normalizeString(body.body, "body", true);
-  if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!docBody.ok)
+    return docBody as ValidationResult<ComplianceDocumentCreateInput>;
 
   const summary = normalizeString(body.summary, "summary", false);
-  if (!summary.ok) return summary as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!summary.ok)
+    return summary as ValidationResult<ComplianceDocumentCreateInput>;
 
   const provider = normalizeString(body.provider, "provider", false);
-  if (!provider.ok) return provider as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!provider.ok)
+    return provider as ValidationResult<ComplianceDocumentCreateInput>;
   if (provider.value && provider.value.length > 100) {
     return { ok: false, message: "provider must be 100 characters or fewer" };
   }
@@ -2340,16 +2920,19 @@ const validateComplianceCreate = (
     "sourceUrl",
     false,
   );
-  if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!sourceUrl.ok)
+    return sourceUrl as ValidationResult<ComplianceDocumentCreateInput>;
 
   const country = normalizeCountry(getCountryValue(body));
-  if (!country.ok) return country as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!country.ok)
+    return country as ValidationResult<ComplianceDocumentCreateInput>;
 
   const tags = normalizeTags(body.tags);
   if (!tags.ok) return tags as ValidationResult<ComplianceDocumentCreateInput>;
 
   const status = normalizeStatus(body.status);
-  if (!status.ok) return status as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!status.ok)
+    return status as ValidationResult<ComplianceDocumentCreateInput>;
 
   return {
     ok: true,
@@ -2390,25 +2973,29 @@ const validateComplianceUpdate = (
 
   if (Object.prototype.hasOwnProperty.call(body, "title")) {
     const title = normalizeString(body.title, "title", true);
-    if (!title.ok) return title as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!title.ok)
+      return title as ValidationResult<ComplianceDocumentUpdateInput>;
     input.title = title.value as string;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "body")) {
     const docBody = normalizeString(body.body, "body", true);
-    if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!docBody.ok)
+      return docBody as ValidationResult<ComplianceDocumentUpdateInput>;
     input.body = docBody.value as string;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "summary")) {
     const summary = normalizeString(body.summary, "summary", false);
-    if (!summary.ok) return summary as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!summary.ok)
+      return summary as ValidationResult<ComplianceDocumentUpdateInput>;
     input.summary = summary.value ?? null;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "provider")) {
     const provider = normalizeString(body.provider, "provider", false);
-    if (!provider.ok) return provider as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!provider.ok)
+      return provider as ValidationResult<ComplianceDocumentUpdateInput>;
     if (provider.value && provider.value.length > 100) {
       return { ok: false, message: "provider must be 100 characters or fewer" };
     }
@@ -2424,7 +3011,8 @@ const validateComplianceUpdate = (
       "sourceUrl",
       false,
     );
-    if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!sourceUrl.ok)
+      return sourceUrl as ValidationResult<ComplianceDocumentUpdateInput>;
     input.sourceUrl = sourceUrl.value ?? null;
   }
 
@@ -2434,19 +3022,22 @@ const validateComplianceUpdate = (
     Object.prototype.hasOwnProperty.call(body, "country_code")
   ) {
     const country = normalizeCountry(getCountryValue(body));
-    if (!country.ok) return country as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!country.ok)
+      return country as ValidationResult<ComplianceDocumentUpdateInput>;
     input.countryCode = country.value ?? null;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "tags")) {
     const tags = normalizeTags(body.tags);
-    if (!tags.ok) return tags as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!tags.ok)
+      return tags as ValidationResult<ComplianceDocumentUpdateInput>;
     input.tags = tags.value ?? [];
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "status")) {
     const status = normalizeStatus(body.status);
-    if (!status.ok) return status as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!status.ok)
+      return status as ValidationResult<ComplianceDocumentUpdateInput>;
     input.status = status.value;
   }
 
@@ -2569,7 +3160,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("[compliance/docs:list]", error);
+      logger.error({ error: error }, '[compliance/docs:list]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to list compliance documents",
@@ -2585,7 +3176,7 @@ router.get(
     try {
       res.json(await complianceDocumentModel.getFacets());
     } catch (error) {
-      console.error("[compliance/docs:facets]", error);
+      logger.error({ error: error }, '[compliance/docs:facets]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch compliance document facets",
@@ -2614,7 +3205,7 @@ router.get(
       }
       res.json(document);
     } catch (error) {
-      console.error("[compliance/docs:get]", error);
+      logger.error({ error: error }, '[compliance/docs:get]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to fetch compliance document",
@@ -2644,7 +3235,7 @@ router.post(
       );
       res.status(201).json(document);
     } catch (error) {
-      console.error("[compliance/docs:create]", error);
+      logger.error({ error: error }, '[compliance/docs:create]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to create compliance document",
@@ -2684,7 +3275,7 @@ router.patch(
       }
       res.json(document);
     } catch (error) {
-      console.error("[compliance/docs:update]", error);
+      logger.error({ error: error }, '[compliance/docs:update]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to update compliance document",
@@ -2711,7 +3302,7 @@ router.post(
       await stellarService.enableClawback();
       res.json({ message: "Clawback capability enabled on issuance account" });
     } catch (err) {
-      console.error("Error enabling clawback:", err);
+      logger.error({ error: err }, 'Error enabling clawback:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to enable clawback capability",
@@ -2796,7 +3387,21 @@ router.post(
         transactionId,
       });
     } catch (err) {
-      console.error("Error executing clawback:", err);
+      // #647: the destination account or its trustline is gone on Stellar, so
+      // the clawback cannot be issued. Report it as a validation failure with a
+      // precise reason instead of a generic 500.
+      if (err instanceof ClawbackDestinationError) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          err.message,
+          {
+            message: err.message,
+            error: err.message,
+            clawbackFailure: err.failure,
+          },
+        );
+      }
+      logger.error({ error: err }, 'Error executing clawback:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to execute clawback",
@@ -2911,7 +3516,7 @@ router.post(
         totalTimeMs: batchResult.totalTimeMs,
       });
     } catch (err) {
-      console.error("Error executing batch payment:", err);
+      logger.error({ error: err }, 'Error executing batch payment:');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to execute batch payment",
@@ -2946,7 +3551,7 @@ router.delete(
       }
       res.json(document);
     } catch (error) {
-      console.error("[compliance/docs:archive]", error);
+      logger.error({ error: error }, '[compliance/docs:archive]');
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to archive compliance document",
@@ -2968,10 +3573,10 @@ router.get(
       const settings = await providerSettingsService.getAllSettings();
       res.json(settings);
     } catch (error) {
-      console.error("Error fetching provider settings:", error);
+      logger.error({ error: error }, 'Error fetching provider settings:');
       res.status(500).json({ message: "Failed to fetch provider settings" });
     }
-  }
+  },
 );
 
 router.put(
@@ -2982,22 +3587,22 @@ router.put(
     try {
       const providerName = req.params.providerName;
       const { failure_threshold, timeout_ms, fallback_order } = req.body;
-      
+
       const settings = await providerSettingsService.upsertProviderSettings(
         providerName,
         failure_threshold || 3,
         timeout_ms || 5000,
-        fallback_order || null
+        fallback_order || null,
       );
-      
+
       resetCircuitBreakerForProvider(providerName);
-      
+
       res.json({ message: "Provider settings updated successfully", settings });
     } catch (error) {
-      console.error("Error updating provider settings:", error);
+      logger.error({ error: error }, 'Error updating provider settings:');
       res.status(500).json({ message: "Failed to update provider settings" });
     }
-  }
+  },
 );
 
 /**
@@ -3028,7 +3633,7 @@ router.get(
         providerHealth,
       ] = await Promise.all([
         getQueueStats().catch((err) => {
-          console.error("[Dashboard] Queue stats error:", err);
+          logger.error({ error: err }, '[Dashboard]Queue stats error:');
           return {
             pending: 0,
             active: 0,
@@ -3043,14 +3648,14 @@ router.get(
             replicas,
           }))
           .catch((err) => {
-            console.error("[Dashboard] Database health error:", err);
+            logger.error({ error: err }, '[Dashboard]Database health error:');
             return { status: "unhealthy" as const, replicas: [] };
           }),
         redisClient
           .ping()
           .then(() => ({ status: "healthy" as const, responseTime: 0 }))
           .catch((err) => {
-            console.error("[Dashboard] Redis health error:", err);
+            logger.error({ error: err }, '[Dashboard]Redis health error:');
             return { status: "unhealthy" as const, responseTime: undefined };
           }),
         (async () => {
@@ -3065,7 +3670,7 @@ router.get(
             activeUsers: await (UserModel as any).countActiveUsers(24),
           };
         })().catch((err) => {
-          console.error("[Dashboard] Transaction stats error:", err);
+          logger.error({ error: err }, '[Dashboard]Transaction stats error:');
           return {
             totalCount: 0,
             successRate: 0,
@@ -3078,7 +3683,7 @@ router.get(
           try {
             return mobileMoneyService.getFailoverStats();
           } catch (err) {
-            console.error("[Dashboard] Provider health error:", err);
+            logger.error({ error: err }, '[Dashboard]Provider health error:');
             return {};
           }
         })(),
@@ -3123,8 +3728,11 @@ router.get(
         ),
       });
     } catch (error) {
-      console.error("[Dashboard] Failed to fetch stats:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch dashboard stats");
+      logger.error({ error: error }, '[Dashboard]Failed to fetch stats:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch dashboard stats",
+      );
     }
   },
 );
@@ -3160,7 +3768,7 @@ router.get(
         responseTime,
       });
     } catch (error) {
-      console.error("[Health] Check failed:", error);
+      logger.error({ error: error }, '[Health]Check failed:');
       res.status(503).json({
         database: "unhealthy",
         redis: "unhealthy",
@@ -3193,8 +3801,340 @@ router.get(
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
-      console.error("[Queue] Stats fetch failed:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
+      logger.error({ error: error }, '[Queue]Stats fetch failed:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch queue stats",
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/admin/api-keys/scope-usage
+ * Returns usage statistics for API keys broken down by scope.
+ * Lists how many active keys carry each scope, along with the total
+ * active/expired/revoked key counts.
+ */
+router.get(
+  "/api-keys/scope-usage",
+  requireAdmin,
+  logAdminAction("GET_API_KEY_SCOPE_USAGE"),
+  async (req: Request, res: Response) => {
+    try {
+      // Fetch all API keys from the database
+      const result = await pool.query<{
+        permissions: number;
+        is_active: boolean;
+        expires_at: string | null;
+      }>(`SELECT permissions, is_active, expires_at FROM api_keys`);
+
+      const rows = result.rows;
+      const now = new Date();
+
+      let totalActive = 0;
+      let totalExpired = 0;
+      let totalRevoked = 0;
+
+      // Scope name → count of active keys that carry that scope
+      const scopeCounts: Record<string, number> = {};
+
+      // Import scope definitions inline to avoid a circular-dependency risk
+      const { ApiKeyScope } = await import("../auth/apikeys");
+
+      for (const row of rows) {
+        const expired = row.expires_at ? new Date(row.expires_at) < now : false;
+
+        if (!row.is_active) {
+          totalRevoked++;
+          continue;
+        }
+        if (expired) {
+          totalExpired++;
+          continue;
+        }
+
+        totalActive++;
+
+        // Tally each scope bit present in this key's permissions bitmask
+        for (const [name, bit] of Object.entries(ApiKeyScope) as Array<
+          [string, number]
+        >) {
+          if ((row.permissions & bit) === bit) {
+            scopeCounts[name] = (scopeCounts[name] ?? 0) + 1;
+          }
+        }
+      }
+
+      // Build an ordered list of scope usage entries
+      const scopeUsage = Object.entries(ApiKeyScope).map(([name, bit]) => ({
+        scope: name,
+        bit,
+        activeKeyCount: scopeCounts[name] ?? 0,
+      }));
+
+      res.json({
+        summary: {
+          total: rows.length,
+          active: totalActive,
+          expired: totalExpired,
+          revoked: totalRevoked,
+        },
+        scopeUsage,
+        generatedAt: now.toISOString(),
+      });
+    } catch (error) {
+      logger.error({ error: error }, '[Admin]Scope usage fetch failed:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch API key scope usage",
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/admin/database/pool-stats
+ * Comprehensive connection pool statistics
+ */
+router.get(
+  "/database/pool-stats",
+  authenticateToken,
+  requirePermission("admin:system"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stats = getConnectionPoolStatistics();
+      res.json({ success: true, data: stats });
+    } catch (error) {
+      logger.error({ error: error }, '[Admin]Pool stats fetch failed:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch pool statistics",
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/admin/database/replicas
+ * Get current replica statuses
+ */
+router.get(
+  "/database/replicas",
+  authenticateToken,
+  requirePermission("admin:system"),
+  async (_req: Request, res: Response) => {
+    try {
+      const statuses = getReplicaStatuses();
+      res.json({ success: true, data: statuses });
+    } catch (error) {
+      logger.error({ error: error }, '[Admin]Replica status fetch failed:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch replica statuses",
+      );
+    }
+  },
+);
+
+/**
+ * PATCH /api/admin/database/replicas/:index
+ * Enable or disable a replica by index
+ */
+router.patch(
+  "/database/replicas/:index",
+  authenticateToken,
+  requirePermission("admin:system"),
+  async (req: Request, res: Response) => {
+    try {
+      const index = parseInt(req.params.index, 10);
+      const { enabled } = req.body as { enabled: boolean };
+
+      if (Number.isNaN(index)) {
+        return res.status(400).json({ error: "Index must be a number" });
+      }
+
+      const success = setReplicaEnabled(index, enabled);
+      if (!success) {
+        return res.status(404).json({ error: "Replica index not found" });
+      }
+
+      res.json({
+        success: true,
+        message: `Replica ${index} ${enabled ? "enabled" : "disabled"}`,
+      });
+    } catch (error) {
+      logger.error({ error: error }, '[Admin]Replica toggle failed:');
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to toggle replica");
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Audit log viewer (issue #620)
+// ---------------------------------------------------------------------------
+
+const escapeHtml = (value: unknown): string =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+/**
+ * Normalize the audit log viewer query params into `searchAuditLogs` filters.
+ * Invalid date bounds are rejected so a typo cannot silently return a partial
+ * (and therefore misleading) audit trail.
+ */
+const parseAuditLogFilters = (query: Request["query"]) => {
+  const asString = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim().length > 0
+      ? value.trim()
+      : undefined;
+
+  const from = asString(query.from);
+  const to = asString(query.to);
+
+  if (from && Number.isNaN(new Date(from).getTime())) {
+    throw createError(
+      ERROR_CODES.INVALID_INPUT,
+      'Query "from" must be an ISO-8601 date',
+      { message: 'Query "from" must be an ISO-8601 date' },
+    );
+  }
+
+  if (to && Number.isNaN(new Date(to).getTime())) {
+    throw createError(
+      ERROR_CODES.INVALID_INPUT,
+      'Query "to" must be an ISO-8601 date',
+      { message: 'Query "to" must be an ISO-8601 date' },
+    );
+  }
+
+  const limitRaw = asString(query.limit);
+  const offsetRaw = asString(query.offset);
+  const limit = limitRaw ? parseInt(limitRaw, 10) : 50;
+  const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+
+  return {
+    adminId: asString(query.adminId ?? query.admin_id),
+    action: asString(query.action),
+    resource: asString(query.resource),
+    resourceId: asString(query.resourceId ?? query.resource_id),
+    from,
+    to,
+    limit: Number.isFinite(limit) && limit > 0 ? limit : 50,
+    offset: Number.isFinite(offset) && offset > 0 ? offset : 0,
+  };
+};
+
+/**
+ * Render the audit log rows as a minimal, dependency-free HTML table so the
+ * admin dashboard can link straight to a browser view.
+ */
+const renderAuditLogViewer = (
+  logs: Record<string, unknown>[],
+  total: number,
+): string => {
+  const rows = logs
+    .map(
+      (log) => `<tr>
+        <td>${escapeHtml(log.timestamp)}</td>
+        <td>${escapeHtml(log.adminId)}</td>
+        <td>${escapeHtml(log.action)}</td>
+        <td>${escapeHtml(log.resource)}</td>
+        <td><code>${escapeHtml(log.resourceId)}</code></td>
+        <td><pre>${escapeHtml(JSON.stringify(log.diff ?? {}))}</pre></td>
+        <td>${escapeHtml(log.ipAddress)}</td>
+      </tr>`,
+    )
+    .join("\n");
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Admin audit log</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 2rem; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #d0d5dd; padding: 0.5rem; text-align: left; vertical-align: top; }
+      th { background: #f2f4f7; }
+      pre { margin: 0; white-space: pre-wrap; max-width: 32rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Admin audit log</h1>
+    <p>Showing ${logs.length} of ${total} matching events (newest first).</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Timestamp</th><th>Admin</th><th>Action</th><th>Resource</th>
+          <th>Resource IDs</th><th>Diff</th><th>IP</th>
+        </tr>
+      </thead>
+      <tbody>
+${rows}
+      </tbody>
+    </table>
+  </body>
+</html>`;
+};
+
+/**
+ * GET /api/admin/audit-logs
+ *
+ * Searchable audit trail used by the admin dashboard (issue #620).
+ *
+ * Query: adminId?, action?, resource?, resourceId?, from?, to?, limit?, offset?
+ */
+router.get(
+  "/audit-logs",
+  requireAdmin,
+  logAdminAction("VIEW_AUDIT_LOGS"),
+  async (req: Request, res: Response) => {
+    try {
+      const result = await searchAuditLogs(parseAuditLogFilters(req.query));
+      return res.json({ success: true, ...result });
+    } catch (error) {
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error fetching audit logs:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch audit logs",
+        {
+          message: "Failed to fetch audit logs",
+        },
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/admin/audit-logs/view
+ *
+ * HTML rendering of the same search results for quick operator review.
+ */
+router.get(
+  "/audit-logs/view",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const result = await searchAuditLogs(parseAuditLogFilters(req.query));
+      return res
+        .type("html")
+        .send(renderAuditLogViewer(result.logs, result.total));
+    } catch (error) {
+      if ((error as { code?: string })?.code) throw error;
+      logger.error({ error: error }, 'Error rendering audit log view:');
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to render audit logs",
+        {
+          message: "Failed to render audit logs",
+        },
+      );
     }
   },
 );

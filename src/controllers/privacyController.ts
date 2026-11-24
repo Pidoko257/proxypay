@@ -8,6 +8,13 @@ const DATA_EXPORT_REQUIRED = "DATA_EXPORT_REQUIRED";
 const RIGHT_TO_BE_FORGOTTEN_INITIATED = "RIGHT_TO_BE_FORGOTTEN_INITIATED";
 const gdprService = new GDPRService();
 
+/** Reads a query-string flag; anything other than "true"/"1" is false. */
+function parseBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes"].includes(value.toLowerCase());
+}
+
 const privacyController = {
   exportDataEndpoint: async (req: Request, res: Response) => {
     try {
@@ -16,8 +23,18 @@ const privacyController = {
       // keep for audit purpose
       await logAuditEvent(userId, DATA_EXPORT_REQUIRED);
 
+      // #649: the export is masked by data classification. A caller may opt in
+      // to the sensitive classes explicitly (e.g. a compliance reviewer
+      // fulfilling a verified access request); `restricted` material is never
+      // included.
+      const includeConfidential = parseBoolean(req.query.includeConfidential);
+      const includeInternal = parseBoolean(req.query.includeInternal);
+
       // exportUserData returns an in-memory ZIP buffer — no temp file on disk.
-      const zipBuffer = await gdprService.exportUserData(userId);
+      const zipBuffer = await gdprService.exportUserData(userId, {
+        includeConfidential,
+        includeInternal,
+      });
 
       res.setHeader("Content-Type", "application/zip");
       res.setHeader(

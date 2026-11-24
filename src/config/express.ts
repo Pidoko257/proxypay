@@ -117,7 +117,18 @@ export const corsOptions: CorsOptions = {
     "X-Request-ID",
   ],
 
-  exposedHeaders: ["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining"],
+  // #648: the standard RateLimit-* headers must be exposed alongside the
+  // legacy X-RateLimit-* ones, otherwise a browser client cannot read them
+  // cross-origin and still has to special-case the legacy names.
+  exposedHeaders: [
+    "X-Request-ID",
+    "X-RateLimit-Limit",
+    "X-RateLimit-Remaining",
+    "RateLimit-Limit",
+    "RateLimit-Remaining",
+    "RateLimit-Reset",
+    "Retry-After",
+  ],
 
   // Cache preflight responses for 10 minutes.
   maxAge: 600,

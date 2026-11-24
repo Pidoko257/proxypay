@@ -11,6 +11,15 @@ export interface SanctionEntity {
   external_id?: string;
 }
 
+export interface SanctionReviewItem {
+  party: "sender" | "receiver";
+  screenedName: string;
+  matchedEntity: SanctionEntity;
+  score: number;
+  matchType: string;
+  timestamp: string;
+}
+
 export class SanctionScreeningError extends Error {
   constructor(
     public readonly party: "sender" | "receiver",
@@ -24,6 +33,42 @@ export class SanctionScreeningError extends Error {
     );
     this.name = "SanctionScreeningError";
   }
+}
+
+export interface SanctionListUpdateResult {
+  total: number;
+  upserted: number;
+  failedBatches: { index: number; offset: number; size: number; error: string }[];
+}
+
+export class SanctionListUpdateError extends Error {
+  constructor(public readonly result: SanctionListUpdateResult) {
+    super(
+      `Sanction list partially updated: ${result.upserted}/${result.total} rows applied, ` +
+        `${result.failedBatches.length} batch(es) failed`,
+    );
+    this.name = "SanctionListUpdateError";
+  }
+}
+
+const DEFAULT_SANCTION_UPSERT_BATCH_SIZE = 500;
+
+/**
+ * A multi-row INSERT ... ON CONFLICT DO UPDATE fails if the same conflict key
+ * appears twice in one statement, so keep only the last occurrence of each
+ * (external_id, source). Entities without an external_id never conflict.
+ */
+function dedupeSanctionEntities(entities: SanctionEntity[]): SanctionEntity[] {
+  const byKey = new Map<string, SanctionEntity>();
+  const withoutId: SanctionEntity[] = [];
+  for (const entity of entities) {
+    if (!entity.external_id) {
+      withoutId.push(entity);
+      continue;
+    }
+    byKey.set(`${entity.source}::${entity.external_id}`, entity);
+  }
+  return [...byKey.values(), ...withoutId];
 }
 
 const SEED_SANCTIONS: SanctionEntity[] = [
@@ -271,62 +316,288 @@ export class SanctionService {
 
   /**
    * Batch updates the internal sanction list in the database.
+   *
+   * Entities are upserted in independent batches (default 500 rows, see
+   * SANCTION_UPSERT_BATCH_SIZE), each as one multi-row
+   * INSERT ... ON CONFLICT DO UPDATE in its own transaction. A failing batch
+   * only rolls back its own rows; batches that already committed stay applied
+   * and the remaining batches are still attempted. If any batch fails, a
+   * SanctionListUpdateError describing the failed batches is thrown after all
+   * batches have run.
    */
-  async updateSanctionList(entities: SanctionEntity[]): Promise<void> {
+  async updateSanctionList(
+    entities: SanctionEntity[],
+  ): Promise<SanctionListUpdateResult> {
+    const batchSize = Math.max(
+      1,
+      parseInt(process.env.SANCTION_UPSERT_BATCH_SIZE || "", 10) ||
+        DEFAULT_SANCTION_UPSERT_BATCH_SIZE,
+    );
+
+    const unique = dedupeSanctionEntities(entities);
+    const result: SanctionListUpdateResult = {
+      total: unique.length,
+      upserted: 0,
+      failedBatches: [],
+    };
+
     const client = await pool.connect();
     try {
-      await client.query("BEGIN");
+      for (let offset = 0; offset < unique.length; offset += batchSize) {
+        const batch = unique.slice(offset, offset + batchSize);
+        const batchIndex = offset / batchSize;
 
-      for (const entity of entities) {
+        const values: unknown[] = [];
+        const tuples = batch.map((entity, i) => {
+          const base = i * 5;
+          values.push(
+            entity.name,
+            entity.country ?? null,
+            entity.source,
+            entity.category ?? null,
+            entity.external_id ?? null,
+          );
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+        });
+
         const query = `
           INSERT INTO sanction_list (name, country, source, category, external_id)
-          VALUES ($1, $2, $3, $4, $5)
+          VALUES ${tuples.join(", ")}
           ON CONFLICT (external_id, source) DO UPDATE SET
             name = EXCLUDED.name,
             country = EXCLUDED.country,
             category = EXCLUDED.category,
             updated_at = CURRENT_TIMESTAMP
         `;
-        await client.query(query, [
-          entity.name,
-          entity.country ?? null,
-          entity.source,
-          entity.category ?? null,
-          entity.external_id ?? null,
-        ]);
-      }
 
-      await client.query("COMMIT");
-      console.log(`Successfully synced ${entities.length} sanction entities.`);
-    } catch (error) {
-      await client.query("ROLLBACK");
-      console.error("Failed to update sanction list:", error);
-      throw error;
+        try {
+          await client.query("BEGIN");
+          await client.query(query, values);
+          await client.query("COMMIT");
+          result.upserted += batch.length;
+        } catch (error) {
+          try {
+            await client.query("ROLLBACK");
+          } catch (rollbackError) {
+            console.error("[sanctionService] ROLLBACK failed:", rollbackError);
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          result.failedBatches.push({
+            index: batchIndex,
+            offset,
+            size: batch.length,
+            error: message,
+          });
+          console.error(
+            `[sanctionService] Sanction upsert batch ${batchIndex} (rows ${offset}-${offset + batch.length - 1}) failed and was rolled back:`,
+            error,
+          );
+        }
+      }
     } finally {
       client.release();
     }
+
+    console.log(
+      `[sanctionService] Synced ${result.upserted}/${result.total} sanction entities in batches of ${batchSize}` +
+        (result.failedBatches.length
+          ? ` (${result.failedBatches.length} batch(es) failed)`
+          : "."),
+    );
+
+    if (result.failedBatches.length > 0) {
+      throw new SanctionListUpdateError(result);
+    }
+
+    return result;
+  }
+
+  private manualReviewQueue: SanctionReviewItem[] = [];
+
+  addToManualReviewQueue(item: SanctionReviewItem): void {
+    this.manualReviewQueue.push(item);
+  }
+
+  getManualReviewQueue(): SanctionReviewItem[] {
+    return [...this.manualReviewQueue];
+  }
+
+  clearManualReviewQueue(): void {
+    this.manualReviewQueue = [];
   }
 
   /**
-   * Searches for a name in the sanction list using fuzzy matching.
-   * Returns a list of potential matches with their scores.
+   * Calculates Levenshtein distance between two strings
+   */
+  private levenshtein(s1: string, s2: string): number {
+    const len1 = s1.length;
+    const len2 = s2.length;
+    if (len1 === 0) return len2;
+    if (len2 === 0) return len1;
+
+    const matrix: number[][] = Array.from({ length: len1 + 1 }, () =>
+      new Array(len2 + 1).fill(0),
+    );
+
+    for (let i = 0; i <= len1; i++) matrix[i][0] = i;
+    for (let j = 0; j <= len2; j++) matrix[0][j] = j;
+
+    for (let i = 1; i <= len1; i++) {
+      for (let j = 1; j <= len2; j++) {
+        const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j - 1] + cost,
+        );
+      }
+    }
+    return matrix[len1][len2];
+  }
+
+  /**
+   * Normalizes a name by lowercasing, removing special characters, and collapsing whitespace.
+   */
+  private normalizeName(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /**
+   * Comprehensive similarity matcher combining Jaro-Winkler, Levenshtein,
+   * name permutation handling (first/last name swaps), and token-level partial matching.
+   */
+  calculateSimilarity(
+    target: string,
+    source: string,
+  ): { score: number; matchType: string } {
+    const s1 = this.normalizeName(target);
+    const s2 = this.normalizeName(source);
+
+    if (s1 === s2) {
+      return { score: 1.0, matchType: "exact" };
+    }
+
+    // 1. Direct Jaro-Winkler
+    const directJaro = this.jaroWinkler(s1, s2);
+
+    // 2. Levenshtein typo similarity
+    const maxLen = Math.max(s1.length, s2.length);
+    const levDist = this.levenshtein(s1, s2);
+    const levScore = maxLen > 0 ? 1 - levDist / maxLen : 0;
+
+    // 3. Name permutation (token sorting for first/last name swaps)
+    const tokens1 = s1.split(" ").filter(Boolean);
+    const tokens2 = s2.split(" ").filter(Boolean);
+
+    const sorted1 = [...tokens1].sort().join(" ");
+    const sorted2 = [...tokens2].sort().join(" ");
+    const permutationScore = this.jaroWinkler(sorted1, sorted2);
+
+    // 4. Token-level partial matching (e.g. "Osama Laden" vs "Osama bin Laden")
+    let tokenMatchSum = 0;
+    for (const t1 of tokens1) {
+      let bestTokenSim = 0;
+      for (const t2 of tokens2) {
+        const jw = this.jaroWinkler(t1, t2);
+        const lev =
+          Math.max(t1.length, t2.length) > 0
+            ? 1 - this.levenshtein(t1, t2) / Math.max(t1.length, t2.length)
+            : 0;
+        const sim = Math.max(jw, lev);
+        if (sim > bestTokenSim) bestTokenSim = sim;
+      }
+      tokenMatchSum += bestTokenSim;
+    }
+    const tokenScore =
+      tokens1.length > 0 ? tokenMatchSum / tokens1.length : 0;
+
+    // 5. Substring inclusion
+    const isSubstring = s1.includes(s2) || s2.includes(s1);
+    const substringScore = isSubstring
+      ? Math.min(s1.length, s2.length) / Math.max(s1.length, s2.length)
+      : 0;
+
+    let bestScore = directJaro;
+    let matchType = "jaro_winkler";
+
+    if (levScore > bestScore) {
+      bestScore = levScore;
+      matchType = "typo_fuzzy";
+    }
+    if (permutationScore > bestScore) {
+      bestScore = permutationScore;
+      matchType = "permutation";
+    }
+    if (tokenScore > bestScore) {
+      bestScore = tokenScore;
+      matchType = "token_partial";
+    }
+    if (substringScore > bestScore) {
+      bestScore = substringScore;
+      matchType = "substring";
+    }
+
+    return { score: Math.round(bestScore * 1000) / 1000, matchType };
+  }
+
+  /**
+   * Searches for a name in the sanction list using robust fuzzy matching.
+   * Handles typos, name permutations, and partial matches.
+   *
+   * Candidate retrieval happens in PostgreSQL via pg_trgm: the `%` operator
+   * uses the GIN trigram index on lower(name) to fetch only rows that are
+   * trigram-similar to the query (bounded by SANCTION_CANDIDATE_LIMIT), and
+   * the existing Jaro-Winkler / Levenshtein / permutation scoring is applied
+   * to that small candidate set only. The full list is never loaded into the
+   * Node.js heap.
    */
   async searchSanctions(
     name: string,
-    threshold: number = 0.85,
-  ): Promise<{ entity: SanctionEntity; score: number }[]> {
-    const query =
-      "SELECT name, country, source, category, external_id FROM sanction_list";
-    const { rows } = await pool.query(query);
+    threshold?: number,
+  ): Promise<{ entity: SanctionEntity; score: number; matchType: string }[]> {
+    const similarityThreshold =
+      threshold ??
+      parseFloat(process.env.SANCTION_SIMILARITY_THRESHOLD || "0.85");
 
-    const matches: { entity: SanctionEntity; score: number }[] = [];
-    const normalizedTarget = name.toLowerCase().trim();
+    // Recall-oriented trigram pre-filter. `%` is index-assisted and applies
+    // pg_trgm.similarity_threshold (default 0.3); the explicit similarity()
+    // floor lets operators tighten the pre-filter further if needed.
+    const candidateThreshold = parseFloat(
+      process.env.SANCTION_TRGM_CANDIDATE_THRESHOLD || "0.3",
+    );
+    const candidateLimit = Math.max(
+      1,
+      parseInt(process.env.SANCTION_CANDIDATE_LIMIT || "50", 10) || 50,
+    );
+
+    const query = `
+      SELECT name, country, source, category, external_id
+        FROM sanction_list
+       WHERE lower(name) % lower($1)
+         AND similarity(lower(name), lower($1)) >= $2
+       ORDER BY similarity(lower(name), lower($1)) DESC
+       LIMIT $3
+    `;
+    const { rows } = await pool.query(query, [
+      name,
+      candidateThreshold,
+      candidateLimit,
+    ]);
+
+    const matches: {
+      entity: SanctionEntity;
+      score: number;
+      matchType: string;
+    }[] = [];
 
     for (const row of rows) {
-      const normalizedSource = row.name.toLowerCase().trim();
-      const score = this.jaroWinkler(normalizedTarget, normalizedSource);
+      const { score, matchType } = this.calculateSimilarity(name, row.name);
 
-      if (score >= threshold) {
+      if (score >= similarityThreshold) {
         matches.push({
           entity: {
             name: row.name,
@@ -336,6 +607,7 @@ export class SanctionService {
             external_id: row.external_id,
           },
           score,
+          matchType,
         });
       }
     }
@@ -400,25 +672,54 @@ export class SanctionService {
 
   /**
    * Screens both sender and receiver against the sanction list.
-   * Throws SanctionScreeningError immediately on the first hit.
+   * Blocks matches >= similarity threshold (default 0.85).
+   * Queues borderline matches (0.75 <= score < 0.85) for manual review.
    */
-  async checkParties(senderName: string, receiverName: string): Promise<void> {
+  async checkParties(
+    senderName: string,
+    receiverName: string,
+    options?: { threshold?: number; reviewThreshold?: number },
+  ): Promise<void> {
+    const threshold =
+      options?.threshold ??
+      parseFloat(process.env.SANCTION_SIMILARITY_THRESHOLD || "0.85");
+    const reviewThreshold =
+      options?.reviewThreshold ??
+      parseFloat(process.env.SANCTION_REVIEW_THRESHOLD || "0.75");
+
     const parties: Array<{ name: string; role: "sender" | "receiver" }> = [
       { name: senderName, role: "sender" },
       { name: receiverName, role: "receiver" },
     ];
 
     for (const { name, role } of parties) {
-      const matches = await this.searchSanctions(name);
+      // Search with reviewThreshold to catch both blocking and borderline matches
+      const matches = await this.searchSanctions(name, reviewThreshold);
       if (matches.length > 0) {
         const top = matches[0];
-        throw new SanctionScreeningError(
-          role,
-          name,
-          top.entity.name,
-          top.score,
-          top.entity.source,
-        );
+
+        if (top.score >= threshold) {
+          throw new SanctionScreeningError(
+            role,
+            name,
+            top.entity.name,
+            top.score,
+            top.entity.source,
+          );
+        } else {
+          // Borderline match (between reviewThreshold and threshold) -> queue for manual review
+          this.addToManualReviewQueue({
+            party: role,
+            screenedName: name,
+            matchedEntity: top.entity,
+            score: top.score,
+            matchType: top.matchType,
+            timestamp: new Date().toISOString(),
+          });
+          console.warn(
+            `[sanctionService] Borderline sanction match queued for manual review: ${role} "${name}" matched "${top.entity.name}" (score ${top.score.toFixed(2)}, type: ${top.matchType})`,
+          );
+        }
       }
     }
   }

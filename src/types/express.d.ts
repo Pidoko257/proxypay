@@ -4,6 +4,7 @@ declare module 'express-serve-static-core' {
   interface Request {
     jwtUser?: { userId?: string; role?: string };
     user?: { id?: string; role?: string };
+    pagination?: import("../utils/pagination").DecodedPaginationParams;
     isNewDevice?: boolean;
     requiresAdditionalVerification?: boolean;
     twoFactorVerified?: boolean;

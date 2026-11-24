@@ -63,7 +63,14 @@ export const TransactionDetailSchema = registry.register(
         example: 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN',
       }),
       notes: z.string().optional().openapi({ example: 'School fees payment' }),
-      metadata: z.record(z.string(), z.unknown()).optional(),
+      metadata: z.record(z.string(), z.unknown()).optional().openapi({
+        description:
+          'Arbitrary transaction metadata. Known fields (note, orderId, customerRef, ' +
+          'sourceCurrency, destinationCurrency, sender*, receiver*, tags, stellar, ' +
+          'reconciliation) are validated; unknown keys are retained for forward ' +
+          'compatibility. Serialized size is capped at 10 KB.',
+        example: { orderId: 'ORD-001', tags: ['priority'] },
+      }),
       createdAt: z.string().datetime().openapi({ example: '2024-04-25T10:00:00.000Z' }),
       updatedAt: z.string().datetime().openapi({ example: '2024-04-25T10:05:00.000Z' }),
     })
@@ -99,6 +106,9 @@ export const MetadataRequestSchema = registry.register(
   z
     .object({
       metadata: z.record(z.string(), z.unknown()).openapi({
+        description:
+          'Transaction metadata object. Unknown keys are retained for forward ' +
+          'compatibility; serialized size is capped at 10 KB.',
         example: { category: 'utilities', invoiceId: 'INV-001' },
       }),
     })

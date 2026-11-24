@@ -81,6 +81,19 @@ export const REDACT_KEYS: string[] = [
   "accountnumber",
   "account-number",
   "account_number",
+  // Provider-specific credentials
+  "callbacksecret",
+  "callback-secret",
+  "callback_secret",
+  "mtn_api_key",
+  "airtel_api_key",
+  "orange_api_key",
+  "mtn_api_secret",
+  "airtel_api_secret",
+  "orange_api_secret",
+  "apisecret",
+  "api-secret",
+  "api_secret",
 ];
 
 /**

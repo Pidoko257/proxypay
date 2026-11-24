@@ -1,14 +1,17 @@
 import { queryRead, queryWrite } from "../config/database";
 import { generateReferenceNumber } from "../utils/referenceGenerator";
-import { encrypt, decrypt } from "../utils/encryption";
+import { decodeTransactionCursor } from "../utils/transactionCursor";
+import { encrypt, decrypt, hashSearchValue } from "../utils/encryption";
 import { WebSocketManager } from "../websocket";
 import { getRedisPubSub } from "../graphql/redisPubSub";
 import { CachedTransactionInvalidation } from "../services/cachedTransactionService";
+import { transactionStatusWorkflowService } from "../services/transactionStatusWorkflowService";
 import {
   SubscriptionChannels,
   transactionChannel,
   type TransactionUpdatedPayload,
 } from "../graphql/subscriptions";
+import { z } from "zod";
 
 export type AssetType = "native" | "credit_alphanum4" | "credit_alphanum12";
 
@@ -44,6 +47,15 @@ export interface TransactionListFilters {
   tags?: string[];
   referenceNumber?: string;
   statuses?: TransactionStatus[];
+  // #480 – Advanced filtering
+  currency?: string;
+  type?: string;
+  /** Inclusive range on any filterable temporal field (createdAt/updatedAt/completedAt). */
+  dateField?: "createdAt" | "updatedAt";
+  startDateTime?: string;
+  endDateTime?: string;
+  /** Nested AND/OR/NOT filter tree. Takes precedence over the flat fields above. */
+  filter?: FilterNode;
 }
 
 export interface TransactionCursorOptions {
@@ -58,14 +70,175 @@ export interface WebhookDeliveryUpdate {
   lastError?: string | null;
 }
 
-interface DecodedTransactionCursor {
-  createdAt: Date;
-  id: string;
-}
+/**
+ * Whitelist for #480 range filtering on timestamp columns. `transactions` has
+ * no `completed_at`, so completion-time range filtering is not offered rather
+ * than failing at execution time.
+ */
+const DATE_FILTER_COLUMNS: Record<"createdAt" | "updatedAt", string> = {
+  createdAt: "created_at",
+  updatedAt: "updated_at",
+};
 
 const MAX_TAGS = 10;
 const TAG_REGEX = /^[a-z0-9-]+$/;
-const MAX_METADATA_BYTES = 10240;
+export const MAX_METADATA_BYTES = 10240;
+
+// ── Metadata schema (#645) ────────────────────────────────────────────────────
+//
+// Transaction metadata must conform to this Zod schema to prevent arbitrary
+// JSON structures from breaking reporting and analytics pipelines.
+//
+// All top-level keys are optional so callers can supply partial metadata.
+//
+// Unknown keys are intentionally *retained* (`.passthrough()`) for forward
+// compatibility: providers and workers may attach extra diagnostic fields
+// without requiring a schema change, and metadata written by a newer deploy
+// must survive a round-trip through an older one. Only the presence and shape
+// of known fields are enforced; the total serialized size is capped separately
+// by MAX_METADATA_BYTES in `validateMetadata`.
+//
+// If you need to add a new first-class metadata field:
+//   1. Add the field definition here (keep it optional).
+//   2. Update the OpenAPI schema in src/openapi/schemas/transactions.ts.
+//   3. Add a test in src/models/__tests__/transaction.metadata.test.ts.
+
+export const metadataSchema = z
+  .object({
+    /** Short human-readable note attached to the transaction. */
+    note: z.string().max(500).optional(),
+    /** Merchant-assigned order or invoice identifier. */
+    orderId: z.string().max(128).optional(),
+    /** Customer-facing reference shown on receipts. */
+    customerRef: z.string().max(128).optional(),
+    /** ISO 4217 source currency code (e.g. "XAF", "KES"). */
+    sourceCurrency: z.string().length(3).optional(),
+    /** ISO 4217 destination currency code. */
+    destinationCurrency: z.string().length(3).optional(),
+    /** Sender display name for Travel Rule / receipt purposes. */
+    senderName: z.string().max(256).optional(),
+    /** Sender physical address. */
+    senderAddress: z.string().max(512).optional(),
+    /** Sender date of birth (ISO 8601 date string). */
+    senderDob: z.string().optional(),
+    /** Sender national ID / passport number. */
+    senderIdNumber: z.string().max(64).optional(),
+    /** Receiver display name. */
+    receiverName: z.string().max(256).optional(),
+    /** Receiver physical address. */
+    receiverAddress: z.string().max(512).optional(),
+    /** Arbitrary merchant-defined tags (max 10 entries, each ≤ 64 chars). */
+    tags: z.array(z.string().max(64)).max(10).optional(),
+    /**
+     * Provider-specific diagnostic data written by the worker.
+     * Allowed to carry arbitrary keys so provider integrations can store
+     * whatever they need without schema changes.
+     */
+    stellar: z
+      .object({
+        transactionHash: z.string().optional(),
+        submittedAt: z.string().optional(),
+        feeBumps: z.array(z.unknown()).optional(),
+      })
+      .passthrough()
+      .optional(),
+    /** Internal reconciliation markers (written by the reconciliation job). */
+    reconciliation: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough(); // allow additional keys for forward compatibility
+
+/**
+ * Validate and coerce a raw metadata object against {@link metadataSchema}.
+ *
+ * @throws {Error} with a human-readable Zod error message when the schema
+ *   check fails, so the caller can surface a 400 to the client.
+ */
+export function validateMetadataSchema(
+  metadata: unknown,
+): Record<string, unknown> {
+  const result = metadataSchema.safeParse(metadata);
+  if (!result.success) {
+    const issues = result.error.issues ?? (result.error as any).errors ?? [];
+    const messages = issues
+      .map((e) => `${e.path.join(".") || "metadata"}: ${e.message}`)
+      .join("; ");
+    throw new Error(`Invalid metadata: ${messages}`);
+  }
+  return result.data as Record<string, unknown>;
+}
+
+/**
+ * Statuses after which a transaction's idempotency key is released (#619).
+ * Restored: the definition was lost in a merge while updateStatus still
+ * references it, so every successful status update threw a ReferenceError.
+ */
+const TERMINAL_IDEMPOTENCY_STATUSES = new Set<TransactionStatus>([
+  TransactionStatus.Completed,
+  TransactionStatus.Failed,
+  TransactionStatus.Cancelled,
+  TransactionStatus.Reversed,
+  TransactionStatus.ClawedBack,
+]);
+
+function phoneSearchTokens(phoneNumber: string): string[] {
+  const normalized = phoneNumber.replace(/^\+/, "");
+  return Array.from({ length: normalized.length }, (_, index) =>
+    hashSearchValue(normalized.slice(index)),
+  );
+}
+
+/** Words shorter than this are too common to be useful search terms. */
+const NOTES_MIN_TOKEN_LENGTH = 2;
+
+/**
+ * Split free text into normalized, de-duplicated words (case-insensitive,
+ * Unicode-aware). Used both when indexing notes and when parsing a query, so
+ * the two always agree.
+ */
+export function tokenizeNotes(text: string | null | undefined): string[] {
+  if (!text) return [];
+  const words = text
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length >= NOTES_MIN_TOKEN_LENGTH);
+  return Array.from(new Set(words));
+}
+
+/**
+ * Keyed blind-index digests for searching encrypted notes. The "notes:"
+ * prefix domain-separates these from other search tokens (e.g. phone).
+ */
+export function notesSearchTokens(text: string | null | undefined): string[] {
+  return tokenizeNotes(text).map((word) => hashSearchValue(`notes:${word}`));
+}
+
+/**
+ * Thrown by updateStatus when the transaction's status no longer matches the
+ * caller's expected `currentStatus`, i.e. a concurrent update won the race.
+ */
+export class TransactionStatusConflictError extends Error {
+  constructor(
+    public readonly transactionId: string,
+    public readonly expectedStatus: TransactionStatus,
+    public readonly actualStatus: TransactionStatus,
+    public readonly requestedStatus: TransactionStatus,
+  ) {
+    super(
+      `Transaction ${transactionId} status changed concurrently: expected ${expectedStatus}, found ${actualStatus} (requested ${requestedStatus})`,
+    );
+    this.name = "TransactionStatusConflictError";
+  }
+}
+
+export class InvalidNotesSearchQueryError extends Error {
+  constructor() {
+    super(
+      `Notes search query must contain at least one word of ${NOTES_MIN_TOKEN_LENGTH} or more letters or digits`,
+    );
+    this.name = "InvalidNotesSearchQueryError";
+  }
+}
 
 const TRANSACTION_SELECT_COLUMNS = `
   id,
@@ -83,6 +256,7 @@ const TRANSACTION_SELECT_COLUMNS = `
   COALESCE(metadata, '{}') AS metadata,
   location_metadata AS "locationMetadata",
   user_id AS "userId",
+  merchant_id AS "merchantId",
   idempotency_key AS "idempotencyKey",
   idempotency_expires_at AS "idempotencyExpiresAt",
   created_at AS "createdAt",
@@ -97,34 +271,19 @@ function validateTags(tags: string[]): void {
   }
 }
 
-function validateMetadata(metadata: unknown): Record<string, unknown> {
+export function validateMetadata(metadata: unknown): Record<string, unknown> {
   if (!metadata) return {};
   if (typeof metadata !== "object" || Array.isArray(metadata)) {
     throw new Error("Metadata must be a JSON object");
   }
-  const json = JSON.stringify(metadata);
+  // Issue #645 – validate structure before storing to prevent malformed data
+  // from reaching reporting / analytics pipelines.
+  const validated = validateMetadataSchema(metadata);
+  const json = JSON.stringify(validated);
   if (Buffer.byteLength(json, "utf8") > MAX_METADATA_BYTES) {
     throw new Error(`Metadata exceeds ${MAX_METADATA_BYTES / 1024} KB`);
   }
-  return metadata as Record<string, unknown>;
-}
-
-function decodeTransactionCursor(cursor: string): DecodedTransactionCursor {
-  const decoded = Buffer.from(cursor, "base64").toString("utf8");
-  const separator = decoded.lastIndexOf("|");
-
-  if (separator === -1) {
-    throw new Error("Invalid transaction cursor");
-  }
-
-  const createdAt = new Date(decoded.slice(0, separator));
-  const id = decoded.slice(separator + 1);
-
-  if (Number.isNaN(createdAt.getTime()) || !id) {
-    throw new Error("Invalid transaction cursor");
-  }
-
-  return { createdAt, id };
+  return validated;
 }
 
 function normalizeEndDate(endDate: string): Date {
@@ -212,6 +371,39 @@ export class TransactionModel {
       addCondition("tags @> ?::text[]", filters.tags);
     }
 
+    if (filters.currency) {
+      addCondition("currency = ?", filters.currency);
+    }
+
+    if (filters.type) {
+      addCondition("type = ?", filters.type);
+    }
+
+    // #480 – Range filtering on a chosen timestamp column. Validated against
+    // the whitelist rather than interpolated, so `dateField` is not a
+    // SQL injection vector.
+    if (filters.startDateTime || filters.endDateTime) {
+      const column = DATE_FILTER_COLUMNS[filters.dateField ?? "createdAt"];
+      if (filters.startDateTime) {
+        addCondition(`${column} >= ?`, new Date(filters.startDateTime));
+      }
+      if (filters.endDateTime) {
+        addCondition(`${column} <= ?`, new Date(filters.endDateTime));
+      }
+    }
+
+    // #480 – Advanced filter AST. Compiled last so its placeholders continue
+    // the same parameter numbering as the simple conditions above.
+    if (filters.filter) {
+      const expression =
+        typeof filters.filter === "string"
+          ? parseFilterExpression(JSON.parse(filters.filter))
+          : parseFilterExpression(filters.filter);
+      const compiled = compileFilterExpression(expression, params.length + 1);
+      params.push(...compiled.params);
+      conditions.push(compiled.sql);
+    }
+
     return {
       whereSql: conditions.length ? conditions.join(" AND ") : "TRUE",
       params,
@@ -227,10 +419,11 @@ export class TransactionModel {
       `INSERT INTO transactions (
         reference_number, provider_reference, type, amount, currency,
         original_amount, converted_amount, phone_number, provider,
-        stellar_address, status, tags, notes, user_id,
-        idempotency_key, idempotency_expires_at, metadata, location_metadata
+        phone_search_tokens, stellar_address, status, tags, notes, user_id,
+        idempotency_key, idempotency_expires_at, metadata, location_metadata,
+        notes_search_tokens
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
       ) RETURNING *`,
       [
         ref,
@@ -242,6 +435,7 @@ export class TransactionModel {
         data.convertedAmount ?? null,
         encrypt(data.phoneNumber),
         data.provider,
+        phoneSearchTokens(data.phoneNumber),
         encrypt(data.stellarAddress), // ✅ FIXED BUG HERE
         data.status,
         data.tags ?? [],
@@ -251,6 +445,7 @@ export class TransactionModel {
         data.idempotencyExpiresAt ?? null,
         JSON.stringify(metadata),
         data.locationMetadata ? JSON.stringify(data.locationMetadata) : null,
+        notesSearchTokens(data.notes),
       ],
     );
 
@@ -304,19 +499,57 @@ export class TransactionModel {
     return mapTransactionRow(res.rows[0]);
   }
 
-  async updateStatus(id: string, status: TransactionStatus, userId?: string) {
+  /**
+   * Set a transaction's status.
+   *
+   * When `currentStatus` is given, the transition is validated against it and
+   * the UPDATE only applies if the row still has that status (compare-and-set
+   * in a single statement). If another worker changed the status first, a
+   * TransactionStatusConflictError is thrown instead of silently overwriting
+   * its result (last-writer-wins).
+   */
+  async updateStatus(id: string, status: TransactionStatus, userId?: string, currentStatus?: TransactionStatus) {
+    if (currentStatus) {
+      transactionStatusWorkflowService.validateBaseTransition(id, currentStatus, status);
+    }
     let q = `UPDATE transactions SET status=$1, updated_at=NOW() WHERE id=$2`;
     const params: any[] = [status, id];
 
     if (userId) {
-      q += ` AND user_id=$3`;
       params.push(userId);
+      q += ` AND user_id=$${params.length}`;
+    }
+
+    if (currentStatus) {
+      params.push(currentStatus);
+      q += ` AND status=$${params.length}`;
     }
 
     q += ` RETURNING user_id, provider, reference_number, updated_at`;
 
     const res = await queryWrite(q, params);
-    if (!res.rowCount) return;
+    if (!res.rowCount) {
+      if (currentStatus) {
+        // Distinguish "not found" from "status changed underneath us". Read
+        // from the primary so replica lag can't hide the concurrent write.
+        let existsQ = `SELECT status FROM transactions WHERE id=$1`;
+        const existsParams: any[] = [id];
+        if (userId) {
+          existsQ += ` AND user_id=$2`;
+          existsParams.push(userId);
+        }
+        const existing = await queryWrite(existsQ, existsParams);
+        if (existing.rowCount) {
+          throw new TransactionStatusConflictError(
+            id,
+            currentStatus,
+            existing.rows[0].status,
+            status,
+          );
+        }
+      }
+      return;
+    }
 
     const row = res.rows[0];
 
@@ -352,6 +585,18 @@ export class TransactionModel {
       });
     }
 
+    // ── Release the idempotency key on terminal states ────────────────────
+    // A transaction that timed out and was later recovered must not keep its
+    // key around, otherwise the stale key blocks legitimate retries (#619).
+    if (TERMINAL_IDEMPOTENCY_STATUSES.has(status)) {
+      await this.releaseIdempotencyKey(id).catch((err) => {
+        console.warn(
+          `[idempotency] Failed to release key for transaction ${id}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }
+
     // ── Publish GraphQL subscription event ──────────────────────────────
     // Publish to both the per-transaction channel (targeted) and the
     // broadcast channel (for clients watching all transactions).
@@ -376,20 +621,70 @@ export class TransactionModel {
     });
   }
 
+  /**
+   * Full-word, case-insensitive search over notes and admin notes.
+   *
+   * Notes are encrypted at rest, so the database cannot tokenize them. Each
+   * row instead carries keyed digests of its words (see notesSearchTokens);
+   * a row matches when its notes, or its admin notes, contain every word of
+   * the query. Results are newest first.
+   *
+   * @throws InvalidNotesSearchQueryError when the query has no searchable words
+   */
   async searchByNotes(query: string) {
+    const tokens = notesSearchTokens(query);
+    if (tokens.length === 0) {
+      throw new InvalidNotesSearchQueryError();
+    }
+
     const res = await queryRead(
       `SELECT ${TRANSACTION_SELECT_COLUMNS}
        FROM transactions
-       WHERE to_tsvector('english', COALESCE(notes,'') || ' ' || COALESCE(admin_notes,'')) 
-       @@ plainto_tsquery('english',$1)
-       ORDER BY ts_rank(
-         to_tsvector('english', COALESCE(notes,'') || ' ' || COALESCE(admin_notes,'')),
-         plainto_tsquery('english',$1)
-       ) DESC, created_at DESC`,
-      [query],
+       WHERE notes_search_tokens @> $1::text[]
+          OR admin_notes_search_tokens @> $1::text[]
+       ORDER BY created_at DESC, id DESC`,
+      [tokens],
     );
 
     return res.rows.map(mapTransactionRow);
+  }
+
+  /**
+   * Populate notes search tokens for rows written before the
+   * notes_search_tokens columns existed. Processes one keyset page per call;
+   * returns the last processed id (pass it back as `afterId`) or null when done.
+   */
+  async backfillNotesSearchTokens(
+    batchSize = 500,
+    afterId: string | null = null,
+  ): Promise<{ processed: number; lastId: string | null }> {
+    const res = await queryWrite(
+      `SELECT id, notes, admin_notes
+       FROM transactions
+       WHERE ($1::uuid IS NULL OR id > $1::uuid)
+         AND (notes IS NOT NULL OR admin_notes IS NOT NULL)
+       ORDER BY id
+       LIMIT $2`,
+      [afterId, batchSize],
+    );
+
+    for (const row of res.rows) {
+      await queryWrite(
+        `UPDATE transactions
+         SET notes_search_tokens = $1, admin_notes_search_tokens = $2
+         WHERE id = $3`,
+        [
+          notesSearchTokens(decrypt(row.notes ?? null)),
+          notesSearchTokens(decrypt(row.admin_notes ?? null)),
+          row.id,
+        ],
+      );
+    }
+
+    return {
+      processed: res.rows.length,
+      lastId: res.rows.length ? res.rows[res.rows.length - 1].id : null,
+    };
   }
 
   async getBalanceStatistics(userId: string) {
@@ -640,10 +935,10 @@ export class TransactionModel {
     const encryptedNotes = encrypt(notes);
     const result = await queryWrite(
       `UPDATE transactions
-       SET notes = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2
+       SET notes = $1, notes_search_tokens = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
        RETURNING ${TRANSACTION_SELECT_COLUMNS}`,
-      [encryptedNotes, id],
+      [encryptedNotes, notesSearchTokens(notes), id],
     );
 
     return mapTransactionRow(result.rows[0]);
@@ -660,10 +955,11 @@ export class TransactionModel {
     const encryptedAdminNotes = encrypt(adminNotes);
     const result = await queryWrite(
       `UPDATE transactions
-       SET admin_notes = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2
+       SET admin_notes = $1, admin_notes_search_tokens = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
        RETURNING ${TRANSACTION_SELECT_COLUMNS}`,
-      [encryptedAdminNotes, id],
+      [encryptedAdminNotes, notesSearchTokens(adminNotes), id],
     );
 
     return mapTransactionRow(result.rows[0]);
@@ -757,28 +1053,52 @@ export class TransactionModel {
     return result.rows.map(mapTransactionRow).filter((t: any) => t !== null);
   }
 
+  /**
+   * Search transactions by phone number.
+   *
+   * @param phoneNumber          Phone number the client searched for.
+   * @param limit                Page size (clamped to 1..100).
+   * @param offset               Row offset.
+   * @param merchantIds          Optional merchant filter — matches any of the
+   *                             supplied merchant ids (issue #621).
+   */
   async searchByPhoneNumber(
     phoneNumber: string,
     limit = 50,
     offset = 0,
+    merchantIds: string[] = [],
   ): Promise<{ transactions: Transaction[]; total: number }> {
     const capped = Math.min(Math.max(limit, 1), 100);
     const off = Math.max(offset, 0);
 
+    const normalized = phoneNumber.replace(/^\+/, "");
+    const params: unknown[] = [hashSearchValue(normalized)];
+
+    let merchantClause = "";
+    if (merchantIds.length > 0) {
+      params.push(merchantIds);
+      merchantClause = `AND merchant_id = ANY($${params.length}::uuid[])`;
+    }
+
+    params.push(capped, off);
+    const limitParam = params.length - 1;
+    const offsetParam = params.length;
+
     const result = await queryRead(
-      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}, COUNT(*) OVER()::int AS "total"
         FROM transactions
-        ORDER BY created_at DESC
-        LIMIT $1 OFFSET $2`,
-      [capped, off],
+        WHERE phone_search_tokens @> ARRAY[$1]::text[]
+          ${merchantClause}
+        ORDER BY created_at DESC, id DESC
+        LIMIT $${limitParam} OFFSET $${offsetParam}`,
+      params,
     );
 
     const mapped = result.rows
       .map((r: any) => mapTransactionRow(r))
-      .filter((t: any): t is Transaction => t !== null)
-      .filter((t: any) => t.phoneNumber.includes(phoneNumber));
+      .filter((t: any): t is Transaction => t !== null);
 
-    const total = mapped.length;
+    const total = Number(result.rows[0]?.total ?? 0);
 
     return { transactions: mapped, total };
   }
@@ -799,6 +1119,24 @@ export class TransactionModel {
     );
 
     return result?.rows?.[0]?.released || 0;
+  }
+
+  /**
+   * Release the idempotency key held by a transaction, e.g. once it reaches a
+   * terminal state. Returns `true` when a key was actually cleared.
+   */
+  async releaseIdempotencyKey(transactionId: string): Promise<boolean> {
+    const result = await queryWrite(
+      `UPDATE transactions
+       SET idempotency_key = NULL,
+           idempotency_expires_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1
+         AND idempotency_key IS NOT NULL`,
+      [transactionId],
+    );
+
+    return (result?.rowCount ?? 0) > 0;
   }
 
   async releaseExpiredIdempotencyKey(idempotencyKey: string): Promise<void> {
@@ -875,5 +1213,53 @@ export class TransactionModel {
         id,
       ],
     );
+  }
+
+  /**
+   * Store the provider-issued confirmation reference on a transaction.
+   *
+   * Issue #643 – after a withdrawal the mobile-money provider returns a
+   * reference (e.g. MTN `financialTransactionId`).  Persisting it in
+   * `provider_reference` enables bidirectional reconciliation: we can look up
+   * a ProxyPay transaction by the provider's own reference and vice-versa.
+   *
+   * @param id              Internal ProxyPay transaction ID
+   * @param providerReference  Provider-issued confirmation / transaction ID
+   */
+  async updateProviderReference(
+    id: string,
+    providerReference: string,
+  ): Promise<Transaction | null> {
+    const result = await queryWrite(
+      `UPDATE transactions
+       SET provider_reference = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2
+       RETURNING ${TRANSACTION_SELECT_COLUMNS}`,
+      [providerReference, id],
+    );
+
+    return mapTransactionRow(result.rows[0]);
+  }
+
+  /**
+   * Look up a transaction by the provider-issued reference.
+   *
+   * Enables reconciliation workflows to map a provider confirmation back to
+   * the corresponding internal ProxyPay transaction.
+   *
+   * @param providerReference  Provider-issued confirmation / transaction ID
+   */
+  async findByProviderReference(
+    providerReference: string,
+  ): Promise<Transaction | null> {
+    const result = await queryRead(
+      `SELECT ${TRANSACTION_SELECT_COLUMNS}
+       FROM transactions
+       WHERE provider_reference = $1
+       LIMIT 1`,
+      [providerReference],
+    );
+
+    return mapTransactionRow(result.rows[0]);
   }
 }

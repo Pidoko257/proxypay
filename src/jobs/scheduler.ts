@@ -13,7 +13,9 @@ import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
 import { runProviderHealthCheckJob } from "./providerHealthCheck";
+import { runProviderTokenWatchdogJob } from "./providerTokenWatchdog";
 import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
+import { runTranslationGapDetectionJob } from "./translationGapDetectionJob";
 import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
 import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
 import { runDailyProviderReconciliation } from "./providerReconciliationJob";
@@ -27,13 +29,24 @@ import {
   INDEX_BLOAT_MONITOR_ENABLED,
   LEDGER_INTEGRITY_CRON,
   LEDGER_INTEGRITY_JOB_ENABLED,
+  DB_OPTIMIZATION_CRON,
+  DB_OPTIMIZATION_JOB_ENABLED,
 } from "../config/env";
 import { runIndexReindexJob } from "./indexReindexJob";
 import { runIndexBloatMonitorJob } from "./indexBloatMonitorJob";
 import { runLedgerIntegrityJob } from "./ledgerIntegrityJob";
+import { runDatabaseOptimizationJob } from "./databaseOptimizationJob";
+import { runMlFraudTrainingJob } from "./mlFraudTrainingJob";
 import { runSanctionSyncJob } from "./sanctionSyncJob";
 import { runRetentionPurgeJob } from "./retentionPurgeJob";
+import { runTravelRuleAuditReportJob } from "./travelRuleAuditReportJob";
+import { runRedisKeyExpirationMonitorJob } from "./redisKeyExpirationJob";
+import { runIdempotencyCleanupJob } from "./idempotencyCleanupJob";
+import { runNotificationHealthCheckJob } from "./notificationHealthCheckJob";
+import { runComplianceExpiryAlertJob } from "./complianceExpiryAlertJob";
+import { runProviderSessionRefreshJob } from "./providerSessionRefreshJob";
 import { startNotificationWorker } from "../workers/notificationWorker";
+import logger from "../utils/logger";
 
 interface JobConfig {
   name: string;
@@ -44,6 +57,7 @@ interface JobConfig {
 const JOBS: JobConfig[] = [
   {
     name: "sanction-sync",
+    critical: true,
     // Daily at 1:00 AM - syncs internal sanction list with global lists
     schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
     handler: runSanctionSyncJob,
@@ -80,6 +94,7 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "balance-monitor",
+    critical: true,
     // Every 5 minutes - monitors hot wallet balances
     schedule: process.env.BALANCE_MONITOR_CRON || "*/5 * * * *",
     handler: runBalanceMonitorJob,
@@ -92,12 +107,14 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "fee-bump",
+    critical: true,
     // Every 30 seconds - monitors and bumps fees for stuck transactions
     schedule: process.env.FEE_BUMP_CRON || "*/30 * * * * *",
     handler: runFeeBumpJob,
   },
   {
     name: "sep31-fee-bump",
+    critical: true,
     // Every 30 seconds - bumps fees for stuck SEP-31 transactions
     schedule: process.env.SEP31_FEE_BUMP_CRON || "*/30 * * * * *",
     handler: runSep31FeeBumpJob,
@@ -115,10 +132,25 @@ const JOBS: JobConfig[] = [
     handler: runProviderHealthCheckJob,
   },
   {
+    name: "provider-token-watchdog",
+    // Every 5 minutes - detects expired/revoked provider credentials and dead
+    // or stale accounting OAuth tokens before they interrupt service
+    schedule: process.env.PROVIDER_TOKEN_WATCHDOG_CRON || "*/5 * * * *",
+    handler: runProviderTokenWatchdogJob,
+  },
+  {
     name: "provider-reconciliation",
+    critical: true,
     // Daily at 4:00 AM - runs automated reconciliation against provider CSV reports
     schedule: process.env.PROVIDER_RECONCILIATION_CRON || "0 4 * * *",
     handler: runDailyProviderReconciliation,
+  },
+  {
+    name: "dispute-sla",
+    // Every hour - monitors dispute SLA compliance, applies auto-escalation rules,
+    // and escalates overdue disputes
+    schedule: process.env.DISPUTE_SLA_CRON || "0 * * * *",
+    handler: runDisputeSlaJob,
   },
   {
     name: "monthly-invoice",
@@ -136,6 +168,17 @@ const JOBS: JobConfig[] = [
         },
       ]
     : []),
+  ...(DB_OPTIMIZATION_JOB_ENABLED
+    ? [
+        {
+          name: "database-optimization",
+          // Daily at 3:30 AM by default - vacuum/analyze, fragment and
+          // reorganize indexes, and maintain the query plan cache
+          schedule: DB_OPTIMIZATION_CRON,
+          handler: runDatabaseOptimizationJob,
+        },
+      ]
+    : []),
   {
     name: "subscriptions",
     // Default: run every minute to pick up due subscriptions
@@ -147,18 +190,21 @@ const JOBS: JobConfig[] = [
   },
   {
     name: "reconciliation",
+    critical: true,
     // Daily at 5:00 AM
     schedule: process.env.RECONCILIATION_CRON || "0 5 * * *",
     handler: runReconciliationJob,
   },
   {
     name: "database-backup",
+    critical: true,
     // Daily at 2:00 AM
     schedule: process.env.DATABASE_BACKUP_CRON || "0 2 * * *",
     handler: runDatabaseBackupJob,
   },
   {
     name: "database-backup-verify",
+    critical: true,
     // Daily at 3:00 AM
     schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
     handler: runDatabaseBackupVerifyJob,
@@ -169,21 +215,56 @@ const JOBS: JobConfig[] = [
     schedule: process.env.TRAVEL_RULE_AUDIT_REPORT_CRON || "0 5 2 * *",
     handler: runTravelRuleAuditReportJob,
   },
+  {
+    name: "redis-key-expiration-monitor",
+    // Every 10 minutes - monitors Redis memory/eviction and cleans up orphaned keys
+    schedule: process.env.REDIS_EXPIRY_MONITOR_CRON || "*/10 * * * *",
+    handler: runRedisKeyExpirationMonitorJob,
+  },
+  {
+    name: "idempotency-cleanup",
+    // Daily at 3:00 AM - purges expired idempotency keys in batches
+    schedule: process.env.IDEMPOTENCY_CLEANUP_CRON || "0 3 * * *",
+    handler: runIdempotencyCleanupJob,
+  },
+  {
+    name: "notification-health-check",
+    // Every 5 minutes - evaluates per-channel delivery health and escalates
+    // only on state transitions (#479)
+    schedule: process.env.NOTIFICATION_HEALTH_CHECK_CRON || "*/5 * * * *",
+    handler: runNotificationHealthCheckJob,
+  },
+  {
+    name: "compliance-expiry-alert",
+    // Daily at 08:00 – escalates compliance certifications that are lapsing
+    // or have lapsed (#481)
+    schedule: process.env.COMPLIANCE_EXPIRY_ALERT_CRON || "0 8 * * *",
+    handler: runComplianceExpiryAlertJob,
+  },
+  {
+    name: "provider-session-refresh",
+    // Every 5 minutes — proactively refreshes Airtel/Orange web sessions
+    // 1 hour before expiry so live requests never hit an expired session.
+    schedule: process.env.PROVIDER_SESSION_REFRESH_CRON || "*/5 * * * *",
+    handler: async () => { await runProviderSessionRefreshJob(); },
+  },
 ];
 
 async function runJob(job: JobConfig): Promise<void> {
-  console.log(`[${job.name}] Starting job`);
+  const jobLogger = logger.child({ job: job.name });
+  jobLogger.info({ job: job.name }, `[${job.name}] Starting job`);
   try {
     await job.handler();
-    console.log(`[${job.name}] Completed`);
+    jobLogger.info({ job: job.name }, `[${job.name}] Completed`);
   } catch (err) {
-    console.error(`[${job.name}] Failed:`, err);
+    jobLogger.error({ err, job: job.name }, `[${job.name}] Failed`);
   }
 }
 
 export function startJobs(): void {
   // Initialize PagerDuty integration for monitoring
   const pagerDutyService = createPagerDutyService();
+  setJobFailureAlerting(pagerDutyService);
   MonitoringService.initialize(pagerDutyService);
 
   // Start the monitoring service (checks every 30 seconds)
@@ -191,19 +272,23 @@ export function startJobs(): void {
 
   for (const job of JOBS) {
     if (!cron.validate(job.schedule)) {
-      console.error(
+      logger.error(
+        { job: job.name, schedule: job.schedule },
         `[scheduler] Invalid cron expression for "${job.name}": ${job.schedule}`,
       );
       continue;
     }
     cron.schedule(job.schedule, () => runJob(job));
-    console.log(`[scheduler] "${job.name}" scheduled - ${job.schedule}`);
+    logger.info(
+      { job: job.name, schedule: job.schedule },
+      `[scheduler] "${job.name}" scheduled - ${job.schedule}`,
+    );
   }
 
   // Start the notification worker which listens for Redis pub/sub events
   // and drives user-facing notifications in real-time. This replaces any
   // DB-polling notification mechanisms.
   startNotificationWorker().catch((err) => {
-    console.warn("Failed to start NotificationWorker:", err);
+    logger.warn({ err }, "Failed to start NotificationWorker");
   });
 }

@@ -37,6 +37,8 @@ export interface PhoneSearchResponse {
   success: boolean;
   pagination: PhoneSearchPagination;
   data: Transaction[];
+  /** Echo of the merchant filter applied to the search, when one was supplied. */
+  filters?: { merchantIds: string[] };
 }
 
 // ---------------------------------------------------------------------------
@@ -54,11 +56,11 @@ export interface MetadataSearchResponse {
 
 /**
  * Standardized error response format for all API endpoints.
- * 
+ *
  * All errors returned by the API follow this consistent structure, enabling
  * clients to handle errors programmatically while providing users with
  * messages in their preferred language.
- * 
+ *
  * **Fields:**
  * - `code`: Standard error code for programmatic error handling
  *   - Examples: INVALID_INPUT, UNAUTHORIZED, NOT_FOUND, LIMIT_EXCEEDED
@@ -78,16 +80,16 @@ export interface MetadataSearchResponse {
  *   - Additional information specific to the error type
  *   - Examples: { field: "phoneNumber" }, { balance: 100, requested: 500 }
  *   - Never included in production for security/privacy reasons
- * 
+ *
  * **Client Usage:**
- * 
+ *
  * ```typescript
  * // Programmatic error handling by code
  * try {
  *   const response = await fetch('/api/transfer', options);
  * } catch (error) {
  *   const errorResponse: ErrorResponse = error.response.data;
- *   
+ *
  *   switch (errorResponse.code) {
  *     case 'LIMIT_EXCEEDED':
  *       showLimitDialog(errorResponse.details);
@@ -100,9 +102,9 @@ export interface MetadataSearchResponse {
  *   }
  * }
  * ```
- * 
+ *
  * **Examples:**
- * 
+ *
  * Validation error (French client):
  * ```json
  * {
@@ -114,7 +116,7 @@ export interface MetadataSearchResponse {
  *   "details": { "received": "+invalid" }
  * }
  * ```
- * 
+ *
  * Authentication error (English client):
  * ```json
  * {
@@ -125,7 +127,7 @@ export interface MetadataSearchResponse {
  *   "requestId": "req-456-def"
  * }
  * ```
- * 
+ *
  * Business logic error (Portuguese client):
  * ```json
  * {
@@ -137,7 +139,7 @@ export interface MetadataSearchResponse {
  *   "details": { "dailyLimit": 5000, "currentTotal": 5000 }
  * }
  * ```
- * 
+ *
  * @interface ErrorResponse
  * @property {string} code - Standard error code for programmatic handling
  * @property {string} message - Localized error message (based on Accept-Language header)
@@ -172,10 +174,43 @@ export interface LimitExceededErrorResponse extends ErrorResponse {
 // Health
 // ---------------------------------------------------------------------------
 
+export interface ComponentHealth {
+  status: "ok" | "degraded" | "down" | "closed";
+  responseTimeMs: number;
+  error?: string;
+  details?: Record<string, unknown> | ProviderHealthSummary;
+}
+
 export interface HealthCheckResponse {
-  status: "ok";
+  status: "ok" | "degraded" | "down";
   timestamp: string;
   gitHash?: string;
+  providers?: ProviderHealthSummary;
+  components?: {
+    database: ComponentHealth;
+    redis: ComponentHealth;
+    providers: ComponentHealth;
+  };
+}
+
+export interface ProviderHealthSummary {
+  overall: "healthy" | "degraded" | "down";
+  providers: Record<string, "up" | "down" | "unknown">;
+  healthyCount: number;
+  totalCount: number;
+}
+
+export interface DetailedReadinessCheckResponse {
+  status: "ready" | "not ready";
+  timestamp: string;
+  checks: Record<string, string>;
+  components: {
+    database: ComponentHealthMetrics;
+    redis: ComponentHealthMetrics;
+    replication?: ComponentHealthMetrics & {
+      drMode?: string;
+    };
+  };
 }
 
 export interface ReadinessCheckResponse {
@@ -202,4 +237,19 @@ export interface QueueHealthResponse {
 export interface QueueActionResponse {
   success: boolean;
   message: string;
+}
+
+export interface DetailedLBHealthCheckResponse {
+  status: "ok" | "error";
+  timestamp: string;
+  components: {
+    database: ComponentHealthMetrics;
+    redis: ComponentHealthMetrics;
+    memory: ComponentHealthMetrics;
+    providers?: ComponentHealthMetrics & {
+      overall?: "healthy" | "degraded" | "down";
+      providers?: Record<string, "up" | "down" | "unknown">;
+    };
+  };
+  overallStatus: "healthy" | "degraded" | "down";
 }

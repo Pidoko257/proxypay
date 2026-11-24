@@ -25,6 +25,10 @@
 
 import { Request, Response, NextFunction } from "express";
 import { redisClient } from "../config/redis";
+import {
+  setStandardRateLimitHeaders,
+  toResetEpochSeconds,
+} from "../utils/rateLimitHeaders";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -226,6 +230,17 @@ export function createIngestRateLimiter(overrides: Partial<TokenBucketConfig> = 
     res.setHeader("X-RateLimit-Limit", cfg.capacity);
     res.setHeader("X-RateLimit-Remaining", Math.floor(tokensRemaining));
     res.setHeader("X-RateLimit-Policy", `token-bucket;r=${cfg.refillRate}/s`);
+
+    // #648: standard RateLimit-* headers. A token bucket has no fixed window,
+    // so the "reset" is the instant at which the bucket holds one full token
+    // again – the point at which a client that backs off fully can retry.
+    setStandardRateLimitHeaders(res, {
+      limit: cfg.capacity,
+      remaining: Math.floor(tokensRemaining),
+      resetEpochSeconds: toResetEpochSeconds(
+        Date.now() + Math.ceil(1000 / cfg.refillRate) * 1000,
+      ),
+    });
 
     if (!allowed) {
       const retryAfterSec = Math.ceil(1 / cfg.refillRate);

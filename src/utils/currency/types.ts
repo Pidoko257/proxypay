@@ -26,7 +26,7 @@ export interface CurrencyRule {
     /** Whether to use thousands separators */
     useGrouping: boolean;
     /** Rounding mode for decimal precision */
-    roundingMode: 'round' | 'floor' | 'ceil';
+    roundingMode: 'round' | 'floor' | 'ceil' | 'half-even' | 'bankers';
   };
   /** Validation rules */
   validation: {
@@ -73,7 +73,7 @@ export interface FormatOptions {
   /** Override maximum fraction digits */
   maximumFractionDigits?: number;
   /** Override rounding mode */
-  roundingMode?: 'round' | 'floor' | 'ceil';
+  roundingMode?: 'round' | 'floor' | 'ceil' | 'half-even' | 'bankers';
   /** Fallback value if formatting fails */
   fallbackValue?: string;
 }
@@ -193,7 +193,7 @@ export type SupportedCurrency = 'XAF' | 'GHS' | 'NGN' | 'USD';
 /**
  * Rounding modes
  */
-export type RoundingMode = 'round' | 'floor' | 'ceil';
+export type RoundingMode = 'round' | 'floor' | 'ceil' | 'half-even' | 'bankers';
 
 /**
  * Error categories

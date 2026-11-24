@@ -13,6 +13,7 @@ export enum AccountingDiscrepancyType {
   AccountNameMismatch = "account_name_mismatch",
   AccountTypeMismatch = "account_type_mismatch",
   BalanceMismatch = "balance_mismatch",
+  RoundingError = "rounding_error",
 }
 
 export enum AccountingReviewStatus {
@@ -48,6 +49,11 @@ export interface AccountingChartOfAccountsReconciliationDiscrepancy {
   reviewNotes?: string;
   reviewedBy?: string;
   reviewedAt?: Date;
+  /** For rounding errors: the actual rounding error amount */
+  roundingErrorAmount?: number;
+  /** For rounding errors: whether adjustment entry was auto-created */
+  adjustmentEntryCreated?: boolean;
+  adjustmentEntryId?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -130,12 +136,15 @@ export class AccountingChartOfAccountsReconciliationModel {
     type: AccountingDiscrepancyType;
     internalValue?: string;
     externalValue?: string;
+    roundingErrorAmount?: number;
+    adjustmentEntryId?: string;
   }): Promise<AccountingChartOfAccountsReconciliationDiscrepancy> {
     const res = await queryWrite(
       `INSERT INTO accounting_chart_of_accounts_reconciliation_discrepancies 
        (report_id, internal_account_code, internal_account_name, internal_account_type, 
-        external_account_id, external_account_name, external_account_type, type, internal_value, external_value)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        external_account_id, external_account_name, external_account_type, type, internal_value, external_value, 
+        rounding_error_amount, adjustment_entry_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
       [
         data.reportId,
@@ -148,6 +157,8 @@ export class AccountingChartOfAccountsReconciliationModel {
         data.type,
         data.internalValue ?? null,
         data.externalValue ?? null,
+        data.roundingErrorAmount ?? null,
+        data.adjustmentEntryId ?? null,
       ]
     );
     return this.mapDiscrepancyRow(res.rows[0]);
@@ -167,6 +178,15 @@ export class AccountingChartOfAccountsReconciliationModel {
        SET review_status = 'resolved', resolution_notes = $2, reviewed_by = $3, reviewed_at = NOW(), updated_at = NOW() 
        WHERE id = $1`,
       [id, notes, reviewedBy]
+    );
+  }
+
+  async updateDiscrepancyAdjustment(id: string, adjustmentEntryId: string): Promise<void> {
+    await queryWrite(
+      `UPDATE accounting_chart_of_accounts_reconciliation_discrepancies 
+       SET adjustment_entry_id = $2, updated_at = NOW() 
+       WHERE id = $1`,
+      [id, adjustmentEntryId]
     );
   }
 
@@ -200,6 +220,9 @@ export class AccountingChartOfAccountsReconciliationModel {
       reviewNotes: row.resolution_notes,
       reviewedBy: row.reviewed_by,
       reviewedAt: row.reviewed_at,
+      roundingErrorAmount: row.rounding_error_amount,
+      adjustmentEntryCreated: row.adjustment_entry_id !== null,
+      adjustmentEntryId: row.adjustment_entry_id,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
     };

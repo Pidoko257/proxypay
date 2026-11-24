@@ -281,36 +281,10 @@ export async function disconnectRedis(): Promise<void> {
 
 export { redisClient };
 
-export function createRedisStore() {
-  return new RedisStore({
-    client: redisClient,
-    prefix: "session:",
-  });
-}
+/**
+ * Atomically evaluates a velocity limit and records the event in a single
+ * Redis round-trip. Concurrent requests can no longer both observe a count
+ * below the threshold before either records its event, because the check and
+ * the increment happen
 
-export async function flushUserSessions(userId: string): Promise<void> {
-  if (!redisClient.isOpen) return;
-  
-  try {
-    // 1. Set invalidation timestamp to instantly reject active stateless JWTs
-    const now = Math.floor(Date.now() / 1000);
-    await redisClient.set(`user:${userId}:jwt_invalidated_at`, now.toString());
-
-    // 2. Scan and destroy all express-sessions tied to this user
-    let cursor = "0";
-    do {
-      const reply = await redisClient.scan(cursor, { MATCH: "session:*", COUNT: 100 });
-      cursor = String(reply.cursor);
-      
-      for (const key of reply.keys) {
-        const sessionData = await redisClient.get(key);
-        // Fast check: if the stringified session JSON contains the userId
-        if (sessionData && (sessionData.includes(`"userId":"${userId}"`) || sessionData.includes(`"user_id":"${userId}"`))) {
-          await redisClient.del(key);
-        }
-      }
-    } while (cursor !== "0");
-  } catch (error) {
-    console.error(`Redis: Failed to flush sessions for user ${userId}`, error);
-  }
-}
+/* … truncated 3284 chars — edit only what you need near the top … */

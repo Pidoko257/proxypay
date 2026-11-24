@@ -159,13 +159,26 @@ export class PushTokenModel {
   }
 
   /**
-   * Clean up old/unused tokens (older than 90 days)
+   * Clean up old/unused tokens (configurable age, defaults to 60 days)
    */
-  async cleanupOldTokens(): Promise<number> {
+  async cleanupOldTokens(maxAgeDays: number = 60): Promise<number> {
     const result = await pool.query(
       `DELETE FROM push_tokens
-       WHERE updated_at < NOW() - INTERVAL '90 days'
+       WHERE updated_at < NOW() - ($1 || ' days')::INTERVAL
        RETURNING id`,
+      [maxAgeDays],
+    );
+    return result.rowCount || 0;
+  }
+
+  /**
+   * Batch delete multiple invalid or expired tokens
+   */
+  async deleteTokens(tokens: string[]): Promise<number> {
+    if (!tokens || tokens.length === 0) return 0;
+    const result = await pool.query(
+      `DELETE FROM push_tokens WHERE token = ANY($1::text[]) RETURNING id`,
+      [tokens],
     );
     return result.rowCount || 0;
   }
@@ -336,33 +349,45 @@ export class PushNotificationService {
   }
 
   /**
-   * Check if an error indicates an invalid/expired token
+   * Check if an error indicates an invalid or expired device token
    */
-  private isInvalidTokenError(error: any): boolean {
+  public isInvalidTokenError(error: any): boolean {
     if (!error || typeof error !== "object") {
       return false;
     }
 
-    const errorCode = error.code || error.error?.code;
-    const errorMessage = error.message || error.error?.message || "";
+    const errorCode = String(error.code || error.error?.code || "").toLowerCase();
+    const errorMessage = String(error.message || error.error?.message || "").toLowerCase();
 
     const invalidTokenCodes = [
       "messaging/invalid-registration-token",
       "messaging/registration-token-not-registered",
       "messaging/invalid-argument",
-      "UNREGISTERED",
-      "NOT_FOUND",
+      "messaging/token-expired",
+      "messaging/mismatched-credential",
+      "unregistered",
+      "not_found",
+      "invalid_argument",
+      "expired",
+      "baddevicetoken",
+      "devicenotregistered",
+      "devicetokennotfortopic",
     ];
 
     const invalidTokenMessages = [
-      "The registration token is not a valid FCM registration token",
-      "The requested entity was not found",
-      "Requested entity was not found",
-      "APNS device token not set before attempting to send Apple Push Notification",
+      "not a valid fcm registration token",
+      "requested entity was not found",
+      "apns device token not set",
+      "token is expired",
+      "token has expired",
+      "bad device token",
+      "unregistered",
+      "registration-token-not-registered",
+      "device token is invalid",
     ];
 
     return (
-      invalidTokenCodes.some((code) => errorCode?.includes?.(code)) ||
+      invalidTokenCodes.some((code) => errorCode.includes(code)) ||
       invalidTokenMessages.some((msg) => errorMessage.includes(msg))
     );
   }

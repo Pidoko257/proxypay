@@ -47,6 +47,7 @@ jest.mock("../../src/websocket", () => ({
 import { queryWrite } from "../../src/config/database";
 import { CachedTransactionInvalidation } from "../../src/services/cachedTransactionService";
 import { TransactionModel, TransactionStatus } from "../../src/models/transaction";
+import { TransactionCursorError } from "../../src/utils/transactionCursor";
 
 const row = (id: string, createdAt: string) => ({
   id,
@@ -137,6 +138,23 @@ describe("TransactionModel keyset pagination", () => {
       "00000000-0000-0000-0000-000000000002",
       10,
     ]);
+  });
+
+  it("rejects a structurally unexpected cursor before running a query", async () => {
+    const after = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        t: "2026-05-02T00:00:00.000Z",
+        id: "not-a-uuid",
+      }),
+    ).toString("base64");
+
+    const model = new TransactionModel();
+    await expect(
+      model.list(10, 0, undefined, undefined, {}, { after }),
+    ).rejects.toThrow(TransactionCursorError);
+
+    expect(mockQueryRead).not.toHaveBeenCalled();
   });
 
   it("keeps status filters compatible with keyset pagination", async () => {

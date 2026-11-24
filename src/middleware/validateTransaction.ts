@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { resolveToBaseAddress } from "../stellar/muxed";
+import logger from "../utils/logger";
 
 /**
  * Validate Stellar address format (G-address or M-address).
@@ -44,7 +45,7 @@ export const validateTransaction = (
   } catch (err: unknown) {
     // Check if the error is actually a Zod validation error
     if (err instanceof z.ZodError) {
-      console.log("Validation error:", err.issues);
+      logger.warn({ issues: err.issues }, "Validation error");
 
       return res.status(400).json({
         error: "Validation failed",
@@ -53,7 +54,7 @@ export const validateTransaction = (
     }
 
     // Fallback for non-Zod errors
-    console.error("Unexpected validation error:", err);
+    logger.error({ err }, "Unexpected validation error");
     return res.status(500).json({
       error: "An internal server error occurred during validation",
     });

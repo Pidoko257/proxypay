@@ -139,6 +139,34 @@ export function authorizeObj(resourceType: string, action: string, requireOwners
 }
 
 /**
+ * Map a legacy permission string like "dispute:create" or "read:own"
+ * to a real (object, action) pair that Casbin recognizes.
+ *
+ * Legacy forms:
+ *   "<object>:<action>"  -> { type: object, action }
+ *   "<object>:own"      -> { type: object, action: "read" } (ownership-scoped read)
+ *   "<object>:all"      -> { type: object, action: "read" } (unscoped read)
+ *   "<action>"          -> { type: "*", action }
+ */
+function parseLegacyPermission(permission: string): { objType: string; act: string } {
+  if (!permission.includes(":")) {
+    return { objType: "*", act: permission };
+  }
+
+  const parts = permission.split(":");
+  const objType = parts[0];
+  const rawAct = parts[1];
+
+  // "read:own" / "read:all" are ownership scopes, not Casbin actions.
+  // Map them to the underlying read action on the object.
+  if (rawAct === "own" || rawAct === "all") {
+    return { objType, act: "read" };
+  }
+
+  return { objType, act: rawAct };
+}
+
+/**
  * Backwards compatible method: checks permissions.
  * Many legacy routes just pass 'dispute:create', 'admin:system', 'read:own'.
  * We map these old strings to Casbin checks.
@@ -158,26 +186,13 @@ export function requirePermission(permission: string) {
 
       const sub = { id: req.jwtUser.userId, role: userRole.role_name };
 
-      // Parse legacy permission like "dispute:create"
-      let objType = "*";
-      let act = permission;
-      let checkOwn = false;
-
-      if (permission.includes(":")) {
-        const parts = permission.split(":");
-        objType = parts[0]; // e.g., dispute
-        act = parts[1]; // e.g., create
-        if (parts[1] === "own" || parts[1] === "all") {
-          // It was something like 'read:own' or 'admin:system'
-          objType = parts[0];
-          act = parts[1];
-        }
-      }
+      const { objType, act } = parseLegacyPermission(permission);
 
       const allowed = await e.enforce(sub, { type: objType }, act);
 
-      // If simple policy doesn't allow, check if they are "admin" implicitly by Casbin model.
-      if (!allowed && !['admin', 'admin:system'].includes(userRole.role_name)) {
+      // Casbin is the single source of truth. Admin-level access must be
+      // expressed as a Casbin policy entry, not inferred from the role name.
+      if (!allowed) {
         return res.status(403).json({
           error: "Forbidden",
           message: `Insufficient permissions. Required: ${permission}`,
@@ -262,58 +277,6 @@ export const requireWriteAccess = authorizeObj("transaction", "write", false);
 export async function attachUserContext(req: Request, res: Response, next: NextFunction) {
   try {
     if (!req.jwtUser) return next();
-    const userRole = await getUserRole(req.jwtUser.userId);
-    if (userRole) {
-      req.userRole = userRole.role_name;
-    }
-    next();
-  } catch (error) {
-    next();
-  }
-}
+    const userR
 
-/**
- * Dynamic ABAC enforcer helper intended to be called inside route handlers.
- * It verifies if the currently logged in user has the permission to perform
- * an 'action' on the specific 'resourceObj' loaded from DB.
- */
-export async function authorizeDynamic(userId: string, role: string, resourceType: string, resourceOwnerUserId: string, action: string, checkOwner: boolean = false): Promise<boolean> {
-  const e = await initCasbin();
-  const sub = { id: userId, role: role };
-  const obj = { type: resourceType, checkOwner: checkOwner, ownerUserId: resourceOwnerUserId };
-  return await e.enforce(sub, obj, action);
-}
-
-/**
- * Issue #518: API Key Scope Middleware
- *
- * Checks that the authenticated API key has the required permission bit(s).
- * If the request was NOT authenticated via an API key (e.g. JWT), it passes through.
- *
- * Usage:
- *   router.post('/deposit', checkApiKeyScope(ApiKeyPermission.DEPOSIT), depositHandler);
- *   router.get('/transactions', checkApiKeyScope(ApiKeyPermission.READ), listHandler);
- */
-export function checkApiKeyScope(requiredPermission: number) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    // Only enforce scope when request was authenticated via API key
-    const apiKeyPermissions = (req as any).apiKeyPermissions;
-
-    // If no API key permissions are set, the request used JWT auth — pass through
-    if (apiKeyPermissions === undefined || apiKeyPermissions === null) {
-      return next();
-    }
-
-    // Check that the required permission bit(s) are set
-    if ((apiKeyPermissions & requiredPermission) !== requiredPermission) {
-      return res.status(403).json({
-        error: "Forbidden",
-        message: "API key does not have the required permission for this operation",
-        required_permission: requiredPermission,
-        granted_permissions: apiKeyPermissions,
-      });
-    }
-
-    next();
-  };
-}
+/* … truncated 2050 chars — edit only what you need near the top … */

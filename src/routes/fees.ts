@@ -5,6 +5,8 @@ import {
   CreateFeeConfigRequest,
   UpdateFeeConfigRequest,
 } from "../services/feeService";
+import { feeAuditService } from "../services/feeAuditService";
+import { layeredCache } from "../services/layeredCache";
 import { requirePermission } from "../middleware/rbac";
 import { authenticateToken } from "../middleware/auth";
 import { calculateFeeForUser } from "../utils/fees";
@@ -594,6 +596,254 @@ router.get(
         {
           success: false,
           error: "Failed to fetch audit history",
+        },
+      );
+    }
+  },
+);
+
+/**
+ * POST /api/fees/cache/invalidate
+ * Manually invalidate all fee configuration caches (admin only)
+ */
+router.post(
+  "/cache/invalidate",
+  authenticateToken,
+  requirePermission("admin:system"),
+  logFeeAction("CACHE_INVALIDATE"),
+  async (_req: Request, res: Response) => {
+    try {
+      await layeredCache.invalidateAll();
+      const version = await layeredCache.bumpVersion();
+
+      res.json({
+        success: true,
+        message: "All fee configuration caches invalidated",
+        version,
+      });
+    } catch (error: any) {
+      console.error("Cache invalidation error:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to invalidate fee caches",
+        {
+          success: false,
+          error: "Failed to invalidate fee caches",
+        },
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/fees/cache/metrics
+ * Get cache hit/miss metrics (admin only)
+ */
+router.get(
+  "/cache/metrics",
+  authenticateToken,
+  requirePermission("admin:system"),
+  logFeeAction("CACHE_METRICS"),
+  async (_req: Request, res: Response) => {
+    try {
+      const metrics = layeredCache.getMetrics();
+      const version = await layeredCache.getVersion();
+
+      res.json({
+        success: true,
+        data: { ...metrics, version },
+      });
+    } catch (error: any) {
+      console.error("Cache metrics error:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch cache metrics",
+        {
+          success: false,
+          error: "Failed to fetch cache metrics",
+        },
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/fees/audit
+ * Retrieve paginated fee calculation audit records (admin only).
+ * Query params: transactionId, userId, provider, strategyId, from, to, limit, offset
+ */
+router.get(
+  "/audit",
+  authenticateToken,
+  requirePermission("admin:system"),
+  logFeeAction("GET_FEE_AUDIT"),
+  async (req: Request, res: Response) => {
+    try {
+      const {
+        transactionId,
+        userId,
+        provider,
+        strategyId,
+        from,
+        to,
+        limit,
+        offset,
+      } = req.query as Record<string, string | undefined>;
+
+      const filters = {
+        transactionId: transactionId || undefined,
+        userId: userId || undefined,
+        provider: provider || undefined,
+        strategyId: strategyId || undefined,
+        from: from ? new Date(from) : undefined,
+        to: to ? new Date(to) : undefined,
+        limit: limit ? parseInt(limit, 10) : undefined,
+        offset: offset ? parseInt(offset, 10) : undefined,
+      };
+
+      const { records, total } = await feeAuditService.getAuditRecords(filters);
+
+      res.json({
+        success: true,
+        data: records,
+        pagination: {
+          total,
+          limit: filters.limit ?? 50,
+          offset: filters.offset ?? 0,
+        },
+      });
+    } catch (error: any) {
+      console.error("Fee audit fetch error:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch fee audit records",
+        {
+          success: false,
+          error: "Failed to fetch fee audit records",
+        },
+      );
+    }
+  },
+);
+
+/**
+ * GET /api/fees/sep6/breakdown
+ * Get SEP-6 fee breakdown and analytics (admin only).
+ * Query params: from, to, assetCode, limit, offset
+ * 
+ * Returns aggregated fee revenue by asset code, transaction type, and time period.
+ */
+router.get(
+  "/sep6/breakdown",
+  authenticateToken,
+  requirePermission("admin:system"),
+  logFeeAction("GET_SEP6_FEE_BREAKDOWN"),
+  async (req: Request, res: Response) => {
+    try {
+      const { from, to, assetCode, limit = "50", offset = "0" } = req.query as Record<string, string | undefined>;
+
+      const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // default: last 30 days
+      const toDate = to ? new Date(to) : new Date();
+      const pageLimit = Math.min(parseInt(limit || "50", 10), 1000);
+      const pageOffset = parseInt(offset || "0", 10);
+
+      // Query fee audit records for SEP-6
+      const { records, total } = await feeAuditService.getAuditRecords({
+        provider: "sep6",
+        from: fromDate,
+        to: toDate,
+        limit: pageLimit,
+        offset: pageOffset,
+      });
+
+      // Aggregate fees by asset code and transaction type
+      const breakdown: Record<string, any> = {
+        totalRecords: total,
+        dateRange: { from: fromDate.toISOString(), to: toDate.toISOString() },
+        summary: {
+          totalFeeRevenue: 0,
+          totalTransactionVolume: 0,
+          averageFeePercentage: 0,
+          averageFlatFee: 0,
+          totalTransactions: records.length,
+        },
+        byAsset: {} as Record<string, any>,
+        byType: {} as Record<string, any>,
+        records: records.slice(0, 10), // Include first 10 detailed records
+      };
+
+      for (const record of records) {
+        breakdown.summary.totalFeeRevenue += record.calculatedFee;
+        breakdown.summary.totalTransactionVolume += record.inputAmount;
+
+        // Extract asset code from strategyId (format: sep6_XLM)
+        const [, asset] = record.strategyId.split("_");
+        if (asset) {
+          if (!breakdown.byAsset[asset]) {
+            breakdown.byAsset[asset] = {
+              asset,
+              feeRevenue: 0,
+              transactionVolume: 0,
+              count: 0,
+              avgFeePercentage: 0,
+            };
+          }
+          breakdown.byAsset[asset].feeRevenue += record.calculatedFee;
+          breakdown.byAsset[asset].transactionVolume += record.inputAmount;
+          breakdown.byAsset[asset].count += 1;
+          if (record.feePercentage) {
+            breakdown.byAsset[asset].avgFeePercentage = record.feePercentage;
+          }
+        }
+
+        // Extract transaction type from strategyName (format: "SEP-6 XLM Deposit" or "... Withdrawal")
+        const txType = record.strategyName.includes("Withdrawal") ? "withdrawal" : "deposit";
+        if (!breakdown.byType[txType]) {
+          breakdown.byType[txType] = {
+            type: txType,
+            feeRevenue: 0,
+            transactionVolume: 0,
+            count: 0,
+          };
+        }
+        breakdown.byType[txType].feeRevenue += record.calculatedFee;
+        breakdown.byType[txType].transactionVolume += record.inputAmount;
+        breakdown.byType[txType].count += 1;
+      }
+
+      // Calculate averages
+      if (records.length > 0) {
+        breakdown.summary.averageFeePercentage =
+          records.reduce((sum, r) => sum + (r.feePercentage || 0), 0) / records.length;
+        breakdown.summary.averageFlatFee =
+          records.reduce((sum, r) => sum + (r.flatAmount || 0), 0) / records.length;
+      }
+
+      // Apply asset filter if provided
+      if (assetCode) {
+        breakdown.records = breakdown.records.filter((r: any) =>
+          r.strategyId.includes(`_${assetCode}`)
+        );
+        breakdown.byAsset = assetCode in breakdown.byAsset ? { [assetCode]: breakdown.byAsset[assetCode] } : {};
+      }
+
+      res.json({
+        success: true,
+        data: breakdown,
+        pagination: {
+          total,
+          limit: pageLimit,
+          offset: pageOffset,
+        },
+      });
+    } catch (error: any) {
+      console.error("SEP-6 fee breakdown fetch error:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch SEP-6 fee breakdown",
+        {
+          success: false,
+          error: "Failed to fetch SEP-6 fee breakdown",
         },
       );
     }

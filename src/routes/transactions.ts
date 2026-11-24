@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import { logger } from "../utils/logger";
 import {
   cancelTransactionHandler,
   depositHandler,
@@ -27,8 +28,14 @@ import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { generateTransactionPdfBuffer } from "../services/pdfReceipt";
 import { generateShareToken, verifyShareToken } from "../utils/share";
 import { createExportRoutes } from "./export";
+import {
+  previewTransactionHandler,
+  validateTransactionPreview,
+} from "../controllers/transactionPreviewController";
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
+import { requirePermission } from "../middleware/rbac";
+import { transactionReversalService } from "../services/transactionReversalService";
 
 export const transactionRoutes = Router();
 transactionRoutes.use(createExportRoutes());
@@ -67,7 +74,7 @@ transactionRoutes.get(
 
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Failed to generate receipt PDF:", err);
+      logger.error({ err }, "Failed to generate receipt PDF");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to generate receipt PDF",
@@ -93,6 +100,14 @@ transactionRoutes.get(
       if (!transaction)
         return res.status(404).json({ error: "Transaction not found" });
 
+      // Only the transaction owner or an admin may download the invoice.
+      const requesterRole = req.userRole ?? req.jwtUser?.role;
+      const isAdmin =
+        requesterRole === "admin" || requesterRole === "super-admin";
+      if (transaction.userId !== req.jwtUser?.userId && !isAdmin) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
       if (transaction.status !== TransactionStatus.Completed)
         return res.status(400).json({
           error: "Invoice download is available only for completed transactions",
@@ -115,11 +130,14 @@ transactionRoutes.get(
 
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Failed to generate invoice PDF:", err);
+      logger.error({ err }, "Failed to generate invoice PDF");
       res.status(500).json({ error: "Failed to generate invoice PDF" });
     }
   },
 );
+
+const DEFAULT_SHARE_TOKEN_EXPIRY = 60 * 60; // 1 hour
+const MAX_SHARE_TOKEN_EXPIRY = 7 * 24 * 60 * 60; // 7 days
 
 // Create a shareable URL (public or private) for a transaction receipt
 transactionRoutes.post(
@@ -130,23 +148,31 @@ transactionRoutes.post(
   async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
-      const { expiresIn = 60 * 60 } = req.body || {};
+      const requestedExpiry = Number(
+        req.body?.expiresIn ?? DEFAULT_SHARE_TOKEN_EXPIRY,
+      );
+      // Cap the lifetime so callers can't mint effectively non-expiring links;
+      // fall back to the default for missing/invalid/non-positive values.
+      const expiresIn =
+        Number.isFinite(requestedExpiry) && requestedExpiry > 0
+          ? Math.min(requestedExpiry, MAX_SHARE_TOKEN_EXPIRY)
+          : DEFAULT_SHARE_TOKEN_EXPIRY;
       const transaction = await transactionModel.findById(id);
       if (!transaction)
         throw createError(ERROR_CODES.NOT_FOUND, "Transaction not found", {
           error: "Transaction not found",
         });
-      const token = generateShareToken(id, Number(expiresIn));
+      const token = generateShareToken(id, expiresIn);
       const host = req.get("host") || "";
       const protocol = req.protocol;
       const url = `${protocol}://${host}/api/transactions/shared/receipt/${token}`;
 
       res.json({
         url,
-        expiresAt: Math.floor(Date.now() / 1000) + Number(expiresIn),
+        expiresAt: Math.floor(Date.now() / 1000) + expiresIn,
       });
     } catch (err) {
-      console.error("Failed to create shareable receipt URL:", err);
+      logger.error({ err }, "Failed to create shareable receipt URL");
       throw createError(
         ERROR_CODES.INTERNAL_ERROR,
         "Failed to create shareable receipt URL",
@@ -182,7 +208,7 @@ transactionRoutes.get(
       );
       res.status(200).send(pdf);
     } catch (err) {
-      console.error("Invalid or expired share token:", err);
+      logger.error({ err }, "Invalid or expired share token");
       throw createError(
         ERROR_CODES.TOKEN_EXPIRED,
         "Invalid or expired share token",
@@ -194,8 +220,23 @@ transactionRoutes.get(
   },
 );
 
+// Preview a transaction before submission — simulates fees/limits, creates nothing.
+transactionRoutes.post(
+  "/preview",
+  authenticateToken,
+  checkAccountStatusStrict,
+  geoFencingMiddleware,
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  normalizeProvider,
+  validateTransactionPreview,
+  validateNetworkMiddleware,
+  previewTransactionHandler,
+);
+
 transactionRoutes.get(
   "/",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   getTransactionHistoryHandler,
@@ -203,6 +244,7 @@ transactionRoutes.get(
 
 transactionRoutes.get(
   "/search",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   searchTransactionsHandler,
@@ -252,56 +294,42 @@ transactionRoutes.post(
   withdrawHandler,
 );
 
-transactionRoutes.get(
-  "/:id",
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  getTransactionHandler,
-);
-
-transactionRoutes.post(
-  "/:id/cancel",
-  authenticateToken,
-  cancelTransactionRateLimiter,
-  TimeoutPresets.quick,
-  haltOnTimedout,
-  cancelTransactionHandler,
-);
-
+// Metadata mutation endpoints — require authentication and ownership/role guard
 transactionRoutes.patch(
   "/:id/notes",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   updateNotesHandler,
 );
 
-// Replace metadata
 transactionRoutes.put(
   "/:id/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   updateMetadataHandler,
 );
 
-// Merge metadata keys
 transactionRoutes.patch(
   "/:id/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   patchMetadataHandler,
 );
 
-// Delete metadata keys
 transactionRoutes.delete(
   "/:id/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   deleteMetadataKeysHandler,
 );
 
-// Search by metadata
 transactionRoutes.post(
   "/search/metadata",
+  authenticateToken,
   TimeoutPresets.quick,
   haltOnTimedout,
   searchByMetadataHandler,

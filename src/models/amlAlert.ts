@@ -1,5 +1,10 @@
 import { pool } from "../config/database";
 import {
+  CursorPayload,
+  buildCursorWhere,
+  decodeCursor,
+} from "../utils/pagination";
+import {
   AMLAlert,
   AMLAlertStatus,
   AMLAlertSeverity,
@@ -73,6 +78,64 @@ export class AMLAlertModel {
     return this.mapRow(result.rows[0]);
   }
 
+  /**
+   * Return every alert matching the filter (no pagination), newest first.
+   * Used for compliance reporting and SAR collation where a truncated set
+   * would be incorrect.
+   */
+  async findAll(
+    filter: Pick<AMLAlertFilter, "status" | "userId" | "severity" | "startDate" | "endDate"> = {},
+  ): Promise<AMLAlert[]> {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter.status) {
+      params.push(filter.status);
+      conditions.push(`status = $${params.length}`);
+    }
+    if (filter.userId) {
+      params.push(filter.userId);
+      conditions.push(`user_id = $${params.length}`);
+    }
+    if (filter.severity) {
+      params.push(filter.severity);
+      conditions.push(`severity = $${params.length}`);
+    }
+    if (filter.startDate) {
+      params.push(filter.startDate);
+      conditions.push(`created_at >= $${params.length}`);
+    }
+    if (filter.endDate) {
+      params.push(filter.endDate);
+      conditions.push(`created_at <= $${params.length}`);
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const query = `
+      SELECT
+        id,
+        transaction_id AS "transactionId",
+        user_id AS "userId",
+        severity,
+        status,
+        rule_hits AS "ruleHits",
+        reasons,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        reviewed_at AS "reviewedAt",
+        reviewed_by AS "reviewedBy",
+        review_notes AS "reviewNotes"
+      FROM aml_alerts
+      ${whereClause}
+      ORDER BY created_at DESC, id DESC
+    `;
+
+    const result = await pool.query(query, params);
+    return result.rows.map((row) => this.mapRow(row));
+  }
+
   async findById(id: string): Promise<AMLAlert | null> {
     const query = `
       SELECT
@@ -144,31 +207,14 @@ export class AMLAlertModel {
     const pendingReview = parseInt(pendingResult.rows[0].count, 10);
 
     // Keyset pagination processing
-    let cursorTime: Date | null = null;
-    let cursorId: string | null = null;
+    let cursorPayload: CursorPayload | null = null;
     let isReversed = false;
 
     if (filter.after) {
-      const decoded = Buffer.from(filter.after, "base64").toString("utf8");
-      const [timeStr, idStr] = decoded.split("|");
-      if (timeStr && idStr) {
-        const parsedTime = new Date(timeStr);
-        if (!isNaN(parsedTime.getTime())) {
-          cursorTime = parsedTime;
-          cursorId = idStr;
-        }
-      }
+      cursorPayload = decodeCursor(filter.after);
     } else if (filter.before) {
-      const decoded = Buffer.from(filter.before, "base64").toString("utf8");
-      const [timeStr, idStr] = decoded.split("|");
-      if (timeStr && idStr) {
-        const parsedTime = new Date(timeStr);
-        if (!isNaN(parsedTime.getTime())) {
-          cursorTime = parsedTime;
-          cursorId = idStr;
-          isReversed = true;
-        }
-      }
+      cursorPayload = decodeCursor(filter.before);
+      isReversed = true;
     }
 
     // Build conditions including keyset cursor
@@ -176,25 +222,23 @@ export class AMLAlertModel {
     const alertsParams = [...params];
     let alertsParamIndex = paramIndex;
 
-    if (cursorTime && cursorId) {
-      if (isReversed) {
-        alertsConditions.push(
-          `(created_at > $${alertsParamIndex} OR (created_at = $${alertsParamIndex} AND id > $${alertsParamIndex + 1}))`
-        );
-      } else {
-        alertsConditions.push(
-          `(created_at < $${alertsParamIndex} OR (created_at = $${alertsParamIndex} AND id < $${alertsParamIndex + 1}))`
-        );
-      }
-      alertsParams.push(cursorTime);
-      alertsParams.push(cursorId);
-      alertsParamIndex += 2;
+    if (cursorPayload) {
+      const { clause, params: cursorParams } = buildCursorWhere(cursorPayload, {
+        column: "created_at",
+        idColumn: "id",
+        order: "desc",
+        direction: isReversed ? "backward" : "forward",
+        paramOffset: alertsParamIndex,
+      });
+      alertsConditions.push(clause);
+      alertsParams.push(...cursorParams);
+      alertsParamIndex += cursorParams.length;
     }
 
     const alertsWhereClause =
       alertsConditions.length > 0 ? `WHERE ${alertsConditions.join(" AND ")}` : "";
 
-    const limit = filter.limit ?? 50;
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 100);
     const isCursorPagination = !!(filter.before || filter.after);
     const sortOrder = isReversed ? "ASC" : "DESC";
 
@@ -345,6 +389,46 @@ export class AMLAlertModel {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Persist an escalation of an existing alert (e.g. a sanction match added
+   * after the rule-based evaluation already stored the alert).
+   */
+  async updateEscalation(
+    alertId: string,
+    update: Pick<AMLAlert, "severity" | "ruleHits" | "reasons">,
+  ): Promise<AMLAlert | null> {
+    const query = `
+      UPDATE aml_alerts
+      SET
+        severity = $1,
+        rule_hits = $2,
+        reasons = $3,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $4
+      RETURNING
+        id,
+        transaction_id AS "transactionId",
+        user_id AS "userId",
+        severity,
+        status,
+        rule_hits AS "ruleHits",
+        reasons,
+        created_at AS "createdAt",
+        updated_at AS "updatedAt",
+        reviewed_at AS "reviewedAt",
+        reviewed_by AS "reviewedBy",
+        review_notes AS "reviewNotes"
+    `;
+
+    const result = await pool.query(query, [
+      update.severity,
+      JSON.stringify(update.ruleHits),
+      update.reasons,
+      alertId,
+    ]);
+    return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
   }
 
   async getReviewHistory(alertId: string): Promise<AMLReviewHistoryEntry[]> {

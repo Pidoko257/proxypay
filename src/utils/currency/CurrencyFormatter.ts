@@ -4,10 +4,11 @@
  * Wraps Intl.NumberFormat API with caching, validation, and error handling
  */
 
-import { FormatOptions, FormattingResult } from './types';
+import { FormatOptions, FormattingResult, RoundingMode } from './types';
 import { CurrencyConfig } from './CurrencyConfig';
 import { FormatterCache } from './FormatterCache';
 import { ValidationEngine } from './ValidationEngine';
+import { roundHalfEven, bankersRound, roundCurrencyBankers } from './bankersRounding';
 
 /**
  * Main Currency Formatter class providing standardized currency formatting
@@ -173,14 +174,36 @@ export class CurrencyFormatter {
   }
 
   /**
+   * Round an amount using Banker's Rounding (half-to-even) to the specified decimals.
+   * @param amount - Numeric amount to round
+   * @param decimals - Decimal places (default 2)
+   */
+  static roundBankers(amount: number, decimals: number = 2): number {
+    return roundHalfEven(amount, decimals);
+  }
+
+  /**
+   * Round an amount using Banker's Rounding according to currency precision.
+   * @param amount - Numeric amount
+   * @param currencyCode - ISO 4217 currency code
+   */
+  static roundAmountBankers(amount: number, currencyCode: string): number {
+    return roundCurrencyBankers(amount, currencyCode);
+  }
+
+  /**
    * Apply a rounding mode to an amount at a given decimal precision.
    * Uses the "exponential string" trick to avoid floating-point drift.
    */
   private static _applyRounding(
     amount: number,
     decimals: number,
-    roundingMode: 'round' | 'floor' | 'ceil'
+    roundingMode: RoundingMode
   ): number {
+    if (roundingMode === 'half-even' || roundingMode === 'bankers') {
+      return roundHalfEven(amount, decimals);
+    }
+
     // Use Number(x.toFixed()) for floor/ceil to avoid drift, then re-apply direction
     if (decimals === 0) {
       switch (roundingMode) {

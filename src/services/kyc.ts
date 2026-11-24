@@ -2,6 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { AccountingService } from './accounting';
+import logger from '../utils/logger';
 
 // KYC Provider: Entrust Identity Verification (formerly Onfido)
 // Documentation: https://documentation.identity.entrust.com/api/latest/
@@ -101,6 +102,41 @@ export interface WebhookEvent {
   };
 }
 
+// SEP-12 idempotency + audit types
+export interface Sep12CustomerUpdate {
+  /** Stable identifier for the customer (SEP-12 `id`). */
+  customerId: string;
+  /** Stable identifier for this submission, used to deduplicate provider retries. */
+  requestId: string;
+  /** SEP-12 customer fields being submitted. */
+  fields: Record<string, string>;
+  /** Optional verification status reported by the provider. */
+  status?: KYCStatus;
+}
+
+export interface Sep12DocumentUpdate {
+  customerId: string;
+  /** Stable identifier for this document submission. */
+  documentId: string;
+  /** Stable identifier for this submission, used to deduplicate provider retries. */
+  requestId: string;
+  type: DocumentType;
+  side?: 'front' | 'back';
+  filename: string;
+  data: string;
+}
+
+export interface Sep12HistoryEntry {
+  customerId: string;
+  version: number;
+  requestId: string;
+  kind: 'customer' | 'document' | 'status';
+  status?: KYCStatus;
+  fields?: Record<string, string>;
+  documentId?: string;
+  createdAt: string;
+}
+
 // Zod schemas for validation
 const CreateApplicantSchema = z.object({
   first_name: z.string().min(1),
@@ -132,48 +168,63 @@ const UploadDocumentSchema = z.object({
   data: z.string(), // Base64 encoded file data
 });
 
+const Sep12CustomerUpdateSchema = z.object({
+  customerId: z.string().min(1),
+  requestId: z.string().min(1),
+  fields: z.record(z.string()),
+  status: z.nativeEnum(KYCStatus).optional(),
+});
+
+const Sep12DocumentUpdateSchema = z.object({
+  customerId: z.string().min(1),
+  documentId: z.string().min(1),
+  requestId: z.string().min(1),
+  type: z.nativeEnum(DocumentType),
+  side: z.enum(['front', 'back']).optional(),
+  filename: z.string().min(1),
+  data: z.string().min(1),
+});
+
 export class KYCService {
   private api?: AxiosInstance;
   private db: Pool;
   private readonly baseURL: string;
+  private apiKey: string;
 
   constructor(db: Pool) {
     this.db = db;
     this.baseURL = process.env.KYC_API_URL || 'https://api.eu.onfido.com/v3.6';
-  }
-
-  private getApi(): AxiosInstance {
-    if (this.api) {
-      return this.api;
-    }
-
-    const apiKey = process.env.KYC_API_KEY || (process.env.NODE_ENV === 'test' ? 'test_key' : '');
-    if (!apiKey) {
-      throw new Error('KYC_API_KEY environment variable is required');
-    }
+    this.apiKey = process.env.KYC_API_KEY || '';
 
     this.api = axios.create({
       baseURL: this.baseURL,
       headers: {
-        'Authorization': `Token token=${apiKey}`,
+        ...(this.apiKey ? { 'Authorization': `Token token=${this.apiKey}` } : {}),
         'Content-Type': 'application/json',
       },
       timeout: 30000,
     });
 
-    // Add request/response interceptors for logging
+    // Add request/response interceptors for logging and deferred API key validation
     this.api.interceptors.request.use((config) => {
-      console.log(`KYC API Request: ${config.method?.toUpperCase()} ${config.url}`);
+      const apiKey = this.requireApiKey();
+      if (config.headers) {
+        config.headers['Authorization'] = `Token token=${apiKey}`;
+      }
+      logger.info({ method: config.method?.toUpperCase(), url: config.url }, `KYC API Request: ${config.method?.toUpperCase()} ${config.url}`);
       return config;
     });
 
     this.api.interceptors.response.use(
       (response) => {
-        console.log(`KYC API Response: ${response.status} ${response.config.url}`);
+        logger.info({ status: response.status, url: response.config.url }, `KYC API Response: ${response.status} ${response.config.url}`);
         return response;
       },
       (error) => {
-        console.error(`KYC API Error: ${error.response?.status} ${error.config?.url}`, error.response?.data);
+        logger.error(
+          { status: error.response?.status, url: error.config?.url, data: error.response?.data },
+          `KYC API Error: ${error.response?.status} ${error.config?.url}`,
+        );
         return Promise.reject(error);
       }
     );
@@ -182,13 +233,40 @@ export class KYCService {
   }
 
   /**
+   * Resolve and validate the KYC API key on the first actual KYC call rather than at module load time.
+   */
+  private requireApiKey(): string {
+    const key = this.apiKey || process.env.KYC_API_KEY || (process.env.NODE_ENV === 'test' ? 'test_key' : '');
+    if (!key) {
+      throw new Error('KYC_API_KEY environment variable is required');
+    }
+    this.apiKey = key;
+    return key;
+  }
+
+  /**
    * Create a new KYC applicant
    */
   async createApplicant(applicantData: z.infer<typeof CreateApplicantSchema>): Promise<KYCApplicant> {
+    this.requireApiKey();
     try {
       const validatedData = CreateApplicantSchema.parse(applicantData);
-      
-      const response = await this.getApi().post('/applicants', validatedData);
+
+      // Deduplication check: return existing record if same name + DOB already exists
+      const existing = await this.findDuplicateApplicant(
+        validatedData.first_name,
+        validatedData.last_name,
+        validatedData.dob,
+      );
+      if (existing) {
+        logger.info(
+          { applicantId: existing.id, firstName: validatedData.first_name, lastName: validatedData.last_name },
+          `[KYCService] Duplicate applicant detected for ${validatedData.first_name} ${validatedData.last_name} (dob: ${validatedData.dob ?? 'n/a'}) — returning existing record ${existing.id}`,
+        );
+        return existing;
+      }
+
+      const response = await this.api.post('/applicants', validatedData);
       const applicant = response.data as KYCApplicant;
 
       // Store applicant reference in database
@@ -207,6 +285,7 @@ export class KYCService {
    * Retrieve an existing applicant
    */
   async getApplicant(applicantId: string): Promise<KYCApplicant> {
+    this.requireApiKey();
     try {
       const response = await this.getApi().get(`/applicants/${applicantId}`);
       return response.data as KYCApplicant;
@@ -219,6 +298,7 @@ export class KYCService {
    * Upload a document for verification
    */
   async uploadDocument(documentData: z.infer<typeof UploadDocumentSchema>): Promise<any> {
+    this.requireApiKey();
     try {
       const validatedData = UploadDocumentSchema.parse(documentData);
       
@@ -247,6 +327,7 @@ export class KYCService {
    * Create a workflow run for comprehensive verification
    */
   async createWorkflowRun(applicantId: string, workflowId?: string): Promise<WorkflowRun> {
+    this.requireApiKey();
     try {
       const workflowData = {
         applicant_id: applicantId,
@@ -264,6 +345,7 @@ export class KYCService {
    * Generate SDK token for client-side SDK integration
    */
   async generateSDKToken(applicantId: string, applicationId: string): Promise<string> {
+    this.requireApiKey();
     try {
       const response = await this.getApi().post('/sdk_token', {
         applicant_id: applicantId,
@@ -285,16 +367,14 @@ export class KYCService {
     checks: KYCCheck[];
     reports: KYCReport[];
   }> {
+    this.requireApiKey();
     try {
-      // Get all checks for the applicant
-      const checksResponse = await this.getApi().get(`/checks?applicant_id=${applicantId}`);
+      const checksResponse = await this.api.get(`/checks?applicant_id=${applicantId}`);
       const checks = checksResponse.data.checks as KYCCheck[];
 
-      // Get all reports for the applicant
-      const reportsResponse = await this.getApi().get(`/reports?applicant_id=${applicantId}`);
+      const reportsResponse = await this.api.get(`/reports?applicant_id=${applicantId}`);
       const reports = reportsResponse.data.reports as KYCReport[];
 
-      // Determine overall status and KYC level
       const status = this.determineOverallStatus(checks, reports);
       const level = this.determineKYCLevel(checks, reports);
 
@@ -315,7 +395,7 @@ export class KYCService {
   async handleWebhook(event: WebhookEvent): Promise<void> {
     try {
       const { payload } = event;
-      
+
       switch (payload.action) {
         case 'workflow_run.completed':
           await this.handleWorkflowRunCompleted(payload.object);
@@ -324,10 +404,10 @@ export class KYCService {
           await this.handleCheckCompleted(payload.object);
           break;
         default:
-          console.log(`Unhandled webhook event: ${payload.action}`);
+          logger.info({ action: payload.action }, `Unhandled webhook event: ${payload.action}`);
       }
     } catch (error) {
-      console.error(`Failed to handle webhook: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      logger.error({ err: error }, `Failed to handle webhook: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     }
   }
@@ -342,21 +422,23 @@ export class KYCService {
         SET kyc_level = $1, updated_at = CURRENT_TIMESTAMP 
         WHERE id = $2
       `;
-      
+
       await this.db.query(query, [kycLevel, userId]);
-      
-      console.log(`Updated KYC level for user ${userId} to ${kycLevel}`);
-      // If user reached a verified level, attempt to sync contact to accounting providers (Xero)
+
+      logger.info({ userId, kycLevel }, `Updated KYC level for user ${userId} to ${kycLevel}`);
       try {
         if (kycLevel !== KYCLevel.NONE) {
           const accountingSvc = new AccountingService();
           await accountingSvc.syncContactForUser(userId);
         }
       } catch (err) {
-        console.error(`Failed to sync accounting contact after KYC update for user ${userId}: ${err instanceof Error ? err.message : String(err)}`);
+        logger.error(
+          { err, userId },
+          `Failed to sync accounting contact after KYC update for user ${userId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     } catch (error) {
-      console.error(`Failed to update user KYC level: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      logger.error({ err: error, userId, kycLevel }, `Failed to update user KYC level: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     }
   }
@@ -398,24 +480,262 @@ export class KYCService {
     return limits[kycLevel] || limits[KYCLevel.NONE];
   }
 
-  // Private helper methods
+  /**
+   * Apply a SEP-12 customer update idempotently.
+   *
+   * Provider retries carry the same `requestId`; repeated submissions are
+   * deduplicated so they do not create duplicate review work. Each accepted
+   * change is appended to a versioned history so previous state is preserved.
+   */
+  async applySep12CustomerUpdate(update: Sep12CustomerUpdate): Promise<Sep12HistoryEntry> {
+    const validated = Sep12CustomerUpdateSchema.parse(update);
+
+    const existing = await this.findSep12HistoryByRequest(validated.customerId, validated.requestId);
+    if (existing) {
+      logger.info(
+        { customerId: validated.customerId, requestId: validated.requestId, version: existing.version },
+        `[KYCService] Duplicate SEP-12 customer update for ${validated.customerId} (request ${validated.requestId}) — returning existing version ${existing.version}`,
+      );
+      return existing;
+    }
+
+    const version = await this.nextSep12Version(validated.customerId);
+    const entry: Sep12HistoryEntry = {
+      customerId: validated.customerId,
+      version,
+      requestId: validated.requestId,
+      kind: 'customer',
+      status: validated.status,
+      fields: validated.fields,
+      createdAt: new Date().toISOString(),
+    };
+
+    await this.appendSep12History(entry);
+    return entry;
+  }
+
+  /**
+   * Apply a SEP-12 document submission idempotently.
+   *
+   * Documents are keyed by `documentId` so provider retries of the same
+   * document do not create duplicate review work.
+   */
+  async applySep12DocumentUpdate(update: Sep12DocumentUpdate): Promise<Sep12HistoryEntry> {
+    const validated = Sep12DocumentUpdateSchema.parse(update);
+
+    const existing = await this.findSep12HistoryByRequest(validated.customerId, validated.requestId);
+    if (existing) {
+      logger.info(
+        { customerId: validated.customerId, requestId: validated.requestId, version: existing.version },
+        `[KYCService] Duplicate SEP-12 document update for ${validated.customerId} (request ${validated.requestId}) — returning existing version ${existing.version}`,
+      );
+      return existing;
+    }
+
+    const existingDoc = await this.findSep12HistoryByDocument(validated.customerId, validated.documentId);
+    if (existingDoc) {
+      logger.info(
+        { customerId: validated.customerId, documentId: validated.documentId, version: existingDoc.version },
+        `[KYCService] Duplicate SEP-12 document ${validated.documentId} for ${validated.customerId} — returning existing version ${existingDoc.version}`,
+      );
+      return existingDoc;
+    }
+
+    const version = await this.nextSep12Version(validated.customerId);
+    const entry: Sep12HistoryEntry = {
+      customerId: validated.customerId,
+      version,
+      requestId: validated.requestId,
+      kind: 'document',
+      documentId: validated.documentId,
+      createdAt: new Date().toISOString(),
+    };
+
+    await this.appendSep12History(entry);
+    return entry;
+  }
+
+  /**
+   * Record a verification status change for a customer, preserving history.
+   */
+  async recordSep12StatusChange(
+    customerId: string,
+    requestId: string,
+    status: KYCStatus,
+  ): Promise<Sep12HistoryEntry> {
+    const existing = await this.findSep12HistoryByRequest(customerId, requestId);
+    if (existing) {
+      return existing;
+    }
+
+    const version = await this.nextSep12Version(customerId);
+    const entry: Sep12HistoryEntry = {
+      customerId,
+      version,
+      requestId,
+      kind: 'status',
+      status,
+      createdAt: new Date().toISOString(),
+    };
+
+    await this.appendSep12History(entry);
+    return entry;
+  }
+
+  /**
+   * Retrieve the versioned history of SEP-12 changes for a customer.
+   */
+  async getSep12History(customerId: string): Promise<Sep12HistoryEntry[]> {
+    const result = await this.db.query(
+      `SELECT customer_id, version, request_id, kind, status, fields, document_id, created_at
+         FROM sep12_kyc_history
+        WHERE customer_id = $1
+        ORDER BY version ASC`,
+      [customerId],
+    );
+
+    return result.rows.map((row) => ({
+      customerId: row.customer_id,
+      version: row.version,
+      requestId: row.request_id,
+      kind: row.kind,
+      status: row.status ?? undefined,
+      fields: row.fields ?? undefined,
+      documentId: row.document_id ?? undefined,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    }));
+  }
+
+  private async findSep12HistoryByRequest(
+    customerId: string,
+    requestId: string,
+  ): Promise<Sep12HistoryEntry | null> {
+    const result = await this.db.query(
+      `SELECT customer_id, version, request_id, kind, status, fields, document_id, created_at
+         FROM sep12_kyc_history
+        WHERE customer_id = $1 AND request_id = $2
+        LIMIT 1`,
+      [customerId, requestId],
+    );
+    return result.rows.length ? this.mapSep12HistoryRow(result.rows[0]) : null;
+  }
+
+  private async findSep12HistoryByDocument(
+    customerId: string,
+    documentId: string,
+  ): Promise<Sep12HistoryEntry | null> {
+    const result = await this.db.query(
+      `SELECT customer_id, version, request_id, kind, status, fields, document_id, created_at
+         FROM sep12_kyc_history
+        WHERE customer_id = $1 AND document_id = $2
+        LIMIT 1`,
+      [customerId, documentId],
+    );
+    return result.rows.length ? this.mapSep12HistoryRow(result.rows[0]) : null;
+  }
+
+  private async nextSep12Version(customerId: string): Promise<number> {
+    const result = await this.db.query(
+      `SELECT COALESCE(MAX(version), 0) + 1 AS next_version
+         FROM sep12_kyc_history
+        WHERE customer_id = $1`,
+      [customerId],
+    );
+    return Number(result.rows[0]?.next_version ?? 1);
+  }
+
+  private async appendSep12History(entry: Sep12HistoryEntry): Promise<void> {
+    await this.db.query(
+      `INSERT INTO sep12_kyc_history
+         (customer_id, version, request_id, kind, status, fields, document_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (customer_id, request_id) DO NOTHING`,
+      [
+        entry.customerId,
+        entry.version,
+        entry.requestId,
+        entry.kind,
+        entry.status ?? null,
+        entry.fields ? JSON.stringify(entry.fields) : null,
+        entry.documentId ?? null,
+        entry.createdAt,
+      ],
+    );
+  }
+
+  private mapSep12HistoryRow(row: any): Sep12HistoryEntry {
+    return {
+      customerId: row.customer_id,
+      version: row.version,
+      requestId: row.request_id,
+      kind: row.kind,
+      status: row.status ?? undefined,
+      fields: row.fields ?? undefined,
+      documentId: row.document_id ?? undefined,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    };
+  }
+
+  private async findDuplicateApplicant(
+    firstName: string,
+    lastName: string,
+    dob?: string,
+  ): Promise<KYCApplicant | null> {
+    try {
+      const result = await this.db.query(
+        `SELECT applicant_id, first_name, last_name, dob, created_at, applicant_data
+           FROM kyc_applicants
+          WHERE lower(first_name) = lower($1)
+            AND lower(last_name) = lower($2)
+            AND ($3::text IS NULL OR dob = $3)
+          LIMIT 1`,
+        [firstName, lastName, dob ?? null],
+      );
+
+      if (!result.rows.length) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      if (row.applicant_data) {
+        return row.applicant_data as KYCApplicant;
+      }
+      return {
+        id: row.applicant_id,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        dob: row.dob ?? undefined,
+        created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+        sandbox: process.env.NODE_ENV !== 'production',
+      };
+    } catch (error) {
+      logger.error(
+        { err: error },
+        `[KYCService] findDuplicateApplicant error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+      return null;
+    }
+  }
 
   private async storeApplicantReference(applicant: KYCApplicant): Promise<void> {
     try {
-      const query = `
-        INSERT INTO kyc_applicants (id, user_id, applicant_data, created_at)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (id) DO UPDATE SET
-          applicant_data = $3,
-          updated_at = CURRENT_TIMESTAMP
-      `;
-      
-      // Note: user_id should be passed from the calling service
-      // For now, we'll store without user_id association
-      await this.db.query(query, [applicant.id, null, JSON.stringify(applicant), applicant.created_at]);
+      await this.db.query(
+        `INSERT INTO kyc_applicants (applicant_id, first_name, last_name, dob, created_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (applicant_id) DO NOTHING`,
+        [
+          applicant.id,
+          applicant.first_name,
+          applicant.last_name,
+          applicant.dob ?? null,
+          applicant.created_at,
+        ],
+      );
     } catch (error) {
-      console.error(`Failed to store applicant reference: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      // Don't throw here as this is not critical
+      logger.error(
+        { err: error, applicantId: applicant.id },
+        `Failed to store applicant reference: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
     }
   }
 
@@ -437,7 +757,7 @@ export class KYCService {
   }
 
   private determineKYCLevel(checks: KYCCheck[], reports: KYCReport[]): KYCLevel {
-    const documentReports = reports.filter(report => 
+    const documentReports = reports.filter(report =>
       report.name.includes('document') || report.name.includes('identity')
     );
 
@@ -445,7 +765,7 @@ export class KYCService {
       return KYCLevel.NONE;
     }
 
-    const hasBasicDocuments = documentReports.some(report => 
+    const hasBasicDocuments = documentReports.some(report =>
       report.status === KYCStatus.APPROVED
     );
 
@@ -454,7 +774,7 @@ export class KYCService {
     }
 
     const hasAdvancedVerification = reports.some(report =>
-      report.name.includes('facial') || 
+      report.name.includes('facial') ||
       report.name.includes('address') ||
       report.name.includes('enhanced')
     );
@@ -464,27 +784,26 @@ export class KYCService {
 
   private async handleWorkflowRunCompleted(workflowRun: any): Promise<void> {
     try {
-      // Get the applicant ID from the workflow run
       const applicantId = workflowRun.id;
-      
-      // Get verification status
       const verificationStatus = await this.getVerificationStatus(applicantId);
-      
-      // Find the associated user and update their KYC level
+
       const userQuery = `
         SELECT u.id FROM users u
         JOIN kyc_applicants ka ON u.id = ka.user_id
         WHERE ka.applicant_id = $1
       `;
-      
+
       const result = await this.db.query(userQuery, [applicantId]);
-      
+
       if (result.rows.length > 0) {
         const userId = result.rows[0].id;
         await this.updateUserKYCLevel(userId, verificationStatus.level);
       }
     } catch (error) {
-      console.error(`Failed to handle workflow run completion: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      logger.error(
+        { err: error },
+        `Failed to handle workflow run completion: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
     }
   }
 
@@ -492,22 +811,24 @@ export class KYCService {
     try {
       const applicantId = check.applicant_id;
       const verificationStatus = await this.getVerificationStatus(applicantId);
-      
-      // Find associated user and update if needed
+
       const userQuery = `
         SELECT u.id FROM users u
         JOIN kyc_applicants ka ON u.id = ka.user_id
         WHERE ka.applicant_id = $1
       `;
-      
+
       const result = await this.db.query(userQuery, [applicantId]);
-      
+
       if (result.rows.length > 0) {
         const userId = result.rows[0].id;
         await this.updateUserKYCLevel(userId, verificationStatus.level);
       }
     } catch (error) {
-      console.error(`Failed to handle check completion: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      logger.error(
+        { err: error },
+        `Failed to handle check completion: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
     }
   }
 }

@@ -85,6 +85,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: true,
         data: mockResponse.data,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -106,6 +107,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: false,
         error: mockError,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -120,6 +122,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: false,
         error: timeoutError,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -141,6 +144,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: false,
         error: authError,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -155,6 +159,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: false,
         error: networkError,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -176,6 +181,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: false,
         error: serverError,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -197,6 +203,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: false,
         error: rateLimitError,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -254,41 +261,244 @@ describe("MTNProvider", () => {
     const phoneNumber = "+256123456789";
     const amount = "1000";
 
-    it("should send payout successfully", async () => {
+    it("should send payout with SUCCESSFUL status", async () => {
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          return {
+            data: {
+              status: "SUCCESSFUL",
+              financialTransactionId: "txn-123",
+            },
+          };
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
       const result = await provider.sendPayout(phoneNumber, amount);
 
-      expect(result).toEqual({
-        success: true,
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        status: "SUCCESSFUL",
+        transactionId: "txn-123",
+        providerReference: expect.any(String),
+      });
+      // Verify that the disbursement endpoint was called with proper auth
+      const disbursementCalls = mockedAxios.post.mock.calls.filter((call) =>
+        String(call[0]).includes("/disbursement/v1_0/transfer"),
+      );
+      expect(disbursementCalls.length).toBeGreaterThan(0);
+      const lastCall = disbursementCalls[disbursementCalls.length - 1];
+      expect(lastCall[2]).toEqual(
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer token",
+            "Ocp-Apim-Subscription-Key": "test-subscription-key",
+            "X-Target-Environment": "sandbox",
+            "Content-Type": "application/json",
+          }),
+        }),
+      );
+    });
+
+    it("should send payout with ACCEPTED status (pending success)", async () => {
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          return {
+            data: {
+              status: "ACCEPTED",
+              financialTransactionId: "txn-456",
+            },
+          };
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      const result = await provider.sendPayout(phoneNumber, amount);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.status).toBe("ACCEPTED");
+    });
+
+    it("should send payout with PENDING status (still success)", async () => {
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          return {
+            data: {
+              status: "PENDING",
+              financialTransactionId: "txn-789",
+            },
+          };
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      const result = await provider.sendPayout(phoneNumber, amount);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.status).toBe("PENDING");
+    });
+
+    it("should NOT treat FAILED status as success", async () => {
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          return {
+            data: {
+              status: "FAILED",
+              errorReason: "insufficient_funds",
+            },
+          };
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      const result = await provider.sendPayout(phoneNumber, amount);
+
+      expect(result.success).toBe(false);
+      // No error field is set when the API returns a non-success status
+      // Only success: false is returned
+    });
+
+    it("should NOT treat REJECTED status as success", async () => {
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          return {
+            data: {
+              status: "REJECTED",
+              errorReason: "invalid_recipient",
+            },
+          };
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      const result = await provider.sendPayout(phoneNumber, amount);
+
+      expect(result.success).toBe(false);
+      // No error field is set when the API returns a non-success status
+      // Only success: false is returned
+    });
+
+    it("should handle API request failure", async () => {
+      const apiError = {
+        response: {
+          data: { message: "Invalid request" },
+          status: 400,
+        },
+      };
+
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          throw apiError;
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      const result = await provider.sendPayout(phoneNumber, amount);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toEqual(apiError);
+    });
+
+    it("should handle authentication failure", async () => {
+      const authError = { response: { status: 401 } };
+
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          throw authError;
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      const result = await provider.sendPayout(phoneNumber, amount);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toEqual(authError);
+    });
+
+    it("should include proper headers in disbursement request", async () => {
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "test-token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          return { data: { status: "SUCCESSFUL", financialTransactionId: "txn" } };
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      await provider.sendPayout(phoneNumber, amount);
+
+      const disbursementCall = mockedAxios.post.mock.calls.find((call) =>
+        String(call[0]).includes("/disbursement/v1_0/transfer"),
+      );
+
+      expect(disbursementCall).toBeDefined();
+      expect(disbursementCall![2]).toEqual({
+        headers: {
+          Authorization: "Bearer test-token",
+          "Ocp-Apim-Subscription-Key": "test-subscription-key",
+          "X-Target-Environment": "sandbox",
+          "Content-Type": "application/json",
+        },
       });
     });
 
-    it("should handle payout with different phone numbers", async () => {
-      const phoneNumbers = ["+256123456789", "+256987654321", "+256555555555"];
+    it("should use unique reference for each payout", async () => {
+      const callsTracked: string[] = [];
 
-      for (const phone of phoneNumbers) {
-        const result = await provider.sendPayout(phone, amount);
-        expect(result).toEqual({
-          success: true,
-        });
-      }
-    });
-
-    it("should handle payout with different amounts", async () => {
-      const amounts = ["100", "1000", "10000"];
-
-      for (const amt of amounts) {
-        const result = await provider.sendPayout(phoneNumber, amt);
-        expect(result).toEqual({
-          success: true,
-        });
-      }
-    });
-
-    it("should handle payout with empty parameters", async () => {
-      const result = await provider.sendPayout("", "");
-      expect(result).toEqual({
-        success: true,
+      mockedAxios.post.mockImplementation(async (url: string, body?: any) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          const externalId = body?.externalId;
+          callsTracked.push(externalId);
+          return {
+            data: { status: "SUCCESSFUL", financialTransactionId: "txn" },
+          };
+        }
+        throw new Error(`Unexpected URL: ${url}`);
       });
+
+      await provider.sendPayout(phoneNumber, amount);
+      await provider.sendPayout(phoneNumber, amount);
+
+      expect(callsTracked.length).toBe(2);
+      expect(callsTracked[0]).not.toBe(callsTracked[1]);
+    });
+
+    it("should handle empty status response", async () => {
+      mockedAxios.post.mockImplementation(async (url: string) => {
+        if (String(url).includes("/collection/token/")) {
+          return { data: { access_token: "token" } };
+        }
+        if (String(url).includes("/disbursement/v1_0/transfer")) {
+          return { data: { status: "" } }; // Empty status
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      const result = await provider.sendPayout(phoneNumber, amount);
+
+      expect(result.success).toBe(false);
     });
   });
 
@@ -335,6 +545,45 @@ describe("MTNProvider", () => {
           },
         },
       );
+    });
+  });
+
+  describe("checkAuth", () => {
+    it("reports success when a fresh access token can be obtained", async () => {
+      mockedAxios.post.mockResolvedValue({
+        data: { access_token: "fresh-token", expires_in: 3600 },
+      });
+
+      const result = await provider.checkAuth();
+
+      expect(result).toEqual({ success: true });
+    });
+
+    it("flags 401/403 responses as invalid credentials", async () => {
+      mockedAxios.post.mockRejectedValue({
+        response: { status: 401 },
+      });
+
+      const result = await provider.checkAuth();
+
+      expect(result.success).toBe(false);
+      expect(result.invalidCredentials).toBe(true);
+    });
+
+    it("does not flag network/5xx errors as invalid credentials", async () => {
+      mockedAxios.post.mockRejectedValue(new Error("Network error"));
+
+      const networkResult = await provider.checkAuth();
+      expect(networkResult.success).toBe(false);
+      expect(networkResult.invalidCredentials).toBe(false);
+
+      mockedAxios.post.mockRejectedValue({
+        response: { status: 500 },
+      });
+
+      const serverResult = await provider.checkAuth();
+      expect(serverResult.success).toBe(false);
+      expect(serverResult.invalidCredentials).toBe(false);
     });
   });
 
@@ -460,6 +709,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: true,
         data: null,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -473,6 +723,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: true,
         data: undefined,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
 
@@ -487,6 +738,7 @@ describe("MTNProvider", () => {
       expect(result).toEqual({
         success: false,
         error: cancelError,
+        providerResponseTimeMs: expect.any(Number),
       });
     });
   });

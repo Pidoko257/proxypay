@@ -5,6 +5,7 @@ import { getLocalizedMessage } from "../locales/messages";
 import { resolveLocale, resolveLocaleFromRequest } from "../utils/i18n";
 import logger from "../utils/logger";
 import { maskPIIDeep, maskPIIInText } from "../utils/masking";
+import { redact } from "../utils/redact";
 
 /**
  * Extended Error interface with error-specific properties.
@@ -176,6 +177,9 @@ export const errorHandler = (
   const requestId = err.requestId || (req as any).requestId || undefined;
 
   const maskedMessage = err.message ? maskPIIInText(err.message) : err.message;
+
+  // Redact sensitive credentials before logging error details
+  const redactedErr = redact(err);
 
   logger.error({
     requestId,

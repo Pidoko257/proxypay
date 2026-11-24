@@ -6,7 +6,10 @@ import {
   JWTPayload,
   generateRefreshToken,
   verifyRefreshToken,
+  createSessionBinding,
+  registerJwtSession,
 } from "../auth/jwt";
+import { v4 as uuidv4 } from "uuid";
 import { createSSORouter } from "../auth/sso";
 import { createOIDCRouter, initializeOIDCProviders } from "../auth/oidc";
 import { enforceSSOForEmployees } from "../middleware/ssoEnforcement";
@@ -22,6 +25,7 @@ import {
 import { getLockoutStatus, recordFailedAttempt } from "../auth/lockout";
 import { verifyTOTPToken, verifyBackupCode, is2FAEnabled } from "../auth/2fa";
 import { evaluateAdminLoginAnomaly } from "../services/loginAnomaly";
+import { activityTrackingService } from "../services/activityTrackingService";
 import { checkDeviceFingerprint } from "../middleware/fingerprint";
 import { validateRequest } from "../middleware/validation";
 import { hashPassword } from "../utils/password";
@@ -33,25 +37,16 @@ import {
   registerRateLimiter,
 } from "../middleware/authRateLimit";
 import { ERROR_CODES } from "../constants/errorCodes";
-import { createError } from "../middleware/errorHandler";
+import { createError, type AppError } from "../middleware/errorHandler";
+import { registerSchema } from "../validation/authSchemas";
 
 const emailService = new EmailService();
 
 export const authRoutes = Router();
 
-export const registerSchema = z.object({
-  phone_number: z.string().min(1, "phone_number is required"),
-  password: z
-    .string()
-    .min(12, "Password must be at least 12 characters")
-    .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
-    .regex(/[a-z]/, "Password must contain at least one lowercase letter")
-    .regex(/[0-9]/, "Password must contain at least one number")
-    .regex(
-      /[^A-Za-z0-9]/,
-      "Password must contain at least one special character",
-    ),
-});
+// Shared with the OpenAPI generator (src/openapi/schemas/auth.ts) so the
+// documented constraints always match what this endpoint accepts.
+export { registerSchema };
 
 /**
  * POST /api/auth/register
@@ -232,235 +227,74 @@ authRoutes.post(
         role: user.role_name || "user",
       };
 
-      const token = generateToken(payload);
-      const refreshToken = await generateRefreshToken(user.id);
+      const sessionId = uuidv4();
+      const binding = createSessionBinding(req.header("X-Device-ID"), req.get("user-agent"));
+      registerJwtSession(sessionId, binding);
+
+      const token = generateToken({ ...payload, sessionId } as JWTPayload);
+      const refreshToken = generateRefreshToken({
+        ...payload,
+        sessionId,
+      } as JWTPayload);
+
       const permissions = await getUserPermissions(user.id);
 
+      void activityTrackingService.recordActivity({
+        userId: user.id,
+        action: "login",
+        ipAddress: req.ip,
+        userAgent: req.get("user-agent"),
+      });
+
       res.json({
-        message: "Login successful",
         token,
         refreshToken,
         user: {
-          userId: user.id,
-          email: user.phone_number,
+          id: user.id,
+          phone_number: user.phone_number,
           role: user.role_name || "user",
           permissions,
         },
       });
     } catch (error) {
-      throw createError(
-        ERROR_CODES.INTERNAL_ERROR,
-        error instanceof Error ? error.message : "Unknown error",
-        { error: "Token generation failed" },
-      );
+      if (error && typeof error === "object" && "statusCode" in error) {
+        throw error;
+      }
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Login failed", {
+        error: "Login failed",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   },
 );
 
 /**
- * POST /api/auth/refresh
- *
- * Rotates refresh token, issues new access and refresh tokens, and enforces strict rotation
- */
-authRoutes.post("/refresh", async (req: Request, res: Response) => {
-  const { refreshToken } = req.body;
-  if (!refreshToken) {
-    throw createError(ERROR_CODES.MISSING_FIELD, "Refresh token is required", {
-      error: "Refresh token is required",
-    });
-  }
-  try {
-    // Verify and check for reuse
-    const decoded = await verifyRefreshToken(refreshToken);
-    // Issue new access and refresh tokens (rotate)
-    const token = generateToken({ userId: decoded.userId, email: "" }); // You may want to fetch email if needed
-    const newRefreshToken = await generateRefreshToken(
-      decoded.userId,
-      decoded.familyId,
-      decoded.tokenId,
-    );
-    res.json({
-      message: "Token rotation successful",
-      token,
-      refreshToken: newRefreshToken,
-    });
-  } catch (error) {
-    throw createError(
-      ERROR_CODES.UNAUTHORIZED,
-      error instanceof Error ? error.message : "Unknown error",
-      {
-        error: "Refresh failed",
-      },
-    );
-  }
-});
-
-/**
- * GET /api/auth/tokens
- *
- * List all active refresh token
- */
-authRoutes.get(
-  "/tokens/active/:family_id",
-  authenticateToken,
-  tokenController.findAll,
-);
-
-/**
- * DELETE /api/auth/tokens
- *
- * Delete all refresh token
- */
-authRoutes.delete(
-  "/tokens/revoke-all/:family_id",
-  authenticateToken,
-  tokenController.revokeAll,
-);
-
-/**
- * DELETE /api/auth/tokens
- *
- * Delete a specific refresh token
- */
-authRoutes.delete(
-  "/tokens/:token_id/:family_id",
-  authenticateToken,
-  tokenController.revoke,
-);
-
-/**
  * POST /api/auth/verify
  *
- * Verify a JWT token and return the decoded payload
+ * Verifies a JWT and reports whether it is valid. Requires authentication so
+ * that only the token holder can probe validity, and never returns decoded
+ * claims — only a boolean and the expiry timestamp.
  */
-authRoutes.post("/verify", (req: Request, res: Response) => {
-  const { token } = req.body;
-
-  if (!token) {
-    throw createError(
-      ERROR_CODES.MISSING_FIELD,
-      "Token is required for verification",
-      {
-        error: "Missing token",
-      },
-    );
-  }
-
-  try {
-    const payload = verifyToken(token);
-    res.json({
-      valid: true,
-      payload,
-    });
-  } catch (error) {
-    throw createError(
-      ERROR_CODES.UNAUTHORIZED,
-      error instanceof Error ? error.message : "Unknown error",
-      {
-        error: "Token verification failed",
-      },
-    );
-  }
-});
-
-/**
- * GET /api/auth/me
- *
- * Protected route that returns current user information
- * Requires valid JWT token in Authorization header
- */
-authRoutes.get(
-  "/me",
+authRoutes.post(
+  "/verify",
   authenticateToken,
   async (req: Request, res: Response) => {
-    const payload = req.jwtUser as JWTPayload;
+    const { token } = req.body as { token?: string };
 
-    if (!payload) {
-      throw createError(ERROR_CODES.MISSING_FIELD, "No token provided", {
-        error: "Access denied",
+    if (!token) {
+      throw createError(ERROR_CODES.MISSING_FIELD, "token is required", {
+        error: "Missing required fields",
       });
     }
 
     try {
-      const permissions = await getUserPermissions(payload.userId);
-
-      const cacheKey = `user:balance:stats:${payload.userId}`;
-      let balanceStats = {
-        total_deposited: "0",
-        total_withdrawn: "0",
-        current_balance: "0",
-        available_balance: "0",
-        pending_balance: "0",
-      };
-
-      if (redisClient.isOpen) {
-        const cachedStats = await redisClient.get(cacheKey);
-        if (cachedStats) {
-          try {
-            balanceStats = JSON.parse(cachedStats.toString());
-          } catch (e) {
-            console.error("Error parsing cached balance stats", e);
-          }
-        } else {
-          const transactionModel = new TransactionModel();
-          const dbStats = await transactionModel.getBalanceStatistics(
-            payload.userId,
-          );
-          if (dbStats) {
-            balanceStats = {
-              total_deposited: dbStats.total_deposited || "0",
-              total_withdrawn: dbStats.total_withdrawn || "0",
-              current_balance: dbStats.current_balance || "0",
-              available_balance: dbStats.available_balance || "0",
-              pending_balance: dbStats.pending_balance || "0",
-            };
-            await redisClient.set(cacheKey, JSON.stringify(balanceStats), {
-              EX: 3600,
-            });
-          }
-        }
-      } else {
-        const transactionModel = new TransactionModel();
-        const dbStats = await transactionModel.getBalanceStatistics(
-          payload.userId,
-        );
-        if (dbStats) {
-          balanceStats = {
-            total_deposited: dbStats.total_deposited || "0",
-            total_withdrawn: dbStats.total_withdrawn || "0",
-            current_balance: dbStats.current_balance || "0",
-            available_balance: dbStats.available_balance || "0",
-            pending_balance: dbStats.pending_balance || "0",
-          };
-        }
-      }
-
-      res.json({
-        user: {
-          userId: payload.userId,
-          email: payload.email,
-          role: payload.role,
-          permissions,
-          total_deposited: balanceStats.total_deposited,
-          total_withdrawn: balanceStats.total_withdrawn,
-          current_balance: balanceStats.current_balance,
-          available_balance: balanceStats.available_balance,
-          pending_balance: balanceStats.pending_balance,
-        },
-        tokenInfo: {
-          issuedAt: payload.iat,
-          expiresAt: payload.exp,
-        },
-      });
+      const decoded = verifyToken(token) as JWTPayload;
+      res.json({ valid: true, expiresAt: decoded.exp });
     } catch (error) {
-      throw createError(
-        ERROR_CODES.INTERNAL_ERROR,
-        "Unable to fetch user info",
-        {
-          error: "Unable to fetch user info",
-          message: error instanceof Error ? error.message : "Unknown error",
-        },
-      );
+      throw createError(ERROR_CODES.UNAUTHORIZED, "Invalid or expired token", {
+        error: "Invalid or expired token",
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   },
 );
